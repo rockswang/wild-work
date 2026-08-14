@@ -9,8 +9,8 @@ import (
 	"sort"
 	"strings"
 
-	"workbuddy2api/internal/auth"
-	"workbuddy2api/internal/upstream"
+	"github.com/rockswang/workbuddy-wild/internal/auth"
+	"github.com/rockswang/workbuddy-wild/internal/upstream"
 )
 
 type row struct {

@@ -10,7 +10,7 @@ import (
 	"sync"
 	"time"
 
-	"workbuddy2api/internal/auth"
+	"github.com/rockswang/workbuddy-wild/internal/auth"
 )
 
 // CoolKind 冷却类型。
@@ -36,14 +36,17 @@ func (k CoolKind) String() string {
 
 // Status 单个账号对外暴露的状态（脱敏）。
 type Status struct {
-	UID      string    `json:"uid"`
-	Nickname string    `json:"nickname,omitempty"`
-	Credits  int64     `json:"credits"`
-	Cooling  bool      `json:"cooling"`
-	Until    time.Time `json:"until,omitempty"`
-	Reason   string    `json:"reason,omitempty"`
-	Disabled bool      `json:"disabled"`
-	ErrCount int       `json:"err_count,omitempty"`
+	UID            string    `json:"uid"`
+	Nickname       string    `json:"nickname,omitempty"`
+	Credits        int64     `json:"credits"`
+	Cooling        bool      `json:"cooling"`
+	Until          time.Time `json:"until,omitempty"`
+	Reason         string    `json:"reason,omitempty"`
+	Disabled       bool      `json:"disabled"`
+	ErrCount       int       `json:"err_count,omitempty"`
+	LastCheckinOK  bool      `json:"last_checkin_ok,omitempty"`
+	LastCheckinAt  time.Time `json:"last_checkin_at,omitempty"`
+	LastCheckinMsg string    `json:"last_checkin_msg,omitempty"`
 }
 
 type entry struct {
@@ -53,6 +56,10 @@ type entry struct {
 	reason   string
 	until    time.Time
 	errCount int
+
+	lastCheckinOK  bool
+	lastCheckinAt  time.Time
+	lastCheckinMsg string
 }
 
 func (e *entry) healthy(now time.Time) bool {
@@ -66,13 +73,18 @@ func (e *entry) healthy(now time.Time) bool {
 }
 
 // stateFile 持久化格式。
+type accountState struct {
+	Credits        int64     `json:"credits"`
+	Disabled       bool      `json:"disabled"`
+	Reason         string    `json:"reason,omitempty"`
+	Until          time.Time `json:"until,omitempty"`
+	LastCheckinOK  bool      `json:"last_checkin_ok,omitempty"`
+	LastCheckinAt  time.Time `json:"last_checkin_at,omitempty"`
+	LastCheckinMsg string    `json:"last_checkin_msg,omitempty"`
+}
+
 type stateFile struct {
-	Accounts map[string]struct {
-		Credits  int64     `json:"credits"`
-		Disabled bool      `json:"disabled"`
-		Reason   string    `json:"reason,omitempty"`
-		Until    time.Time `json:"until,omitempty"`
-	} `json:"accounts"`
+	Accounts map[string]accountState `json:"accounts"`
 }
 
 // Pool 账号池。
@@ -198,6 +210,26 @@ func (p *Pool) ReenableIfCredits(uid string, remain int64) {
 	p.saveLocked()
 }
 
+// RecordCheckin 记录一次签到结果（含错误信息），随 state.json 持久化。
+func (p *Pool) RecordCheckin(uid string, ok bool, msg string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if e, ok := p.byUID[uid]; ok {
+		e.lastCheckinOK = ok
+		e.lastCheckinAt = time.Now()
+		e.lastCheckinMsg = msg
+	}
+	p.saveLocked()
+}
+
+// Remove 从池中移除账号（内存 + 状态文件）；auth 文件删除由调用方负责。
+func (p *Pool) Remove(uid string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	delete(p.byUID, uid)
+	p.saveLocked()
+}
+
 // NoteError 记录一次非余额/非 429 错误；达到 threshold 自动冷却 d 时长。
 func (p *Pool) NoteError(uid string, threshold int, d time.Duration) {
 	p.mu.Lock()
@@ -262,14 +294,17 @@ func (p *Pool) List() []Status {
 func (p *Pool) statusOf(uid string, e *entry) Status {
 	now := time.Now()
 	return Status{
-		UID:      uid,
-		Nickname: e.a.Nickname,
-		Credits:  e.credits,
-		Cooling:  !e.until.IsZero() && now.Before(e.until),
-		Until:    e.until,
-		Reason:   e.reason,
-		Disabled: e.disabled,
-		ErrCount: e.errCount,
+		UID:            uid,
+		Nickname:       e.a.Nickname,
+		Credits:        e.credits,
+		Cooling:        !e.until.IsZero() && now.Before(e.until),
+		Until:          e.until,
+		Reason:         e.reason,
+		Disabled:       e.disabled,
+		ErrCount:       e.errCount,
+		LastCheckinOK:  e.lastCheckinOK,
+		LastCheckinAt:  e.lastCheckinAt,
+		LastCheckinMsg: e.lastCheckinMsg,
 	}
 }
 
@@ -288,11 +323,14 @@ func (p *Pool) load() {
 	}
 	for uid, s := range sf.Accounts {
 		p.byUID[uid] = &entry{
-			a:        &auth.Auth{UID: uid}, // placeholder，Add 时会换成完整凭证
-			credits:  s.Credits,
-			disabled: s.Disabled,
-			reason:   s.Reason,
-			until:    s.Until,
+			a:              &auth.Auth{UID: uid}, // placeholder，Add 时会换成完整凭证
+			credits:        s.Credits,
+			disabled:       s.Disabled,
+			reason:         s.Reason,
+			until:          s.Until,
+			lastCheckinOK:  s.LastCheckinOK,
+			lastCheckinAt:  s.LastCheckinAt,
+			lastCheckinMsg: s.LastCheckinMsg,
 		}
 	}
 }
@@ -301,23 +339,16 @@ func (p *Pool) saveLocked() {
 	if p.stateFp == "" {
 		return
 	}
-	sf := stateFile{Accounts: map[string]struct {
-		Credits  int64     `json:"credits"`
-		Disabled bool      `json:"disabled"`
-		Reason   string    `json:"reason,omitempty"`
-		Until    time.Time `json:"until,omitempty"`
-	}{}}
+	sf := stateFile{Accounts: map[string]accountState{}}
 	for uid, e := range p.byUID {
-		sf.Accounts[uid] = struct {
-			Credits  int64     `json:"credits"`
-			Disabled bool      `json:"disabled"`
-			Reason   string    `json:"reason,omitempty"`
-			Until    time.Time `json:"until,omitempty"`
-		}{
-			Credits:  e.credits,
-			Disabled: e.disabled,
-			Reason:   e.reason,
-			Until:    e.until,
+		sf.Accounts[uid] = accountState{
+			Credits:        e.credits,
+			Disabled:       e.disabled,
+			Reason:         e.reason,
+			Until:          e.until,
+			LastCheckinOK:  e.lastCheckinOK,
+			LastCheckinAt:  e.lastCheckinAt,
+			LastCheckinMsg: e.lastCheckinMsg,
 		}
 	}
 	raw, err := json.MarshalIndent(sf, "", "  ")

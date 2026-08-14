@@ -10,9 +10,9 @@ import (
 	"testing"
 	"time"
 
-	"workbuddy2api/internal/auth"
-	"workbuddy2api/internal/pool"
-	"workbuddy2api/internal/upstream"
+	"github.com/rockswang/workbuddy-wild/internal/auth"
+	"github.com/rockswang/workbuddy-wild/internal/pool"
+	"github.com/rockswang/workbuddy-wild/internal/upstream"
 )
 
 func TestNextFire(t *testing.T) {
@@ -90,9 +90,9 @@ func TestRunCheckinReenablesCoolingAccount(t *testing.T) {
 		BillingBaseGlob: srv.URL,
 	}
 	s := New(Config{
-		Pool:          p,
-		Upstream:      up,
-		CheckinHours:  []int{9, 21},
+		Pool:           p,
+		Upstream:       up,
+		CheckinHours:   []int{9, 21},
 		KeepaliveHours: []int{22},
 	})
 	s.RunCheckinNow()
@@ -181,4 +181,45 @@ func TestCheckinErrorDoesNotCrash(t *testing.T) {
 	s.RunCheckinNow()
 	s.RunKeepaliveNow()
 	_ = errors.New("unused")
+}
+
+func TestSetCheckinHoursRoundtrip(t *testing.T) {
+	s := New(Config{})
+	s.SetCheckinHours([]int{7, 19})
+	got := s.CheckinHours()
+	if len(got) != 2 || got[0] != 7 || got[1] != 19 {
+		t.Errorf("hours=%v want [7 19]", got)
+	}
+}
+
+func TestCheckinAccountRecordsResult(t *testing.T) {
+	f := &fakeUpstream{resourceRemain: 300}
+	srv := f.server()
+	defer srv.Close()
+
+	p := pool.New("")
+	p.Add(&auth.Auth{UID: "u1", AccessToken: "at", RefreshToken: "rt", ExpiresAt: 9999999999})
+	up := &upstream.Client{
+		HTTP:            srv.Client(),
+		ChatBaseCN:      srv.URL,
+		BillingBaseCN:   srv.URL,
+		ChatBaseGlobal:  srv.URL,
+		BillingBaseGlob: srv.URL,
+	}
+	s := New(Config{Pool: p, Upstream: up})
+	res, err := s.CheckinAccount("u1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.OK || !res.HasRemain || res.Remain != 300 {
+		t.Errorf("res=%+v", res)
+	}
+	st, _ := p.Status("u1")
+	if !st.LastCheckinOK || st.LastCheckinAt.IsZero() || st.Credits != 300 {
+		t.Errorf("status=%+v", st)
+	}
+	// 未知账号报错
+	if _, err := s.CheckinAccount("nope"); err == nil {
+		t.Error("want error for unknown uid")
+	}
 }

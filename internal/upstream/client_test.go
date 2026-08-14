@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"workbuddy2api/internal/auth"
+	"github.com/rockswang/workbuddy-wild/internal/auth"
 )
 
 func TestClassify(t *testing.T) {

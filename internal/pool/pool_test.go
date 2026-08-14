@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"workbuddy2api/internal/auth"
+	"github.com/rockswang/workbuddy-wild/internal/auth"
 )
 
 func TestPickHighestCredits(t *testing.T) {
@@ -209,5 +209,19 @@ func TestRemoveMissingFromDir(t *testing.T) {
 	}
 	if _, ok := p.Status("u1"); ok {
 		t.Fatal("u1 should not exist")
+	}
+}
+
+func TestRecordCheckinAndRemove(t *testing.T) {
+	p := New("")
+	p.Add(&auth.Auth{UID: "u1"})
+	p.RecordCheckin("u1", true, "ok")
+	st, _ := p.Status("u1")
+	if !st.LastCheckinOK || st.LastCheckinAt.IsZero() {
+		t.Errorf("status=%+v", st)
+	}
+	p.Remove("u1")
+	if _, ok := p.Status("u1"); ok {
+		t.Error("account should be removed")
 	}
 }

@@ -9,9 +9,9 @@ import (
 	"testing"
 	"time"
 
-	"workbuddy2api/internal/auth"
-	"workbuddy2api/internal/pool"
-	"workbuddy2api/internal/upstream"
+	"github.com/rockswang/workbuddy-wild/internal/auth"
+	"github.com/rockswang/workbuddy-wild/internal/pool"
+	"github.com/rockswang/workbuddy-wild/internal/upstream"
 )
 
 const sseOK = "data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"created\":1753600000,\"model\":\"glm-5.2\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"你好\"}}]}\n\n" +

@@ -12,7 +12,7 @@ import (
 	"strings"
 	"time"
 
-	"workbuddy2api/internal/auth"
+	"github.com/rockswang/workbuddy-wild/internal/auth"
 )
 
 // ErrKind 错误分类，pool 据此决定冷却时长。
@@ -110,6 +110,9 @@ type apiEnvelope struct {
 // Client 上游 HTTP 客户端。Base 字段可覆盖便于测试。
 type Client struct {
 	HTTP *http.Client
+	// BillingHTTP 供账单/签到接口使用（短超时，慢网络下避免面板操作长时间假死）。
+	// 为 nil 时回退到 HTTP。
+	BillingHTTP *http.Client
 
 	ChatBaseCN      string
 	BillingBaseCN   string
@@ -126,11 +129,20 @@ func New() *Client {
 	}
 	return &Client{
 		HTTP:            &http.Client{Timeout: 120 * time.Second, Transport: tr},
+		BillingHTTP:     &http.Client{Timeout: 30 * time.Second, Transport: tr},
 		ChatBaseCN:      "https://copilot.tencent.com",
 		BillingBaseCN:   "https://www.codebuddy.cn",
 		ChatBaseGlobal:  "https://www.workbuddy.ai",
 		BillingBaseGlob: "https://www.workbuddy.ai",
 	}
+}
+
+// billingClient 返回账单接口用的 HTTP 客户端。
+func (c *Client) billingClient() *http.Client {
+	if c.BillingHTTP != nil {
+		return c.BillingHTTP
+	}
+	return c.HTTP
 }
 
 func (c *Client) chatBase(a *auth.Auth) string {
@@ -149,7 +161,16 @@ func (c *Client) billingBase(a *auth.Auth) string {
 
 // doJSON 发请求并解信封；HTTP 非 2xx 或业务 code != 0 时返回带 body 片段的 *Error。
 func (c *Client) doJSON(req *http.Request) (json.RawMessage, error) {
-	resp, err := c.HTTP.Do(req)
+	return c.doJSONWith(c.HTTP, req)
+}
+
+// doJSONBilling 用短超时账单客户端发请求。
+func (c *Client) doJSONBilling(req *http.Request) (json.RawMessage, error) {
+	return c.doJSONWith(c.billingClient(), req)
+}
+
+func (c *Client) doJSONWith(client *http.Client, req *http.Request) (json.RawMessage, error) {
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -356,7 +377,7 @@ func (c *Client) UserResource(a *auth.Auth) (remain int64, err error) {
 		return 0, err
 	}
 	BillingHeaders(req, a)
-	data, err := c.doJSON(req)
+	data, err := c.doJSONBilling(req)
 	if err != nil {
 		return 0, err
 	}
@@ -404,7 +425,7 @@ func (c *Client) DailyCheckin(a *auth.Auth) error {
 		return err
 	}
 	BillingHeaders(req, a)
-	_, err = c.doJSON(req)
+	_, err = c.doJSONBilling(req)
 	return err
 }
 

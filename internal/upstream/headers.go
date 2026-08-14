@@ -5,7 +5,7 @@ package upstream
 import (
 	"net/http"
 
-	"workbuddy2api/internal/auth"
+	"github.com/rockswang/workbuddy-wild/internal/auth"
 )
 
 const (

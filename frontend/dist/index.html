@@ -1,0 +1,98 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>WorkBuddy2API</title>
+<link rel="stylesheet" href="./style.css">
+</head>
+<body>
+<div id="app">
+
+  <!-- 头部 -->
+  <div class="header">
+    <div class="logo">W</div>
+    <div class="head-info">
+      <div class="title">WorkBuddy2API <span class="ver" id="ver"></span></div>
+      <div class="sub" id="serverLine"></div>
+    </div>
+    <button class="icon-btn" id="btnHide" title="收起（Esc）">−</button>
+  </div>
+
+  <!-- 账号 -->
+  <div class="section">
+    <div class="section-head"><span>账号 <span id="acctCount" class="muted"></span></span></div>
+    <button class="btn primary block" id="btnAdd">＋ 添加账号</button>
+    <div id="acctList" class="acct-list"></div>
+    <div id="acctEmpty" class="empty hidden">还没有账号</div>
+    <div class="acct-actions-all">
+      <button class="btn" id="btnCheckinAll">全部签到</button>
+      <button class="btn" id="btnRefreshAll">全部刷新</button>
+    </div>
+  </div>
+
+  <!-- 自动签到 -->
+  <div class="section">
+    <div class="section-head"><span>自动签到</span></div>
+    <div class="row wrap">
+      <div id="hoursBox" class="hours"></div>
+      <button class="icon-btn" id="btnAddHour" title="增加一个时间">＋</button>
+    </div>
+    <div class="hint">保活 22:00 自动 · 下次 <span id="nextCheckin"></span></div>
+  </div>
+
+  <!-- API 监听 -->
+  <div class="section">
+    <div class="section-head"><span>API 监听</span></div>
+    <div class="row">
+      <select id="selHost" class="select">
+        <option value="127.0.0.1">127.0.0.1（本机）</option>
+        <option value="0.0.0.0">0.0.0.0（全部）</option>
+        <option value="__custom__">自定义…</option>
+      </select>
+      <span class="muted">:</span>
+      <input id="inPort" class="input port grow" type="number" min="1" max="65535">
+    </div>
+    <div id="customHostRow" class="row hidden"><input id="inHost" class="input grow" placeholder="如 192.168.1.100" spellcheck="false"></div>
+    <div class="row between">
+      <span class="muted small">API-Key</span>
+      <div id="keyBox">
+        <span id="keyVal" class="key-val" title="点击修改"></span>
+      </div>
+      <div id="keyEdit" class="row hidden">
+        <input id="keyInput" class="input grow" spellcheck="false" placeholder="留空 = 不鉴权">
+      </div>
+    </div>
+  </div>
+
+  <!-- 其他 -->
+  <div class="section">
+    <div class="row between">
+      <span>开机自启</span>
+      <label class="switch"><input type="checkbox" id="chkAutostart"><span class="slider"></span></label>
+    </div>
+    <button class="btn block" id="btnLog">查看日志</button>
+  </div>
+
+  <button class="btn danger block" id="btnQuit">退出</button>
+</div>
+
+<!-- 登录覆盖层 -->
+<div class="overlay hidden" id="loginOverlay">
+  <div class="modal">
+    <div class="modal-title">添加账号</div>
+    <div class="modal-body">
+      <div id="loginMsg">已打开浏览器…</div>
+      <div class="countdown" id="loginCountdown"></div>
+    </div>
+    <div class="modal-actions">
+      <button class="btn small" id="btnCopyUrl">复制链接</button>
+      <button class="btn small danger" id="btnCancelLogin">取消</button>
+    </div>
+  </div>
+</div>
+
+<div id="toast" class="toast hidden"></div>
+
+<script src="./app.js"></script>
+</body>
+</html>

@@ -10,8 +10,8 @@ import (
 	"sync"
 	"time"
 
-	"workbuddy2api/internal/pool"
-	"workbuddy2api/internal/upstream"
+	"github.com/rockswang/workbuddy-wild/internal/pool"
+	"github.com/rockswang/workbuddy-wild/internal/upstream"
 )
 
 // Config handler 依赖。
@@ -31,6 +31,8 @@ type Config struct {
 type Handler struct {
 	cfg Config
 	mux *http.ServeMux
+
+	apiMu sync.RWMutex // 保护 cfg.APIKey（面板可运行时修改）
 }
 
 // NewHandler 构建 handler。
@@ -67,15 +69,28 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) withAuth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if h.cfg.APIKey != "" {
+		if key := h.currentAPIKey(); key != "" {
 			authz := r.Header.Get("Authorization")
-			if !strings.HasPrefix(authz, "Bearer ") || strings.TrimPrefix(authz, "Bearer ") != h.cfg.APIKey {
+			if !strings.HasPrefix(authz, "Bearer ") || strings.TrimPrefix(authz, "Bearer ") != key {
 				writeOpenAIError(w, http.StatusUnauthorized, "invalid_api_key", "missing or invalid API key")
 				return
 			}
 		}
 		next(w, r)
 	}
+}
+
+// SetAPIKey 运行时更新 API 密钥（面板调用）。
+func (h *Handler) SetAPIKey(key string) {
+	h.apiMu.Lock()
+	defer h.apiMu.Unlock()
+	h.cfg.APIKey = key
+}
+
+func (h *Handler) currentAPIKey() string {
+	h.apiMu.RLock()
+	defer h.apiMu.RUnlock()
+	return h.cfg.APIKey
 }
 
 func (h *Handler) healthz(w http.ResponseWriter, r *http.Request) {

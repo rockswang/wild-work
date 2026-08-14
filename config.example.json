@@ -1,6 +1,9 @@
 {
-  "listen": ":7863",
-  "api_key": "your-api-key-here",
+  "listen": {
+    "host": "127.0.0.1",
+    "port": 7863
+  },
+  "api_key": "WorkBuddy2API",
   "auth_dir": "./auths",
   "state_file": "./data/state.json",
   "region": "cn",

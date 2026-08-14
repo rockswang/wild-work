@@ -4,16 +4,12 @@ data/
 *.key
 *.pem
 
-# Binaries
-login
-credit
-wb2api
-signin_bin
-
 # Config with secrets (use config.example.json)
 config.json
 
 # Build artifacts
+build/bin/
+build/shot*.png
 *.tmp
 __pycache__/
 
@@ -23,4 +19,3 @@ __pycache__/
 LOOP.md
 PLAN.md
 SPEC.md
-docs/

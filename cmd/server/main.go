@@ -11,23 +11,24 @@ import (
 	"syscall"
 	"time"
 
-	"workbuddy2api/internal/auth"
-	"workbuddy2api/internal/pool"
-	"workbuddy2api/internal/scheduler"
-	"workbuddy2api/internal/server"
-	"workbuddy2api/internal/upstream"
+	"github.com/rockswang/workbuddy-wild/internal/auth"
+	"github.com/rockswang/workbuddy-wild/internal/config"
+	"github.com/rockswang/workbuddy-wild/internal/pool"
+	"github.com/rockswang/workbuddy-wild/internal/scheduler"
+	"github.com/rockswang/workbuddy-wild/internal/server"
+	"github.com/rockswang/workbuddy-wild/internal/upstream"
 )
 
 func main() {
 	cfgPath := flag.String("config", "config.json", "path to config json")
 	flag.Parse()
 
-	cfg, err := Load(*cfgPath)
+	cfg, err := config.Load(*cfgPath)
 	if err != nil {
 		// 配置文件不存在时给一次机会用纯默认 + env
 		if os.IsNotExist(err) {
 			log.Printf("config %s not found, using defaults+env", *cfgPath)
-			cfg, err = Load("")
+			cfg, err = config.Load("")
 		}
 		if err != nil {
 			log.Fatalf("load config: %v", err)
@@ -70,7 +71,7 @@ func main() {
 	go sch.Run(ctx)
 
 	srv := &http.Server{
-		Addr:              cfg.Listen,
+		Addr:              cfg.Listen.Addr(),
 		Handler:           h,
 		ReadHeaderTimeout: 30 * time.Second,
 	}
@@ -81,7 +82,7 @@ func main() {
 		_ = srv.Shutdown(shutdownCtx)
 	}()
 
-	log.Printf("workbuddy2api listening on %s (api_key=%v)", cfg.Listen, cfg.APIKey != "")
+	log.Printf("workbuddy2api listening on %s (api_key=%v)", cfg.Listen.Addr(), cfg.APIKey != "")
 	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		log.Fatalf("http: %v", err)
 	}
