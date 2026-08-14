@@ -3,6 +3,7 @@
 package winutil
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -291,6 +292,27 @@ func OpenFile(path string) error {
 func OpenWithNotepad(path string) error {
 	cmd := exec.Command("notepad.exe", path)
 	return cmd.Start()
+}
+
+// IsWebViewProfileLocked 报告 WebView2 用户数据目录是否被占用
+// （Chromium 以 SingletonLock 标记 profile 正被某个浏览器进程使用）。
+func IsWebViewProfileLocked(userDataPath string) bool {
+	_, err := os.Stat(filepath.Join(userDataPath, "SingletonLock"))
+	return err == nil
+}
+
+// KillOrphanWebViews 结束占用指定 user-data-dir 的孤儿 msedgewebview2 进程。
+// 必须在创建本进程 WebView 之前调用：此时所有带该目录的 webview 进程都是强杀残留。
+func KillOrphanWebViews(userDataPath string) {
+	escaped := strings.ReplaceAll(userDataPath, "'", "''")
+	escaped = strings.ReplaceAll(escaped, "[", "`[") // 转义 -like 通配符
+	escaped = strings.ReplaceAll(escaped, "]", "`]")
+	ps := fmt.Sprintf(
+		`Get-CimInstance Win32_Process -Filter "Name='msedgewebview2.exe'" | Where-Object { $_.CommandLine -like '*%s*' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }`,
+		escaped)
+	cmd := exec.Command("powershell.exe", "-NoProfile", "-WindowStyle", "Hidden", "-Command", ps)
+	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
+	_ = cmd.Run()
 }
 
 func fileExists(p string) bool {

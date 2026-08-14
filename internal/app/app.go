@@ -67,18 +67,21 @@ type App struct {
 	loginClient  *http.Client
 	loginStateFP string
 
+	domReadyCh chan struct{} // 前端就绪信号（ShowPanel 等待，避免白窗口）
+
 	logFile *os.File
 }
 
 // New 构建 App 并接管全局日志（写文件 + 环形缓冲 + 事件推送）。
 func New(opts Options) (*App, error) {
 	a := &App{
-		cfgPath: opts.ConfigPath,
-		cfg:     opts.Config,
-		pool:    opts.Pool,
-		up:      opts.Upstream,
-		sch:     opts.Scheduler,
-		handler: opts.Handler,
+		cfgPath:    opts.ConfigPath,
+		cfg:        opts.Config,
+		pool:       opts.Pool,
+		up:         opts.Upstream,
+		sch:        opts.Scheduler,
+		handler:    opts.Handler,
+		domReadyCh: make(chan struct{}),
 	}
 	a.loginStateFP = filepath.Join(filepath.Dir(opts.Config.StateFile), "login-state.json")
 
@@ -149,8 +152,14 @@ func (a *App) OnStartup(ctx context.Context) {
 	a.emitAccounts()
 }
 
-// OnDomReady 前端就绪回调（启动提示已提前到 main 阶段，这里不再处理）。
-func (a *App) OnDomReady(ctx context.Context) {}
+// OnDomReady 前端就绪回调：关闭 domReadyCh，通知 ShowPanel 可以弹窗。
+func (a *App) OnDomReady(ctx context.Context) {
+	select {
+	case <-a.domReadyCh:
+	default:
+		close(a.domReadyCh)
+	}
+}
 
 // ShowStartupNotice 弹出“已启动 + API 地址”提示框。
 // 由 main 在 StartServer 后立即调用（早于托盘/窗口初始化），体验即时。
@@ -225,9 +234,29 @@ func (a *App) positionPanel() {
 
 var showMu sync.Mutex // 串行化 ShowPanel（防动画/定位竞态）
 
-// ShowPanel 弹出面板（右下角上滑动效）并异步刷新数据。
-// 注意：托盘回调里必须以 go a.ShowPanel() 调用，避免阻塞托盘消息循环。
+// ShowPanel 弹出面板。前端（WebView）未就绪时先等待，避免白窗口。
 func (a *App) ShowPanel() {
+	if a.ctx == nil {
+		return
+	}
+	select {
+	case <-a.domReadyCh:
+		a.showPanelNow()
+	default:
+		// 冷启动首屏：等前端就绪再弹；90s 兜底防死等
+		go func() {
+			select {
+			case <-a.domReadyCh:
+			case <-time.After(90 * time.Second):
+			}
+			a.showPanelNow()
+		}()
+	}
+}
+
+// showPanelNow 实际显示面板（右下角上滑动效）并异步刷新数据。
+// 注意：托盘回调里必须以 go a.ShowPanel() 调用，避免阻塞托盘消息循环。
+func (a *App) showPanelNow() {
 	if a.ctx == nil {
 		return
 	}

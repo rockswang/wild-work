@@ -18,6 +18,7 @@ import (
 	"github.com/wailsapp/wails/v2"
 	"github.com/wailsapp/wails/v2/pkg/options"
 	"github.com/wailsapp/wails/v2/pkg/options/assetserver"
+	"github.com/wailsapp/wails/v2/pkg/options/windows"
 
 	"github.com/rockswang/workbuddy-wild/internal/app"
 	"github.com/rockswang/workbuddy-wild/internal/auth"
@@ -125,7 +126,23 @@ func main() {
 	// 系统托盘：单击 / 双击 / 右击 均弹主面板（无原生右键菜单）
 	go runTray(appInst)
 
-	runGUI(appInst)
+	// WebView2 用户数据目录固定在 data/webview：不随 exe 改名变化，
+	// 且启动前若有孤儿进程占用（强杀残留）先清理，避免白窗口长时间等待。
+	webviewPath := filepath.Join(filepath.Dir(mustExecutable()), "data", "webview")
+	if winutil.IsWebViewProfileLocked(webviewPath) {
+		log.Printf("检测到孤儿 WebView2 进程占用 %s，正在清理", webviewPath)
+		winutil.KillOrphanWebViews(webviewPath)
+	}
+
+	runGUI(appInst, webviewPath)
+}
+
+// mustExecutable 返回当前 exe 的绝对路径（失败时退化为相对路径）。
+func mustExecutable() string {
+	if exe, err := os.Executable(); err == nil {
+		return exe
+	}
+	return os.Args[0]
 }
 
 // fatal 记录日志并弹出 MessageBox 后退出（GUI 无控制台，错误必须可见）。
@@ -138,7 +155,7 @@ func fatal(format string, args ...any) {
 
 // runGUI 启动 wails 窗口；若窗口创建失败（无交互桌面/WebView2 异常），
 // 捕获 panic 后保持 HTTP 服务与调度器继续运行（无头兜底）。
-func runGUI(a *app.App) {
+func runGUI(a *app.App, webviewPath string) {
 	defer func() {
 		if r := recover(); r != nil {
 			log.Printf("GUI 启动失败，以无头模式继续运行: %v", r)
@@ -157,6 +174,9 @@ func runGUI(a *app.App) {
 		HideWindowOnClose: true,
 		BackgroundColour:  options.NewRGB(246, 246, 248),
 		AssetServer:       &assetserver.Options{Assets: assets},
+		Windows: &windows.Options{
+			WebviewUserDataPath: webviewPath,
+		},
 		SingleInstanceLock: &options.SingleInstanceLock{
 			UniqueId: "workbuddy2api-gui-v1",
 			OnSecondInstanceLaunch: func(d options.SecondInstanceData) {
