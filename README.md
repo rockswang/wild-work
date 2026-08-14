@@ -75,3 +75,7 @@
 ## 免责声明
 
 本项目为个人学习用途的第三方工具，与 WorkBuddy/CodeBuddy 官方无关；请遵守账号所在平台的服务条款。账号凭据仅保存在本机 `auths/` 目录。
+
+## License
+
+[MIT](LICENSE)（核心逻辑源于 [Sliverkiss/workbuddy2api](https://github.com/Sliverkiss/workbuddy2api)，同为 MIT）。
