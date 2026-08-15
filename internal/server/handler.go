@@ -4,7 +4,9 @@ package server
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"strings"
 	"sync"
@@ -121,8 +123,8 @@ var staticModels = []map[string]any{
 // dynamicModelsCache 动态模型缓存。
 var dynamicModelsCache struct {
 	sync.RWMutex
-	ids     []upstream.ModelInfo
-	fetched time.Time // 最近一次成功拉取时间
+	ids      []upstream.ModelInfo
+	fetched  time.Time // 最近一次成功拉取时间
 	lastFail time.Time // 最近一次拉取失败时间（负缓存）
 }
 
@@ -204,6 +206,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		writeOpenAIError(w, http.StatusBadRequest, "invalid_request", "read body: "+err.Error())
 		return
 	}
+	log.Printf("chat request model=%s msgs=%s", modelName(body), msgSummary(body)) // 脱敏摘要：不记录内容
 	var peek struct {
 		Stream bool `json:"stream"`
 	}
@@ -306,4 +309,51 @@ func writeOpenAIError(w http.ResponseWriter, status int, code, msg string) {
 			"code":    code,
 		},
 	})
+}
+
+// modelName 提取请求中的模型名。
+func modelName(b []byte) string {
+	var m struct {
+		Model string `json:"model"`
+	}
+	if json.Unmarshal(b, &m) == nil {
+		return m.Model
+	}
+	return "?"
+}
+
+// msgSummary 返回消息角色与字节数摘要（不包含内容）。
+func msgSummary(b []byte) string {
+	var m struct {
+		Messages []struct {
+			Role string `json:"role"`
+		} `json:"messages"`
+	}
+	if json.Unmarshal(b, &m) != nil {
+		return "?"
+	}
+	roles := make([]string, 0, len(m.Messages))
+	for _, x := range m.Messages {
+		roles = append(roles, x.Role)
+	}
+	return strings.Join(roles, ",") + "(" + fmt.Sprintf("%d", len(m.Messages)) + ")"
+}
+
+// truncateBody 截断请求体用于日志（保留结构，抹掉过长的内容）。
+func truncateBody(b []byte) string {
+	const max = 4000
+	var m map[string]any
+	if json.Unmarshal(b, &m) == nil {
+		if msgs, ok := m["messages"].([]any); ok && len(msgs) > 2 {
+			m["messages"] = msgs[:2] // 只保留前两条，控制日志体积
+		}
+		raw, err := json.Marshal(m)
+		if err == nil && len(raw) <= max {
+			return string(raw)
+		}
+	}
+	if len(b) > max {
+		return string(b[:max]) + "..."
+	}
+	return string(b)
 }

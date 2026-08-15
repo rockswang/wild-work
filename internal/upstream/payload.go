@@ -19,11 +19,31 @@ func PrepareBody(src []byte) []byte {
 	}
 	obj["stream"] = true
 	normalizeToolChoice(obj)
+	normalizeRoles(obj) // developer → system（上游对 developer 角色触发内容过滤误杀）
 	out, err := json.Marshal(obj)
 	if err != nil {
 		return src
 	}
 	return out
+}
+
+// normalizeRoles 将 OpenAI 的 developer 角色改写为 system。
+// 上游对 role=developer 的消息一律命中内容过滤（finish_reason=content_filter，
+// 返回“检测到敏感内容”），而相同内容用 system 角色则完全正常。
+func normalizeRoles(obj map[string]any) {
+	msgs, ok := obj["messages"].([]any)
+	if !ok {
+		return
+	}
+	for _, m := range msgs {
+		mm, ok := m.(map[string]any)
+		if !ok {
+			continue
+		}
+		if r, _ := mm["role"].(string); r == "developer" {
+			mm["role"] = "system"
+		}
+	}
 }
 
 // normalizeToolChoice 按上游 Go struct（string 类型）改写 OpenAI tool_choice。
