@@ -35,6 +35,7 @@ cmd/
 ```
 
 - 请求处理：`pool` 按余额挑号 → `upstream.ChatStream`（强制 `stream=true`，CN 上游 `copilot.tencent.com/v2/chat/completions`）
+- 转发层统一改写（`upstream.PrepareBody`）：强制 `stream=true`、`tool_choice` 归一化、**`role=developer` → `system`**（上游对 developer 角色误触发内容过滤，pi 等客户端对推理模型使用该角色）
 - 错误分类：余额不足 402/关键词 → 12h 硬冷却；429 → 60s；连续错误 → 10m；session 失效(12153) → 禁用
 - 调度器支持运行时改签到时间（`SetCheckinHours` + wake 通道），配置写回 `config.json`
 
