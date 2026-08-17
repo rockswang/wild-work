@@ -91,6 +91,18 @@
   </div>
 </div>
 
+<!-- 删除确认弹层 -->
+<div class="overlay hidden" id="confirmOverlay">
+  <div class="modal">
+    <div class="modal-title">删除账号</div>
+    <div class="modal-body" id="confirmMsg">确定删除该账号？</div>
+    <div class="modal-actions">
+      <button class="btn small" id="btnConfirmCancel">取消</button>
+      <button class="btn small danger" id="btnConfirmOk">删除</button>
+    </div>
+  </div>
+</div>
+
 <div id="toast" class="toast hidden"></div>
 
 <script src="./app.js"></script>

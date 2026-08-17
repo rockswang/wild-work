@@ -209,8 +209,12 @@ func (a *App) OnShutdown(ctx context.Context) {
 }
 
 // panelRect 计算面板最终位置（贴主任务栏/工作区右下角，右、下留 12px 间隙）。
+// 高度随账号数量自适应：0 账号基础高度 500，每 +1 账号增高 55（账号卡片实测约 55px），
+// 最多 4 个封顶（列表内部滚动）。退出按钮用 margin-top:auto 贴底，无需精确高度。
 func (a *App) panelRect() (x, y, pw, ph int) {
-	pw, ph = 270, 640
+	pw = 270
+	n := len(a.pool.List())
+	ph = 500 + minInt(n, 4)*55
 	_, _, waW, waH := winutil.WorkArea()
 	if int(waW) < pw {
 		pw = int(waW)
@@ -222,14 +226,16 @@ func (a *App) panelRect() (x, y, pw, ph int) {
 	return x, y, pw, ph
 }
 
-// positionPanel 把面板定位到右下角（贴任务栏）。
-func (a *App) positionPanel() {
-	if a.ctx == nil {
-		return
+func minInt(a, b int) int {
+	if a < b {
+		return a
 	}
-	fx, fy, pw, ph := a.panelRect()
-	runtime.WindowSetSize(a.ctx, pw, ph)
-	runtime.WindowSetPosition(a.ctx, fx, fy)
+	return b
+}
+
+// positionPanel 把面板定位到右下角（贴任务栏），尺寸按账号数自适应。
+func (a *App) positionPanel() {
+	a.resizePanel()
 }
 
 var showMu sync.Mutex // 串行化 ShowPanel（防动画/定位竞态）
@@ -280,7 +286,7 @@ func (a *App) showPanelNow() {
 	a.safeGo(a.RefreshAll)
 }
 
-// HidePanel 隐藏面板。
+// HidePanel 隐藏面板（点击收起按钮 / Esc）。单进程下窗口隐藏，托盘点击再显示。
 func (a *App) HidePanel() {
 	if a.ctx != nil {
 		runtime.WindowHide(a.ctx)
@@ -294,6 +300,11 @@ func (a *App) Quit() {
 	}
 }
 
+// QuitAll 退出整个程序（前端“退出”按钮调用）。单进程模式下 = Quit。
+func (a *App) QuitAll() {
+	a.Quit()
+}
+
 // ---------------------------------------------------------------------------
 // 面板数据
 // ---------------------------------------------------------------------------
@@ -301,6 +312,7 @@ func (a *App) Quit() {
 // AccountView 面板展示的账号（脱敏）。
 type AccountView struct {
 	UID            string `json:"uid"`
+	Group          string `json:"group"` // workbuddy | traework（平台图标区分）
 	Nickname       string `json:"nickname"`
 	Credits        int64  `json:"credits"`
 	Cooling        bool   `json:"cooling"`
@@ -353,6 +365,7 @@ func (a *App) accountViews() []AccountView {
 	for _, s := range statuses {
 		out = append(out, AccountView{
 			UID:            s.UID,
+			Group:          a.accountGroup(s.UID),
 			Nickname:       s.Nickname,
 			Credits:        s.Credits,
 			Cooling:        s.Cooling,
@@ -366,6 +379,18 @@ func (a *App) accountViews() []AccountView {
 		})
 	}
 	return out
+}
+
+// accountGroup 返回账号所属分组（workbuddy/traework）。
+// 依据 auth 文件路径前缀：trae-*.json → traework，workbuddy-*.json → workbuddy。
+func (a *App) accountGroup(uid string) string {
+	au := a.pool.AuthByUID(uid)
+	if au != nil && au.FilePath != "" {
+		if strings.HasPrefix(filepath.Base(au.FilePath), "trae-") {
+			return "traework"
+		}
+	}
+	return "workbuddy"
 }
 
 func (a *App) serverRunning() bool {
@@ -676,7 +701,19 @@ func (a *App) SetAutostart(on bool) error {
 func (a *App) emitAccounts() {
 	if a.ctx != nil {
 		runtime.EventsEmit(a.ctx, "accounts", a.accountViews())
+		// 账号数变化 → 面板高度自适应（重算尺寸并保持右下角位置）
+		a.resizePanel()
 	}
+}
+
+// resizePanel 按当前账号数重算面板尺寸并重定位（不打断前端交互）。
+func (a *App) resizePanel() {
+	if a.ctx == nil {
+		return
+	}
+	fx, fy, pw, ph := a.panelRect()
+	runtime.WindowSetSize(a.ctx, pw, ph)
+	runtime.WindowSetPosition(a.ctx, fx, fy)
 }
 
 func (a *App) emitLogin(phase, msg string) {

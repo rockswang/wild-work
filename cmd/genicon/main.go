@@ -15,7 +15,9 @@ import (
 
 const size = 256
 
-// drawIcon 画一个深蓝圆角方块 + 白色 "W"（两条 V 折线），返回 RGBA 图像。
+// drawIcon 画一个深蓝圆角方块 + 白色 "W"，返回 RGBA 图像。
+// W 用四笔粗线段绘制（左竖、中左斜、中右斜、右竖），笔画粗壮、间隙大，
+// 缩到 16/32px 托盘尺寸后仍能看出 W（避免缩小时中缝糊成 V）。
 func drawIcon() *image.RGBA {
 	img := image.NewRGBA(image.Rect(0, 0, size, size))
 	bg := color.RGBA{0x1f, 0x6f, 0xeb, 0xff} // 品牌蓝
@@ -31,14 +33,16 @@ func drawIcon() *image.RGBA {
 		}
 	}
 
-	// 白色 "W"：两条折线，每段用粗线绘制
-	pts := [][]float64{
-		{62, 78, 110, 178, 128, 178, 176, 78},  // 左 V
-		{78, 118, 92, 154, 118, 154, 132, 118}, // 右 V（W 的中间两个竖笔）
+	// 白色 "W"：四笔粗线段（宽 30），笔画分布均匀、中缝清晰
+	thick := 30.0
+	segments := [][4]float64{
+		{62, 70, 62, 190},   // 左竖
+		{62, 78, 128, 190},  // 中左斜（左 V 的右斜笔）
+		{128, 190, 194, 78}, // 中右斜（右 V 的左斜笔）
+		{194, 70, 194, 190}, // 右竖
 	}
-	thick := 26.0
-	for _, p := range pts {
-		drawPolyline(img, p, thick, white)
+	for _, s := range segments {
+		drawSegment(img, s[0], s[1], s[2], s[3], thick, white)
 	}
 	return img
 }
