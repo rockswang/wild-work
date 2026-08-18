@@ -12,7 +12,9 @@ import (
 	"encoding/binary"
 	"fmt"
 	"image"
+	"image/color"
 	"image/png"
+	"log"
 	"os"
 	"path/filepath"
 )
@@ -121,21 +123,9 @@ func main() {
 	if err != nil {
 		panic(err)
 	}
-	srcPath := filepath.Join(root, "icon.png")
-	srcFile, err := os.Open(srcPath)
+	src, err := loadSourceImage(root)
 	if err != nil {
-		panic("找不到 icon.png（需放在仓库根目录）：" + err.Error())
-	}
-	defer srcFile.Close()
-	srcDec, err := png.Decode(srcFile)
-	if err != nil {
-		panic("icon.png 解码失败：" + err.Error())
-	}
-	src := image.NewRGBA(srcDec.Bounds())
-	for y := 0; y < src.Bounds().Dy(); y++ {
-		for x := 0; x < src.Bounds().Dx(); x++ {
-			src.Set(x, y, srcDec.At(x, y))
-		}
+		panic(err)
 	}
 
 	trayDir := filepath.Join(root, "build")
@@ -184,4 +174,106 @@ func main() {
 		filepath.Join(icoDir, "icon.ico"),
 		filepath.Join(trayDir, "trayicon.ico"),
 		logoFP)
+}
+
+// loadSourceImage 尝试从 icon.png 加载源图；文件不存在时退回程序化绘制。
+func loadSourceImage(root string) (*image.RGBA, error) {
+	srcPath := filepath.Join(root, "icon.png")
+	srcFile, err := os.Open(srcPath)
+	if err == nil {
+		defer srcFile.Close()
+		srcDec, err := png.Decode(srcFile)
+		if err == nil {
+			src := image.NewRGBA(srcDec.Bounds())
+			for y := 0; y < src.Bounds().Dy(); y++ {
+				for x := 0; x < src.Bounds().Dx(); x++ {
+					src.Set(x, y, srcDec.At(x, y))
+				}
+			}
+			return src, nil
+		}
+	}
+	log.Println("icon.png not found, using fallback W icon")
+	return drawFallback(), nil
+}
+
+func drawFallback() *image.RGBA {
+	const sz = 256
+	img := image.NewRGBA(image.Rect(0, 0, sz, sz))
+	bg := color.RGBA{0x1f, 0x6f, 0xeb, 0xff}
+	white := color.RGBA{0xff, 0xff, 0xff, 0xff}
+	radius := sz / 5
+	for y := 0; y < sz; y++ {
+		for x := 0; x < sz; x++ {
+			if isRounded(x, y, radius, sz) {
+				img.SetRGBA(x, y, bg)
+			}
+		}
+	}
+	thick := 30.0
+	segments := [][4]float64{
+		{62, 70, 62, 190},
+		{62, 78, 128, 190},
+		{128, 190, 194, 78},
+		{194, 70, 194, 190},
+	}
+	for _, s := range segments {
+		drawSegment(img, s[0], s[1], s[2], s[3], thick, white)
+	}
+	return img
+}
+
+func isRounded(x, y, r, sz int) bool {
+	if x >= r && x < sz-r || y >= r && y < sz-r {
+		return true
+	}
+	cx, cy := 0, 0
+	switch {
+	case x < r && y < r:
+		cx, cy = r, r
+	case x >= sz-r && y < r:
+		cx, cy = sz-r-1, r
+	case x < r && y >= sz-r:
+		cx, cy = r, sz-r-1
+	case x >= sz-r && y >= sz-r:
+		cx, cy = sz-r-1, sz-r-1
+	default:
+		return true
+	}
+	dx, dy := x-cx, y-cy
+	return dx*dx+dy*dy <= r*r
+}
+
+func drawSegment(img *image.RGBA, x1, y1, x2, y2, w float64, c color.RGBA) {
+	steps := int(maxF(absF(x2-x1), absF(y2-y1))) * 2
+	dx, dy := (x2-x1)/float64(steps), (y2-y1)/float64(steps)
+	radius := w / 2
+	for i := 0; i <= steps; i++ {
+		cx, cy := x1+dx*float64(i), y1+dy*float64(i)
+		for oy := -int(radius); oy <= int(radius); oy++ {
+			for ox := -int(radius); ox <= int(radius); ox++ {
+				px, py := int(cx)+ox, int(cy)+oy
+				if px < 0 || py < 0 || px >= 256 || py >= 256 {
+					continue
+				}
+				if float64(ox*ox+oy*oy) <= radius*radius {
+					img.SetRGBA(px, py, c)
+				}
+			}
+		}
+	}
+}
+
+func maxF(a, b float64) float64 {
+	if a > b {
+		return a
+	}
+	return b
+}
+
+func absF(a float64) float64 {
+	if a < 0 {
+		return -a
+	}
+	return a
 }
