@@ -221,17 +221,17 @@ function toast(msg) {
 // 登录流程
 // ---------------------------------------------------------------------------
 
-async function startLogin() {
+async function startLogin(kind) {
   let url = "";
   try {
-    url = await Go.StartLogin();
+    url = await Go.StartLoginFor(kind || "workbuddy");
   } catch (e) {
     toast("发起登录失败：" + e);
     return;
   }
   loginURL = url;
   $("loginOverlay").classList.remove("hidden");
-  $("loginMsg").textContent = "已打开无痕浏览器，请在浏览器中完成登录…";
+  $("loginMsg").textContent = "已打开无痕浏览器，请在浏览器中完成 " + (kind === "traework" ? "TraeWork" : "WorkBuddy") + " 登录…";
   let remain = 300;
   $("loginCountdown").textContent = `剩余 ${Math.floor(remain / 60)}:${String(remain % 60).padStart(2, "0")}`;
   clearInterval(loginTimer);
@@ -278,7 +278,8 @@ async function copyLoginURL() {
 
 function bind() {
   $("btnHide").onclick = () => Go.HidePanel();
-  $("btnAdd").onclick = startLogin;
+  $("btnAddWB").onclick = () => startLogin("workbuddy");
+  $("btnAddTrae").onclick = () => startLogin("traework");
   $("btnCopyUrl").onclick = copyLoginURL;
   $("btnCancelLogin").onclick = async () => {
     await Go.CancelLogin();

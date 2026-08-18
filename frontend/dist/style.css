@@ -41,9 +41,8 @@ input, select, button { font: inherit; color: inherit; }
 /* 头部 */
 .header { display: flex; align-items: center; gap: 8px; padding-bottom: 8px; border-bottom: 1px solid var(--border); }
 .logo {
-  width: 24px; height: 24px; border-radius: 6px; background: var(--accent2);
-  display: flex; align-items: center; justify-content: center;
-  font-weight: 700; font-size: 14px; color: #fff; flex: none;
+  width: 24px; height: 24px; border-radius: 6px; flex: none;
+  object-fit: contain; display: block;
 }
 .head-info { flex: 1; min-width: 0; }
 .title { font-size: 13px; font-weight: 600; line-height: 1.3; }
@@ -74,11 +73,14 @@ input, select, button { font: inherit; color: inherit; }
 .btn:hover { background: #efeff2; }
 .btn.primary { background: var(--accent2); border-color: var(--accent2); color: #fff; }
 .btn.primary:hover { background: var(--accent); }
+.btn.primary.alt { background: #0d9488; border-color: #0d9488; }
+.btn.primary.alt:hover { background: #0f766e; }
 .btn.danger { color: var(--err); border-color: #f0c9c9; }
 .btn.danger:hover { background: #fdeeee; }
 .btn.small { padding: 2px 8px; font-size: 11px; }
 
 /* 账号列表：窗口高度按账号数自适应，超过 4 个时内部滚动 */
+.add-buttons { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
 .acct-list { display: flex; flex-direction: column; gap: 5px; margin-top: 5px; max-height: 170px; overflow-y: auto; flex-shrink: 1; min-height: 0; }
 .acct { background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 4px 8px; }
 .acct-actions-all { display: flex; gap: 6px; margin-top: 6px; }

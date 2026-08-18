@@ -1,5 +1,10 @@
-// genicon 生成构建资产：托盘图标 PNG 与 Windows 可执行文件图标 ICO。
-// 用法：go run ./cmd/genicon （在项目根目录执行，输出到 build/ 与 build/windows/）
+// genicon 从仓库根目录 icon.png 生成构建资产：
+//   - build/windows/icon.ico  ：exe 图标（多分辨率 16/32/48/64/128/256，含透明）
+//   - build/trayicon.ico      ：托盘图标（同上，主体放大更清晰）
+//   - build/logo64.png        ：前端标题栏 logo 源（再内联进 index.html）
+// 用法：go run ./cmd/genicon （在项目根目录执行）
+//
+// 图标源要求：正方形 PNG（建议 >= 512x512，带透明背景），放在仓库根目录 icon.png。
 package main
 
 import (
@@ -7,130 +12,107 @@ import (
 	"encoding/binary"
 	"fmt"
 	"image"
-	"image/color"
 	"image/png"
 	"os"
 	"path/filepath"
 )
 
-const size = 256
+// 生成 ICO 时包含的档位（从小到大，保证文件管理器/任务栏/托盘各 DPI 均清晰）
+var icoSizes = []int{16, 32, 48, 64, 128, 256}
 
-// drawIcon 画一个深蓝圆角方块 + 白色 "W"，返回 RGBA 图像。
-// W 用四笔粗线段绘制（左竖、中左斜、中右斜、右竖），笔画粗壮、间隙大，
-// 缩到 16/32px 托盘尺寸后仍能看出 W（避免缩小时中缝糊成 V）。
-func drawIcon() *image.RGBA {
-	img := image.NewRGBA(image.Rect(0, 0, size, size))
-	bg := color.RGBA{0x1f, 0x6f, 0xeb, 0xff} // 品牌蓝
-	white := color.RGBA{0xff, 0xff, 0xff, 0xff}
-
-	// 圆角矩形背景（角落透明）
-	radius := size / 5
-	for y := 0; y < size; y++ {
-		for x := 0; x < size; x++ {
-			if rounded(x, y, radius) {
-				img.SetRGBA(x, y, bg)
-			}
-		}
-	}
-
-	// 白色 "W"：四笔粗线段（宽 30），笔画分布均匀、中缝清晰
-	thick := 30.0
-	segments := [][4]float64{
-		{62, 70, 62, 190},   // 左竖
-		{62, 78, 128, 190},  // 中左斜（左 V 的右斜笔）
-		{128, 190, 194, 78}, // 中右斜（右 V 的左斜笔）
-		{194, 70, 194, 190}, // 右竖
-	}
-	for _, s := range segments {
-		drawSegment(img, s[0], s[1], s[2], s[3], thick, white)
-	}
-	return img
-}
-
-func rounded(x, y, r int) bool {
-	if x >= r && x < size-r || y >= r && y < size-r {
-		return true
-	}
-	// 判断是否落在圆角内：四个角的圆心圆外剔除
-	cx, cy := 0, 0
-	switch {
-	case x < r && y < r:
-		cx, cy = r, r
-	case x >= size-r && y < r:
-		cx, cy = size-r-1, r
-	case x < r && y >= size-r:
-		cx, cy = r, size-r-1
-	case x >= size-r && y >= size-r:
-		cx, cy = size-r-1, size-r-1
-	default:
-		return true
-	}
-	dx, dy := x-cx, y-cy
-	return dx*dx+dy*dy <= r*r
-}
-
-func drawPolyline(img *image.RGBA, pts []float64, w float64, c color.RGBA) {
-	for i := 0; i+3 < len(pts); i += 2 {
-		x1, y1, x2, y2 := pts[i], pts[i+1], pts[i+2], pts[i+3]
-		drawSegment(img, x1, y1, x2, y2, w, c)
-	}
-}
-
-// drawSegment 粗线段（逐步采样画圆）。
-func drawSegment(img *image.RGBA, x1, y1, x2, y2, w float64, c color.RGBA) {
-	steps := int(maxi(abs(x2-x1), abs(y2-y1))) * 2
-	dx, dy := (x2-x1)/float64(steps), (y2-y1)/float64(steps)
-	radius := w / 2
-	for i := 0; i <= steps; i++ {
-		cx, cy := x1+dx*float64(i), y1+dy*float64(i)
-		for oy := -int(radius); oy <= int(radius); oy++ {
-			for ox := -int(radius); ox <= int(radius); ox++ {
-				px, py := int(cx)+ox, int(cy)+oy
-				if px < 0 || py < 0 || px >= size || py >= size {
-					continue
+// cropSquare 去掉透明留白，居中裁成正方形（保留 4% 内边距，避免主体贴边）。
+func cropSquare(src *image.RGBA) *image.RGBA {
+	w, h := src.Bounds().Dx(), src.Bounds().Dy()
+	minX, minY, maxX, maxY := w, h, 0, 0
+	for y := 0; y < h; y++ {
+		for x := 0; x < w; x++ {
+			if src.RGBAAt(x, y).A > 60 {
+				if x < minX {
+					minX = x
 				}
-				if float64(ox*ox+oy*oy) <= radius*radius {
-					img.SetRGBA(px, py, c)
+				if x > maxX {
+					maxX = x
+				}
+				if y < minY {
+					minY = y
+				}
+				if y > maxY {
+					maxY = y
 				}
 			}
 		}
 	}
+	if maxX < minX {
+		return src
+	}
+	pad := int(float64(maxX-minX) * 0.04)
+	minX, minY = maxI(0, minX-pad), maxI(0, minY-pad)
+	maxX, maxY = minI(w-1, maxX+pad), minI(h-1, maxY+pad)
+	side := maxI(maxX-minX, maxY-minY)
+	c := (minX + maxX) / 2
+	cx0 := maxI(0, c-side/2)
+	return src.SubImage(image.Rect(cx0, cx0, cx0+side, cx0+side)).(*image.RGBA)
 }
 
-func maxi(vals ...float64) float64 {
-	m := vals[0]
-	for _, v := range vals[1:] {
-		if v > m {
-			m = v
+func maxI(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
+}
+
+func minI(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+// scaleImage 把 src 等比缩放（LANCZOS 近似：最近邻上采样+双线性，这里用 Draw 的默认高质量）填到 dst 正方形。
+func scaleImage(src image.Image, dst *image.RGBA) {
+	w, h := src.Bounds().Dx(), src.Bounds().Dy()
+	for y := 0; y < dst.Bounds().Dy(); y++ {
+		for x := 0; x < dst.Bounds().Dx(); x++ {
+			sx := x * w / dst.Bounds().Dx()
+			sy := y * h / dst.Bounds().Dy()
+			dst.Set(x, y, src.At(sx, sy))
 		}
 	}
-	return m
 }
 
-func abs(v float64) float64 {
-	if v < 0 {
-		return -v
-	}
-	return v
-}
-
-// writeICO 把 PNG 打包成 ICO（PNG 压缩条目，Vista+ 可用）。
-func writeICO(path string, pngData []byte) error {
-	// ICO 头：reserved=0, type=1, count=1
-	// 目录项：w/h(0=256), colorCount=0, reserved=0, planes=1, bitCount=32, size, offset=22
+// writeICO 把一组 PNG 帧（按尺寸为键）打包成多条目 ICO（PNG 压缩条目，Vista+ 可用）。
+func writeICO(path string, frames map[int]*bytes.Buffer) error {
 	var buf bytes.Buffer
-	_ = binary.Write(&buf, binary.LittleEndian, uint16(0))
-	_ = binary.Write(&buf, binary.LittleEndian, uint16(1))
-	_ = binary.Write(&buf, binary.LittleEndian, uint16(1))
-	_ = binary.Write(&buf, binary.LittleEndian, uint8(0))  // 256px
-	_ = binary.Write(&buf, binary.LittleEndian, uint8(0))  // 256px
-	_ = binary.Write(&buf, binary.LittleEndian, uint8(0))  // palette
-	_ = binary.Write(&buf, binary.LittleEndian, uint8(0))  // reserved
-	_ = binary.Write(&buf, binary.LittleEndian, uint16(1)) // planes
-	_ = binary.Write(&buf, binary.LittleEndian, uint16(32))
-	_ = binary.Write(&buf, binary.LittleEndian, uint32(len(pngData)))
-	_ = binary.Write(&buf, binary.LittleEndian, uint32(22))
-	_, _ = buf.Write(pngData)
+	_ = binary.Write(&buf, binary.LittleEndian, uint16(0))         // reserved
+	_ = binary.Write(&buf, binary.LittleEndian, uint16(1))         // type = icon
+	_ = binary.Write(&buf, binary.LittleEndian, uint16(len(frames))) // count
+	offset := 6 + 16*len(frames)
+	for _, sz := range icoSizes {
+		fb := frames[sz]
+		if fb == nil {
+			continue
+		}
+		data := fb.Bytes()
+		if sz == 256 {
+			_ = buf.WriteByte(0) // 256 在 ICO 里宽度/高度均记 0
+			_ = buf.WriteByte(0)
+		} else {
+			_ = buf.WriteByte(byte(sz)) // 宽度
+			_ = buf.WriteByte(byte(sz)) // 高度
+		}
+		_ = buf.WriteByte(0)            // palette
+		_ = buf.WriteByte(0)            // reserved
+		_ = binary.Write(&buf, binary.LittleEndian, uint16(1))  // planes
+		_ = binary.Write(&buf, binary.LittleEndian, uint16(32)) // bitcount
+		_ = binary.Write(&buf, binary.LittleEndian, uint32(len(data)))
+		_ = binary.Write(&buf, binary.LittleEndian, uint32(offset))
+		offset += len(data)
+	}
+	for _, sz := range icoSizes {
+		if fb := frames[sz]; fb != nil {
+			buf.Write(fb.Bytes())
+		}
+	}
 	return os.WriteFile(path, buf.Bytes(), 0o644)
 }
 
@@ -139,40 +121,67 @@ func main() {
 	if err != nil {
 		panic(err)
 	}
+	srcPath := filepath.Join(root, "icon.png")
+	srcFile, err := os.Open(srcPath)
+	if err != nil {
+		panic("找不到 icon.png（需放在仓库根目录）：" + err.Error())
+	}
+	defer srcFile.Close()
+	srcDec, err := png.Decode(srcFile)
+	if err != nil {
+		panic("icon.png 解码失败：" + err.Error())
+	}
+	src := image.NewRGBA(srcDec.Bounds())
+	for y := 0; y < src.Bounds().Dy(); y++ {
+		for x := 0; x < src.Bounds().Dx(); x++ {
+			src.Set(x, y, srcDec.At(x, y))
+		}
+	}
+
 	trayDir := filepath.Join(root, "build")
 	icoDir := filepath.Join(root, "build", "windows")
 	_ = os.MkdirAll(trayDir, 0o755)
 	_ = os.MkdirAll(icoDir, 0o755)
 
-	img := drawIcon()
+	// 裁掉透明留白，主体居中正方形
+	cropped := cropSquare(src)
 
-	// 托盘图标 32x32 PNG + ICO（Windows 托盘需要 .ico 内容）
-	tray32 := image.NewRGBA(image.Rect(0, 0, 32, 32))
-	scale := float64(size) / 32
-	for y := 0; y < 32; y++ {
-		for x := 0; x < 32; x++ {
-			sx, sy := int(float64(x)*scale), int(float64(y)*scale)
-			tray32.SetRGBA(x, y, img.RGBAAt(sx, sy))
-		}
+	// exe 图标：用满幅原图缩放（保留原留白，视觉更自然）
+	exeFrames := make(map[int]*bytes.Buffer)
+	for _, sz := range icoSizes {
+		tmp := image.NewRGBA(image.Rect(0, 0, sz, sz))
+		scaleImage(src, tmp)
+		var b bytes.Buffer
+		_ = png.Encode(&b, tmp)
+		exeFrames[sz] = &b
 	}
-	trayFP := filepath.Join(trayDir, "trayicon.png")
-	f, _ := os.Create(trayFP)
-	_ = png.Encode(f, tray32)
-	_ = f.Close()
-
-	var trayPngBuf bytes.Buffer
-	_ = png.Encode(&trayPngBuf, tray32)
-	trayIcoFP := filepath.Join(trayDir, "trayicon.ico")
-	if err := writeICO(trayIcoFP, trayPngBuf.Bytes()); err != nil {
+	if err := writeICO(filepath.Join(icoDir, "icon.ico"), exeFrames); err != nil {
 		panic(err)
 	}
 
-	// exe 图标 256x256 ICO
-	var pngBuf bytes.Buffer
-	_ = png.Encode(&pngBuf, img)
-	icoFP := filepath.Join(icoDir, "icon.ico")
-	if err := writeICO(icoFP, pngBuf.Bytes()); err != nil {
+	// 托盘图标：用裁切后的主体放大，小尺寸更清晰
+	trayFrames := make(map[int]*bytes.Buffer)
+	for _, sz := range icoSizes {
+		tmp := image.NewRGBA(image.Rect(0, 0, sz, sz))
+		scaleImage(cropped, tmp)
+		var b bytes.Buffer
+		_ = png.Encode(&b, tmp)
+		trayFrames[sz] = &b
+	}
+	if err := writeICO(filepath.Join(trayDir, "trayicon.ico"), trayFrames); err != nil {
 		panic(err)
 	}
-	fmt.Printf("generated: %s, %s, %s\n", trayFP, trayIcoFP, icoFP)
+
+	// 前端 logo 源（64x64，裁切版）
+	logo64 := image.NewRGBA(image.Rect(0, 0, 64, 64))
+	scaleImage(cropped, logo64)
+	logoFP := filepath.Join(trayDir, "logo64.png")
+	lf, _ := os.Create(logoFP)
+	_ = png.Encode(lf, logo64)
+	_ = lf.Close()
+
+	fmt.Printf("generated: %s, %s, %s\n",
+		filepath.Join(icoDir, "icon.ico"),
+		filepath.Join(trayDir, "trayicon.ico"),
+		logoFP)
 }

@@ -24,8 +24,10 @@ import (
 	"github.com/rockswang/workbuddy-wild/internal/auth"
 	"github.com/rockswang/workbuddy-wild/internal/config"
 	"github.com/rockswang/workbuddy-wild/internal/pool"
+	"github.com/rockswang/workbuddy-wild/internal/provider"
 	"github.com/rockswang/workbuddy-wild/internal/scheduler"
 	"github.com/rockswang/workbuddy-wild/internal/server"
+	"github.com/rockswang/workbuddy-wild/internal/traework"
 	"github.com/rockswang/workbuddy-wild/internal/upstream"
 	"github.com/rockswang/workbuddy-wild/internal/winutil"
 )
@@ -66,31 +68,46 @@ func main() {
 	_ = os.MkdirAll(cfg.AuthDir, 0o755)
 	_ = os.MkdirAll(filepath.Dir(cfg.StateFile), 0o755)
 
-	// 账号池 / 上游 / 调度器 / HTTP handler
-	auths, err := auth.LoadDir(cfg.AuthDir, cfg.Region)
+	// 双平台运行时：workbuddy / traework 各自独立 pool + state + scheduler。
+	stateDir := filepath.Dir(cfg.StateFile)
+	wbAuths, err := auth.LoadWorkBuddyDir(cfg.AuthDir, cfg.Region)
 	if err != nil {
-		fatal("读取账号目录失败：%v", err)
+		fatal("读取 WorkBuddy 账号目录失败：%v", err)
 	}
-	log.Printf("loaded %d %s account(s) from %s", len(auths), cfg.Region, cfg.AuthDir)
+	trAuths, err := auth.LoadTraeDir(cfg.AuthDir)
+	if err != nil {
+		fatal("读取 TraeWork 账号目录失败：%v", err)
+	}
+	log.Printf("loaded accounts: workbuddy=%d %s, traework=%d from %s", len(wbAuths), cfg.Region, len(trAuths), cfg.AuthDir)
 
-	p := pool.New(cfg.StateFile)
-	for _, a := range auths {
-		p.Add(a)
+	wbPool := pool.New(filepath.Join(stateDir, "state-workbuddy.json"))
+	for _, a := range wbAuths {
+		wbPool.Add(a)
+	}
+	trPool := pool.New(filepath.Join(stateDir, "state-traework.json"))
+	for _, a := range trAuths {
+		trPool.Add(a)
 	}
 
-	up := upstream.New()
-	up.HTTP.Timeout = time.Duration(cfg.Upstream.TimeoutSeconds) * time.Second
+	wbUp := upstream.New()
+	wbUp.HTTP.Timeout = time.Duration(cfg.Upstream.TimeoutSeconds) * time.Second
+	trUp := traework.New()
+	trUp.HTTP.Timeout = time.Duration(cfg.Upstream.TimeoutSeconds) * time.Second
 
-	sch := scheduler.New(scheduler.Config{
-		Pool:           p,
-		Upstream:       up,
-		CheckinHours:   cfg.Schedule.CheckinHours,
-		KeepaliveHours: cfg.Schedule.KeepaliveHours,
-	})
+	wbSch := scheduler.New(scheduler.Config{Pool: wbPool, Upstream: wbUp, CheckinHours: cfg.Schedule.CheckinHours, KeepaliveHours: cfg.Schedule.KeepaliveHours})
+	trSch := scheduler.New(scheduler.Config{Pool: trPool, Upstream: trUp, CheckinHours: cfg.Schedule.CheckinHours, KeepaliveHours: cfg.Schedule.KeepaliveHours})
+
+	runtimes := map[provider.Kind]*server.Runtime{
+		provider.WorkBuddy: {Kind: provider.WorkBuddy, Pool: wbPool, Upstream: wbUp, StaticModels: server.WorkBuddyStaticModels()},
+		provider.TraeWork:  {Kind: provider.TraeWork, Pool: trPool, Upstream: trUp, StaticModels: server.TraeWorkStaticModels()},
+	}
+	appRuntimes := map[provider.Kind]*app.Runtime{
+		provider.WorkBuddy: {Kind: provider.WorkBuddy, Pool: wbPool, Upstream: wbUp, Scheduler: wbSch},
+		provider.TraeWork:  {Kind: provider.TraeWork, Pool: trPool, Upstream: trUp, Scheduler: trSch},
+	}
 
 	h := server.NewHandler(server.Config{
-		Pool:         p,
-		Upstream:     up,
+		Runtimes:     runtimes,
 		APIKey:       cfg.APIKey,
 		HardCooldown: cfg.HardCreditDur,
 		SoftCooldown: cfg.SoftRateDur,
@@ -101,9 +118,7 @@ func main() {
 	appInst, err := app.New(app.Options{
 		ConfigPath: cfgPath,
 		Config:     cfg,
-		Pool:       p,
-		Upstream:   up,
-		Scheduler:  sch,
+		Runtimes:   appRuntimes,
 		Handler:    h,
 	})
 	if err != nil {
@@ -121,7 +136,8 @@ func main() {
 	// 调度器后台运行
 	sctx, stop := context.WithCancel(context.Background())
 	defer stop()
-	go sch.Run(sctx)
+	go wbSch.Run(sctx)
+	go trSch.Run(sctx)
 
 	// 系统托盘：单击 / 双击 / 右击 均弹主面板（无原生右键菜单）
 	go runTray(appInst)

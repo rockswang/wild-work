@@ -10,6 +10,7 @@ config.json
 # Build artifacts
 build/bin/
 build/shot*.png
+build/logo64.png
 *.tmp
 __pycache__/
 
@@ -19,3 +20,20 @@ __pycache__/
 LOOP.md
 PLAN.md
 SPEC.md
+
+# Agent workspace
+AGENTS.md
+HANDOFF.md
+temp/
+
+# Icon conversion & source
+icon.png
+genicon.exe
+
+# Docs (keep only DEVELOPMENT.md)
+docs/*.md
+docs/*.png
+docs/*.saz
+docs/Trae2api-cn/
+docs/traework2api/
+!docs/DEVELOPMENT.md

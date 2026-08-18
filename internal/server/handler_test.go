@@ -67,7 +67,7 @@ func TestChatNonStreamAggregates(t *testing.T) {
 		Pool:     testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at1", ExpiresAt: 9999999999}),
 		Upstream: up,
 	})
-	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"glm-5.2","messages":[{"role":"user","content":"hi"}]}`))
+	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"workbuddy/glm-5.2","messages":[{"role":"user","content":"hi"}]}`))
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 	if rec.Code != 200 {
@@ -94,7 +94,7 @@ func TestChatStreamPassthrough(t *testing.T) {
 		Pool:     testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at1", ExpiresAt: 9999999999}),
 		Upstream: up,
 	})
-	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"glm-5.2","stream":true,"messages":[{"role":"user","content":"hi"}]}`))
+	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"workbuddy/glm-5.2","stream":true,"messages":[{"role":"user","content":"hi"}]}`))
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 	if rec.Code != 200 {
@@ -126,7 +126,7 @@ func TestChatRotatesOnHardCredit(t *testing.T) {
 	p.SetCredits("bad", 2000)
 	p.SetCredits("good", 1000)
 	h := NewHandler(Config{Pool: p, Upstream: up, HardCooldown: time.Hour, SoftCooldown: time.Minute, ErrThreshold: 3, ErrCooldown: 10 * time.Minute})
-	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"glm-5.2","messages":[]}`))
+	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"workbuddy/glm-5.2","messages":[]}`))
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 	if rec.Code != 200 {
@@ -149,7 +149,7 @@ func TestChatAllUnavailableReturns503(t *testing.T) {
 		Pool:     testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at1", ExpiresAt: 9999999999}),
 		Upstream: up,
 	})
-	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"glm-5.2","messages":[]}`))
+	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"workbuddy/glm-5.2","messages":[]}`))
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 	if rec.Code != 503 {
@@ -168,7 +168,7 @@ func TestChatSessionDeadDisables(t *testing.T) {
 	})
 	p := testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at1", ExpiresAt: 9999999999})
 	h := NewHandler(Config{Pool: p, Upstream: up})
-	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"glm-5.2","messages":[]}`))
+	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"workbuddy/glm-5.2","messages":[]}`))
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 	if rec.Code != 503 {
@@ -199,12 +199,12 @@ func TestModelsEndpoint(t *testing.T) {
 	}
 	found := false
 	for _, m := range data {
-		if m.(map[string]any)["id"] == "glm-5.2" {
+		if m.(map[string]any)["id"] == "workbuddy/glm-5.2" {
 			found = true
 		}
 	}
 	if !found {
-		t.Error("glm-5.2 missing")
+		t.Error("workbuddy/glm-5.2 missing")
 	}
 }
 
@@ -237,7 +237,7 @@ func TestModelsDynamic(t *testing.T) {
 	for _, m := range data {
 		ids[m.(map[string]any)["id"].(string)] = true
 	}
-	if !ids["dyn-model-a"] || !ids["glm-9.9"] {
+	if !ids["workbuddy/dyn-model-a"] || !ids["workbuddy/glm-9.9"] {
 		t.Errorf("dynamic ids missing: %v", ids)
 	}
 
@@ -245,14 +245,14 @@ func TestModelsDynamic(t *testing.T) {
 	for _, m := range data {
 		mm := m.(map[string]any)
 		switch mm["id"] {
-		case "dyn-model-a":
+		case "workbuddy/dyn-model-a":
 			if mm["context_length"].(float64) != 65536 {
 				t.Errorf("dyn-model-a context_length=%v want 65536", mm["context_length"])
 			}
 			if mm["max_output_tokens"].(float64) != 8192 {
 				t.Errorf("dyn-model-a max_output_tokens=%v want 8192", mm["max_output_tokens"])
 			}
-		case "glm-9.9":
+		case "workbuddy/glm-9.9":
 			if mm["context_length"].(float64) != 262144 {
 				t.Errorf("glm-9.9 context_length=%v want 262144", mm["context_length"])
 			}

@@ -13,13 +13,13 @@ import (
 	"time"
 
 	"github.com/rockswang/workbuddy-wild/internal/pool"
-	"github.com/rockswang/workbuddy-wild/internal/upstream"
+	"github.com/rockswang/workbuddy-wild/internal/provider"
 )
 
 // Config 调度器依赖。
 type Config struct {
 	Pool           *pool.Pool
-	Upstream       *upstream.Client
+	Upstream       provider.Upstream
 	CheckinHours   []int // 默认 [9, 21]
 	KeepaliveHours []int // 默认 [22]
 }
@@ -222,8 +222,8 @@ func (s *Scheduler) RunKeepaliveNow() {
 		}
 		if err := s.cfg.Upstream.RefreshToken(a); err != nil {
 			log.Printf("keepalive %s: %v", st.UID, err)
-			var ue *upstream.Error
-			if errors.As(err, &ue) && ue.Kind == upstream.ErrSessionDead {
+			var ue *provider.Error
+			if errors.As(err, &ue) && ue.Kind == provider.ErrSessionDead {
 				s.cfg.Pool.Disable(st.UID, "12153 session dead")
 			}
 			continue

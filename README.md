@@ -1,14 +1,21 @@
 # WorkBuddy Wild
 
-**WorkBuddy/CodeBuddy 账号的 OpenAI 兼容代理 + 自动签到 Windows 托盘工具。**
+**WorkBuddy/CodeBuddy + TraeWork 账号的 OpenAI 兼容代理 + 自动签到 Windows 托盘工具。**
 
-面向普通用户：**下载即用**，一个 exe 搞定账号登录、自动签到、积分查看，为你的 AI 客户端（Claude Code、Cursor 等）提供 OpenAI 兼容接口。
+双平台支持：聚合多个 WorkBuddy 和/或 TraeWork 账号，提供统一 OpenAI 兼容 API。
+支持模型前缀区分（`workbuddy/<model>`、`traework/<model>`），自动路由到对应上游。
 
-> 本项目源于 [Sliverkiss/workbuddy2api](https://github.com/Sliverkiss/workbuddy2api)，在其基础上重做成 Windows 托盘应用。开发者/高级配置见 [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md)。
+面向普通用户：**下载即用**，一个 exe 搞定账号登录、自动签到、积分查看、模型路由，为你的 AI 客户端（pi、Claude Code、Cursor 等）提供 OpenAI 兼容接口。
+
+> 本项目源于两个原始项目，在其基础上重做为 Windows 双平台托盘应用：
+> - [Sliverkiss/workbuddy2api](https://github.com/Sliverkiss/workbuddy2api) — WorkBuddy/CodeBuddy 上游
+> - [Sliverkiss/traework2api](https://github.com/Sliverkiss/traework2api) — TraeWork SOLO 上游
+> 
+> 开发者/高级配置见 [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md)。
 
 ## 它解决什么问题
 
-- 一个 WorkBuddy/CodeBuddy 账号的对话额度有限，多个账号可以共享/轮流使用
+- WorkBuddy/CodeBuddy 和 TraeWork 账号的对话额度有限，多个账号可以共享/轮流使用
 - 本项目把多个账号聚合成一个 **OpenAI 兼容 API**，自动按余额挑选账号、自动刷新 token、错误自动冷却
 - 每天**自动签到**领额度，面板随时看积分、签到状态
 - 全部在一个后台托盘程序里，无需任何编程环境
@@ -17,8 +24,8 @@
 
 1. **下载**：从 [Releases](https://github.com/rockswang/workbuddy-wild/releases) 下载最新版 `workbuddy-wild-windows-amd64.zip`，解压后双击 `workbuddy-wild.exe`
 2. 稍等片刻会弹出提示框，显示 **OpenAI 兼容 API 地址**（默认 `http://127.0.0.1:7863`）——记住它，关掉即可
-3. 右下角出现蓝色 W 托盘图标，**单击 / 双击 / 右击** 都能打开管理面板
-4. **添加账号**：面板点"＋ 添加账号"→ 自动打开无痕浏览器 → 用 WorkBuddy/CodeBuddy 账号登录 → 自动写入凭证并立即签到
+3. 右下角出现绿色 W 托盘图标，**单击 / 双击 / 右击** 都能打开管理面板
+4. **添加账号**：面板点"＋ 添加账号"→ 选择 WorkBuddy 或 TraeWork → 自动打开无痕浏览器 → 登录对应平台 → 自动写入凭证并立即签到
 5. **配置客户端**：把你的 AI 客户端指向
    ```
    Base URL: http://127.0.0.1:7863/v1
@@ -44,7 +51,7 @@
 ## 功能清单
 
 - ✅ OpenAI 兼容代理：`/v1/models`、`/v1/chat/completions`（流式/非流式）、`/status`、`/healthz`
-- ✅ 多账号聚合，按余额轮转，token 自动刷新，错误冷却与解冻
+- ✅ 双平台支持：同时接入 WorkBuddy（CodeBuddy）和 TraeWork 账号，模型 ID 以 `workbuddy/` 或 `traework/` 前缀路由
 - ✅ 托盘面板：添加账号（无痕浏览器）、自动签到时间配置、签到状态、积分实时刷新
 - ✅ API 监听主机/端口可改（`127.0.0.1` 本机 / `0.0.0.0` 全部 / 自定义），热切换
 - ✅ 开机自启（注册表 Run 键）、查看日志、退出
@@ -58,8 +65,63 @@
 
 兼容标准 OpenAI 格式（`/v1/chat/completions`）。特别的兼容处理：
 
-- **pi / 其他智能体客户端**：pi 对推理模型（hy3、deepseek-v4-* 等）会用 `role=developer` 发送系统提示词。上游 CodeBuddy 对 developer 角色消息会**误触发内容过滤**（返回"抱歉，系统检测到…敏感内容"）。本代理已在转发层自动把 `developer` 归一化为 `system`（语义等价），**pi 下所有模型可直接使用，无需额外配置**。
-- 若其他客户端同样报"敏感内容"或异常，先确认是否使用了非标准消息角色。
+- **模型 ID 必须带平台前缀**：`workbuddy/<model>` 或 `traework/<model>`。
+  例如 `workbuddy/hy3`、`workbuddy/deepseek-v4-pro`、`traework/DeepSeek-V4-Flash`。
+  不带前缀的模型名会返回 400 错误。
+- **`developer` 角色自动转换**：pi 等客户端对推理模型会用 `role=developer` 发送系统提示词。
+  两条上游管道均已自动将 `developer` 归一化为 `system`，避免内容过滤误杀。
+
+### 获取完整模型列表
+
+所有可用模型通过标准 OpenAI `/v1/models` 端点获取，直接请求：
+
+```bash
+curl http://127.0.0.1:7863/v1/models -H "Authorization: Bearer WorkBuddy2API"
+```
+
+返回的列表中每模型都带 `workbuddy/` 或 `traework/` 前缀。
+可以让 agent 先拉取模型列表，再依据下面的配置示例自动生成 models.json。
+
+### pi 配置示例
+
+编辑 `C:\Users\<用户名>\.pi\agent\models.json`，在 `providers` 中加入：
+
+```jsonc
+"workbuddy-wild": {
+  "name": "WorkBuddy-Wild",
+  "api": "openai-completions",
+  "baseUrl": "http://127.0.0.1:7863/v1",
+  "apiKey": "WorkBuddy2API",
+  "models": [
+    {
+      "id": "workbuddy/hy3",
+      "name": "hy3 (WorkBuddy)",
+      "reasoning": true,
+      "input": ["text"],
+      "contextWindow": 192000,
+      "maxTokens": 64000,
+      "compat": { "maxTokensField": "max_tokens" }
+    },
+    {
+      "id": "traework/DeepSeek-V4-Flash",
+      "name": "DeepSeek V4 Flash (TraeWork)",
+      "reasoning": true,
+      "input": ["text"],
+      "contextWindow": 1000000,
+      "maxTokens": 50000,
+      "compat": {
+        "thinkingFormat": "deepseek",
+        "supportsReasoningEffort": true,
+        "maxTokensField": "max_tokens"
+      }
+    }
+  ]
+}
+```
+
+> 模型 ID 必须按 `workbuddy/` 或 `traework/` 前缀，否则请求被拒。
+> 名称建议标注来源 `(WorkBuddy)` / `(TraeWork)` 以便区分同名模型。
+> 建议只配置实际要用的模型，避免列表过长。
 
 ## 常见问题
 
@@ -72,8 +134,13 @@
 **签到时间改了没生效？**
 时间修改即写回 `config.json` 并立即生效，无需重启。
 
-**Windows 提示"未知发布者"？**
-未签名 exe 的正常提示，点击"仍要运行"即可。
+**Windows 提示“未知发布者”或报毒？**
+
+本工具没有数字签名，因此可能会被 Windows 安全中心或杀毒软件拦截。如果报毒，请将本工具添加到排除项：
+
+设置 → 更新和安全 → Windows 安全中心 → 打开 Windows 安全中心 → 病毒和威胁防护 → “病毒和威胁防护”设置/管理设置 → 排除项/添加或删除排除项 → 添加排除项（文件或文件夹），把 exe 或所在目录加进去。
+
+如果对本仓库发布包不放心，可以自行基于源码构建（见开发文档）。
 
 ## 开发者
 
@@ -81,8 +148,8 @@
 
 ## 免责声明
 
-本项目为个人学习用途的第三方工具，与 WorkBuddy/CodeBuddy 官方无关；请遵守账号所在平台的服务条款。账号凭据仅保存在本机 `auths/` 目录。
+本项目为个人学习用途的第三方工具，与 WorkBuddy/CodeBuddy/TraeWork 官方无关；请遵守账号所在平台的服务条款。账号凭据仅保存在本机 `auths/` 目录。
 
 ## License
 
-[MIT](LICENSE)（核心逻辑源于 [Sliverkiss/workbuddy2api](https://github.com/Sliverkiss/workbuddy2api)，同为 MIT）。
+[MIT](LICENSE)（核心逻辑源于 [Sliverkiss/workbuddy2api](https://github.com/Sliverkiss/workbuddy2api) 与 [Sliverkiss/traework2api](https://github.com/Sliverkiss/traework2api)，同为 MIT）。

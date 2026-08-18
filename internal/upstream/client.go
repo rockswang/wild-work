@@ -13,50 +13,24 @@ import (
 	"time"
 
 	"github.com/rockswang/workbuddy-wild/internal/auth"
+	"github.com/rockswang/workbuddy-wild/internal/provider"
 )
 
 // ErrKind 错误分类，pool 据此决定冷却时长。
-type ErrKind int
+type ErrKind = provider.ErrKind
 
 const (
-	ErrNone        ErrKind = iota // 成功
-	ErrHardCredit                 // 余额不足（402 或 body 关键词）→ 长冷却
-	ErrSoftRate                   // 429 软限流 → 短冷却
-	ErrSessionDead                // 401 + 12153 offline session 失效 → 禁用
-	ErrNotFound                   // 404 上游偶发 → 短冷却不累计 errCount（防雪崩）
-	ErrServer                     // 5xx 上游故障
-	ErrClient                     // 其他 4xx / 业务错误
+	ErrNone        = provider.ErrNone        // 成功
+	ErrHardCredit  = provider.ErrHardCredit  // 余额不足（402 或 body 关键词）→ 长冷却
+	ErrSoftRate    = provider.ErrSoftRate    // 429 软限流 → 短冷却
+	ErrSessionDead = provider.ErrSessionDead // 401 + 12153 offline session 失效 → 禁用
+	ErrNotFound    = provider.ErrNotFound    // 404 上游偶发 → 短冷却不累计 errCount（防雪崩）
+	ErrServer      = provider.ErrServer      // 5xx 上游故障
+	ErrClient      = provider.ErrClient      // 其他 4xx / 业务错误
 )
 
-func (k ErrKind) String() string {
-	switch k {
-	case ErrHardCredit:
-		return "hard_credit"
-	case ErrSoftRate:
-		return "soft_rate"
-	case ErrSessionDead:
-		return "session_dead"
-	case ErrNotFound:
-		return "not_found"
-	case ErrServer:
-		return "server"
-	case ErrClient:
-		return "client"
-	default:
-		return "none"
-	}
-}
-
 // Error 带分类的上游错误。
-type Error struct {
-	Kind   ErrKind
-	Status int
-	Msg    string
-}
-
-func (e *Error) Error() string {
-	return fmt.Sprintf("upstream %s (http %d): %s", e.Kind, e.Status, e.Msg)
-}
+type Error = provider.Error
 
 // hardMarkers 余额不足关键词（小写比较 + 中文原文比较双通道）。
 var hardMarkers = []string{
@@ -262,12 +236,7 @@ func (c *Client) ChatStream(a *auth.Auth, body []byte) (rc io.ReadCloser, status
 }
 
 // ModelInfo 动态模型信息（含 maxInputTokens/maxOutputTokens）。
-type ModelInfo struct {
-	ID            string
-	Name          string
-	ContextWindow int64 // = maxInputTokens
-	MaxTokens     int64 // = maxOutputTokens
-}
+type ModelInfo = provider.ModelInfo
 
 // FetchModels 调上游动态模型接口。
 // 字段名与上游实际返回对齐：maxInputTokens（非 contextWindow）、maxOutputTokens（非 maxTokens）。
@@ -428,6 +397,15 @@ func (c *Client) DailyCheckin(a *auth.Auth) error {
 	_, err = c.doJSONBilling(req)
 	return err
 }
+
+// Classify 实现 provider.Upstream。
+func (c *Client) Classify(status int, body string) provider.ErrKind { return Classify(status, body) }
+
+// Stream 实现 provider.Upstream（WorkBuddy 上游已是 OpenAI SSE，直接透传）。
+func (c *Client) Stream(w http.ResponseWriter, r io.Reader) error { return Stream(w, r) }
+
+// Aggregate 实现 provider.Upstream（WorkBuddy OpenAI SSE 聚合）。
+func (c *Client) Aggregate(r io.Reader) (map[string]any, error) { return Aggregate(r) }
 
 func truncate(s string, n int) string {
 	s = strings.TrimSpace(s)

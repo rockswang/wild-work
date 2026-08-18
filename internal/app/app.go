@@ -21,10 +21,11 @@ import (
 	"github.com/rockswang/workbuddy-wild/internal/auth"
 	"github.com/rockswang/workbuddy-wild/internal/config"
 	"github.com/rockswang/workbuddy-wild/internal/login"
+	logintrae "github.com/rockswang/workbuddy-wild/internal/login_trae"
 	"github.com/rockswang/workbuddy-wild/internal/pool"
+	"github.com/rockswang/workbuddy-wild/internal/provider"
 	"github.com/rockswang/workbuddy-wild/internal/scheduler"
 	"github.com/rockswang/workbuddy-wild/internal/server"
-	"github.com/rockswang/workbuddy-wild/internal/upstream"
 	"github.com/rockswang/workbuddy-wild/internal/winutil"
 )
 
@@ -37,23 +38,26 @@ const (
 )
 
 // Options 构建 App 的依赖。
+type Runtime struct {
+	Kind      provider.Kind
+	Pool      *pool.Pool
+	Upstream  provider.Upstream
+	Scheduler *scheduler.Scheduler
+}
+
 type Options struct {
 	ConfigPath string
 	Config     *config.Config
-	Pool       *pool.Pool
-	Upstream   *upstream.Client
-	Scheduler  *scheduler.Scheduler
+	Runtimes   map[provider.Kind]*Runtime
 	Handler    *server.Handler
 }
 
 // App 托盘面板后端。
 type App struct {
-	cfgPath string
-	cfg     *config.Config
-	pool    *pool.Pool
-	up      *upstream.Client
-	sch     *scheduler.Scheduler
-	handler *server.Handler
+	cfgPath  string
+	cfg      *config.Config
+	runtimes map[provider.Kind]*Runtime
+	handler  *server.Handler
 
 	mu      sync.Mutex // 保护 httpSrv / cfg 修改
 	httpSrv *http.Server
@@ -66,6 +70,7 @@ type App struct {
 	loginCancel  context.CancelFunc
 	loginClient  *http.Client
 	loginStateFP string
+	loginKind    provider.Kind
 
 	domReadyCh chan struct{} // 前端就绪信号（ShowPanel 等待，避免白窗口）
 
@@ -77,9 +82,7 @@ func New(opts Options) (*App, error) {
 	a := &App{
 		cfgPath:    opts.ConfigPath,
 		cfg:        opts.Config,
-		pool:       opts.Pool,
-		up:         opts.Upstream,
-		sch:        opts.Scheduler,
+		runtimes:   opts.Runtimes,
 		handler:    opts.Handler,
 		domReadyCh: make(chan struct{}),
 	}
@@ -104,6 +107,76 @@ func (a *App) Close() {
 		_ = a.logFile.Close()
 		a.logFile = nil
 	}
+}
+
+func (a *App) runtime(kind provider.Kind) *Runtime {
+	if a.runtimes == nil {
+		return nil
+	}
+	return a.runtimes[kind]
+}
+
+func (a *App) firstRuntime() *Runtime {
+	for _, k := range []provider.Kind{provider.WorkBuddy, provider.TraeWork} {
+		if rt := a.runtime(k); rt != nil {
+			return rt
+		}
+	}
+	return nil
+}
+
+func (a *App) totalAccounts() int {
+	n := 0
+	for _, rt := range a.runtimes {
+		if rt != nil && rt.Pool != nil {
+			n += len(rt.Pool.List())
+		}
+	}
+	return n
+}
+
+func (a *App) allStatuses() []pool.Status {
+	out := []pool.Status{}
+	for _, rt := range a.runtimes {
+		if rt != nil && rt.Pool != nil {
+			out = append(out, rt.Pool.List()...)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].UID < out[j].UID })
+	return out
+}
+
+func (a *App) findRuntimeAuth(uid string) (*Runtime, *auth.Auth) {
+	for _, rt := range a.runtimes {
+		if rt == nil || rt.Pool == nil {
+			continue
+		}
+		if au := rt.Pool.AuthByUID(uid); au != nil {
+			return rt, au
+		}
+	}
+	return nil, nil
+}
+
+func (a *App) checkinHours() []int {
+	if rt := a.firstRuntime(); rt != nil && rt.Scheduler != nil {
+		return rt.Scheduler.CheckinHours()
+	}
+	return nil
+}
+
+func (a *App) keepaliveHours() []int {
+	if rt := a.firstRuntime(); rt != nil && rt.Scheduler != nil {
+		return rt.Scheduler.KeepaliveHours()
+	}
+	return nil
+}
+
+func (a *App) nextFire() time.Time {
+	if rt := a.firstRuntime(); rt != nil && rt.Scheduler != nil {
+		return rt.Scheduler.NextFire()
+	}
+	return time.Time{}
 }
 
 // ---------------------------------------------------------------------------
@@ -148,7 +221,7 @@ func (a *App) OnStartup(ctx context.Context) {
 	a.positionPanel()
 	winutil.HideFromTaskbar(winutil.MainWindow())
 	log.Printf("workbuddy2api %s 已启动，API 监听 %s（账号 %d）",
-		Version, a.cfg.Listen.Addr(), len(a.pool.List()))
+		Version, a.cfg.Listen.Addr(), a.totalAccounts())
 	a.emitAccounts()
 }
 
@@ -213,7 +286,7 @@ func (a *App) OnShutdown(ctx context.Context) {
 // 最多 4 个封顶（列表内部滚动）。退出按钮用 margin-top:auto 贴底，无需精确高度。
 func (a *App) panelRect() (x, y, pw, ph int) {
 	pw = 270
-	n := len(a.pool.List())
+	n := a.totalAccounts()
 	ph = 500 + minInt(n, 4)*55
 	_, _, waW, waH := winutil.WorkArea()
 	if int(waW) < pw {
@@ -240,9 +313,27 @@ func (a *App) positionPanel() {
 
 var showMu sync.Mutex // 串行化 ShowPanel（防动画/定位竞态）
 
-// ShowPanel 弹出面板。前端（WebView）未就绪时先等待，避免白窗口。
+// ShowPanel 弹出面板。WebView2 崩溃或未就绪时通知用户并继续运行。
 func (a *App) ShowPanel() {
+	host := a.cfg.Listen.Host
+	if host == "" || host == "0.0.0.0" || host == "::" {
+		host = "127.0.0.1"
+	}
+	addr := fmt.Sprintf("http://%s:%d", host, a.cfg.Listen.Port)
+	// WebView2 从未初始化（早期 wails.Run 失败，以无头模式运行）
 	if a.ctx == nil {
+		winutil.InfoBox("面板不可用",
+			"管理面板未初始化。\n\n"+
+				"HTTP 服务正常运行中，可通过 API 地址直接调用：\n"+addr)
+		return
+	}
+	// 检测 WebView2 进程是否已崩溃（窗口句柄为 0）
+	if hwnd := winutil.MainWindow(); hwnd == 0 {
+		winutil.InfoBox("面板已崩溃",
+			"管理面板（WebView2）已意外退出。\n"+
+				"HTTP 服务与自动签到仍在正常运行。\n\n"+
+				"如需恢复面板，请重启程序。\n\n"+
+				"API 地址："+addr)
 		return
 	}
 	select {
@@ -254,8 +345,8 @@ func (a *App) ShowPanel() {
 			select {
 			case <-a.domReadyCh:
 			case <-time.After(90 * time.Second):
+				a.showPanelNow()
 			}
-			a.showPanelNow()
 		}()
 	}
 }
@@ -343,13 +434,13 @@ type State struct {
 // GetState 返回面板初始数据。
 func (a *App) GetState() State {
 	st := State{
-		CheckinHours:   a.sch.CheckinHours(),
-		KeepaliveHours: a.sch.KeepaliveHours(),
+		CheckinHours:   a.checkinHours(),
+		KeepaliveHours: a.keepaliveHours(),
 		ListenHost:     a.cfg.Listen.Host,
 		ListenPort:     a.cfg.Listen.Port,
 		APIKey:         a.cfg.APIKey,
 		LoginBusy:      a.loginActive(),
-		NextCheckin:    fmtTime(a.sch.NextFire()),
+		NextCheckin:    fmtTime(a.nextFire()),
 		Version:        Version,
 		Autostart:      winutil.AutostartEnabled(),
 		Running:        a.serverRunning(),
@@ -360,7 +451,7 @@ func (a *App) GetState() State {
 
 // accountViews 账号列表（按 UID 排序）。
 func (a *App) accountViews() []AccountView {
-	statuses := a.pool.List()
+	statuses := a.allStatuses()
 	out := make([]AccountView, 0, len(statuses))
 	for _, s := range statuses {
 		out = append(out, AccountView{
@@ -384,9 +475,12 @@ func (a *App) accountViews() []AccountView {
 // accountGroup 返回账号所属分组（workbuddy/traework）。
 // 依据 auth 文件路径前缀：trae-*.json → traework，workbuddy-*.json → workbuddy。
 func (a *App) accountGroup(uid string) string {
-	au := a.pool.AuthByUID(uid)
-	if au != nil && au.FilePath != "" {
-		if strings.HasPrefix(filepath.Base(au.FilePath), "trae-") {
+	_, au := a.findRuntimeAuth(uid)
+	if au != nil {
+		if au.Kind != "" {
+			return au.Kind
+		}
+		if au.FilePath != "" && strings.HasPrefix(filepath.Base(au.FilePath), "trae-") {
 			return "traework"
 		}
 	}
@@ -409,8 +503,18 @@ func (a *App) loginActive() bool {
 // 账号操作
 // ---------------------------------------------------------------------------
 
-// StartLogin 发起登录：拿授权 URL、拉起无痕浏览器、后台轮询，返回 URL 供前端复制兜底。
-func (a *App) StartLogin() (string, error) {
+// StartLogin 发起 WorkBuddy 登录（兼容旧前端绑定）。
+func (a *App) StartLogin() (string, error) { return a.StartLoginFor(provider.WorkBuddy.String()) }
+
+// StartLoginFor 发起指定平台登录：workbuddy / traework。
+func (a *App) StartLoginFor(kind string) (string, error) {
+	k := provider.Kind(strings.TrimSpace(kind))
+	if k == "" {
+		k = provider.WorkBuddy
+	}
+	if k != provider.WorkBuddy && k != provider.TraeWork {
+		return "", fmt.Errorf("unknown login provider %s", kind)
+	}
 	a.muLogin.Lock()
 	if a.loginBusy {
 		a.muLogin.Unlock()
@@ -418,22 +522,35 @@ func (a *App) StartLogin() (string, error) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	a.loginCtx, a.loginCancel = ctx, cancel
-	a.loginClient = login.NewClient()
+	a.loginKind = k
+	if k == provider.TraeWork {
+		a.loginClient = logintrae.NewClient()
+	} else {
+		a.loginClient = login.NewClient()
+	}
 	a.loginBusy = true
 	a.muLogin.Unlock()
 
-	authURL, err := login.Start(a.loginClient, a.loginStateFP)
+	var authURL string
+	var err error
+	if k == provider.TraeWork {
+		authURL, err = logintrae.Start(a.loginClient, a.loginStateFP)
+	} else {
+		authURL, err = login.Start(a.loginClient, a.loginStateFP)
+		if err == nil {
+			// 手动跟随登录页跳转链（copilot.tencent.com → codebuddy.cn），浏览器直接打开最终地址
+			if resolved, rerr := login.ResolveAuthURL(a.loginClient, authURL); rerr == nil && resolved != "" {
+				authURL = resolved
+			}
+		}
+	}
 	if err != nil {
 		a.finishLogin()
 		return "", err
 	}
-	// 手动跟随登录页跳转链（copilot.tencent.com → codebuddy.cn），浏览器直接打开最终地址
-	if resolved, rerr := login.ResolveAuthURL(a.loginClient, authURL); rerr == nil && resolved != "" {
-		authURL = resolved
-	}
 	go a.launchBrowser(authURL)
 	a.safeGo(func() { a.pollLogin(ctx) })
-	log.Printf("登录流程已发起")
+	log.Printf("%s 登录流程已发起", k)
 	return authURL, nil
 }
 
@@ -485,6 +602,20 @@ func (a *App) pollLogin(ctx context.Context) {
 			a.emitLogin("failed", "登录超时，请重新发起")
 			return
 		}
+		if a.loginKind == provider.TraeWork {
+			r, err := logintrae.Poll(a.loginClient, a.loginStateFP)
+			if err == nil {
+				a.completeTraeLogin(r)
+				return
+			}
+			if errors.Is(err, logintrae.ErrPending) {
+				a.emitLogin("waiting", "等待 Trae 浏览器回调…")
+			} else {
+				log.Printf("trae login poll: %v", err)
+				a.emitLogin("waiting", "轮询暂时不可达，自动重试中…")
+			}
+			continue
+		}
 		r, err := login.Poll(a.loginClient, a.loginStateFP)
 		if err == nil {
 			a.completeLogin(r)
@@ -516,7 +647,11 @@ func (a *App) completeLogin(r login.Result) {
 	a.emitLogin("success", fmt.Sprintf("登录成功：%s（正在同步积分…）", name))
 	a.finishLogin() // 立即释放登录锁，允许再次发起
 	a.safeGo(func() {
-		res, err := a.sch.CheckinAccount(r.UID)
+		rt := a.runtime(provider.WorkBuddy)
+		if rt == nil || rt.Scheduler == nil {
+			return
+		}
+		res, err := rt.Scheduler.CheckinAccount(r.UID)
 		if err != nil {
 			log.Printf("新账号签到失败 %s: %v", name, err)
 		} else {
@@ -530,27 +665,71 @@ func (a *App) completeLogin(r login.Result) {
 	})
 }
 
+func (a *App) completeTraeLogin(r logintrae.Result) {
+	fp, err := logintrae.SaveAuth(a.cfg.AuthDir, r)
+	if err != nil {
+		a.emitLogin("failed", "保存凭证失败: "+err.Error())
+		return
+	}
+	log.Printf("TraeWork 新账号已保存: %s", filepath.Base(fp))
+	a.reloadAccounts()
+	name := r.Nickname
+	if name == "" && len(r.UID) >= 8 {
+		name = r.UID[:8]
+	}
+	a.emitLogin("success", fmt.Sprintf("TraeWork 登录成功：%s（正在同步积分…）", name))
+	a.finishLogin()
+	a.safeGo(func() {
+		rt := a.runtime(provider.TraeWork)
+		if rt == nil || rt.Scheduler == nil {
+			return
+		}
+		res, err := rt.Scheduler.CheckinAccount(r.UID)
+		if err != nil {
+			log.Printf("TraeWork 新账号签到失败 %s: %v", name, err)
+		} else {
+			log.Printf("TraeWork 新账号签到完成 %s：%s", name, res.Msg)
+		}
+		a.emitAccounts()
+	})
+}
+
 func (a *App) finishLogin() {
 	a.muLogin.Lock()
 	a.loginBusy = false
 	a.loginCtx, a.loginCancel, a.loginClient = nil, nil, nil
+	a.loginKind = ""
 	a.muLogin.Unlock()
 }
 
 // reloadAccounts 用 auths 目录最新文件对齐账号池。
 func (a *App) reloadAccounts() {
-	auths, err := auth.LoadDir(a.cfg.AuthDir, a.cfg.Region)
-	if err != nil {
-		log.Printf("reload accounts: %v", err)
-		return
+	if rt := a.runtime(provider.WorkBuddy); rt != nil && rt.Pool != nil {
+		auths, err := auth.LoadWorkBuddyDir(a.cfg.AuthDir, a.cfg.Region)
+		if err != nil {
+			log.Printf("reload workbuddy accounts: %v", err)
+		} else {
+			rt.Pool.SyncToDir(auths)
+		}
 	}
-	a.pool.SyncToDir(auths)
+	if rt := a.runtime(provider.TraeWork); rt != nil && rt.Pool != nil {
+		auths, err := auth.LoadTraeDir(a.cfg.AuthDir)
+		if err != nil {
+			log.Printf("reload traework accounts: %v", err)
+		} else {
+			rt.Pool.SyncToDir(auths)
+		}
+	}
 	a.emitAccounts()
 }
 
 // CheckinAccount 单个账号立即签到。
 func (a *App) CheckinAccount(uid string) (scheduler.CheckinResult, error) {
-	res, err := a.sch.CheckinAccount(uid)
+	rt, _ := a.findRuntimeAuth(uid)
+	if rt == nil || rt.Scheduler == nil {
+		return scheduler.CheckinResult{}, fmt.Errorf("unknown account %s", uid)
+	}
+	res, err := rt.Scheduler.CheckinAccount(uid)
 	a.emitAccounts()
 	if err != nil {
 		return res, err
@@ -562,15 +741,20 @@ func (a *App) CheckinAccount(uid string) (scheduler.CheckinResult, error) {
 // CheckinAll 全部账号立即签到。
 func (a *App) CheckinAll() []scheduler.CheckinResult {
 	results := make([]scheduler.CheckinResult, 0)
-	for _, st := range a.pool.List() {
-		if st.Disabled {
+	for _, rt := range a.runtimes {
+		if rt == nil || rt.Pool == nil || rt.Scheduler == nil {
 			continue
 		}
-		res, err := a.sch.CheckinAccount(st.UID)
-		if err != nil {
-			continue
+		for _, st := range rt.Pool.List() {
+			if st.Disabled {
+				continue
+			}
+			res, err := rt.Scheduler.CheckinAccount(st.UID)
+			if err != nil {
+				continue
+			}
+			results = append(results, res)
 		}
-		results = append(results, res)
 	}
 	a.emitAccounts()
 	log.Printf("批量签到完成：%d 个账号", len(results))
@@ -579,30 +763,35 @@ func (a *App) CheckinAll() []scheduler.CheckinResult {
 
 // RefreshCredits 刷新单个账号积分。
 func (a *App) RefreshCredits(uid string) (int64, error) {
-	au := a.pool.AuthByUID(uid)
-	if au == nil {
+	rt, au := a.findRuntimeAuth(uid)
+	if rt == nil || au == nil {
 		return 0, fmt.Errorf("unknown account %s", uid)
 	}
-	remain, err := a.up.UserResource(au)
+	remain, err := rt.Upstream.UserResource(au)
 	if err != nil {
 		return 0, err
 	}
-	a.pool.SetCredits(uid, remain)
+	rt.Pool.SetCredits(uid, remain)
 	a.emitAccounts()
 	return remain, nil
 }
 
 // RefreshAll 刷新全部账号积分（面板打开时调用）。
 func (a *App) RefreshAll() {
-	for _, st := range a.pool.List() {
-		au := a.pool.AuthByUID(st.UID)
-		if au == nil || au.AccessToken == "" {
+	for _, rt := range a.runtimes {
+		if rt == nil || rt.Pool == nil || rt.Upstream == nil {
 			continue
 		}
-		if remain, err := a.up.UserResource(au); err == nil {
-			a.pool.SetCredits(st.UID, remain)
-		} else {
-			log.Printf("refresh credits %s: %v", st.UID, err)
+		for _, st := range rt.Pool.List() {
+			au := rt.Pool.AuthByUID(st.UID)
+			if au == nil || au.AccessToken == "" {
+				continue
+			}
+			if remain, err := rt.Upstream.UserResource(au); err == nil {
+				rt.Pool.SetCredits(st.UID, remain)
+			} else {
+				log.Printf("refresh credits %s/%s: %v", rt.Kind, st.UID, err)
+			}
 		}
 	}
 	a.emitAccounts()
@@ -610,14 +799,14 @@ func (a *App) RefreshAll() {
 
 // RemoveAccount 删除账号（auth 文件 + 内存池）。
 func (a *App) RemoveAccount(uid string) error {
-	au := a.pool.AuthByUID(uid)
-	if au == nil {
+	rt, au := a.findRuntimeAuth(uid)
+	if rt == nil || au == nil {
 		return fmt.Errorf("unknown account %s", uid)
 	}
 	if au.FilePath != "" {
 		_ = os.Remove(au.FilePath)
 	}
-	a.pool.Remove(uid)
+	rt.Pool.Remove(uid)
 	a.emitAccounts()
 	log.Printf("已删除账号 %s", shortUID(uid))
 	return nil
@@ -640,7 +829,11 @@ func (a *App) SetCheckinHours(hours []int) error {
 	if err != nil {
 		return err
 	}
-	a.sch.SetCheckinHours(clean)
+	for _, rt := range a.runtimes {
+		if rt != nil && rt.Scheduler != nil {
+			rt.Scheduler.SetCheckinHours(clean)
+		}
+	}
 	log.Printf("自动签到时间已更新：%s", hoursStr(clean))
 	return nil
 }
