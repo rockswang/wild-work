@@ -1,4 +1,4 @@
-// main.go workbuddy2api 入口：加载配置、构建 pool、起调度器与 HTTP 服务。
+// main.go WorkBuddy-Wild 无头服务入口：加载配置、构建 pool、起调度器与 HTTP 服务。
 package main
 
 import (
@@ -82,7 +82,7 @@ func main() {
 		_ = srv.Shutdown(shutdownCtx)
 	}()
 
-	log.Printf("workbuddy2api listening on %s (api_key=%v)", cfg.Listen.Addr(), cfg.APIKey != "")
+	log.Printf("workbuddy-wild listening on %s (api_key=%v)", cfg.Listen.Addr(), cfg.APIKey != "")
 	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		log.Fatalf("http: %v", err)
 	}

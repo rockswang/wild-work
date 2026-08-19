@@ -76,7 +76,7 @@ func FocusWindow(hwnd uintptr) {
 
 // MessageBox 弹出一个错误提示框（GUI 应用无控制台，致命错误需可见）。
 func MessageBox(msg string) {
-	InfoBoxEx("WorkBuddy2API", msg, 0x10 /* MB_ICONERROR */)
+	InfoBoxEx("WorkBuddy-Wild", msg, 0x10 /* MB_ICONERROR */)
 }
 
 // InfoBox 弹出一个信息提示框（MB_ICONINFORMATION）。
@@ -240,7 +240,7 @@ func OpenURL(url string) error {
 // ---------------------------------------------------------------------------
 
 const autostartKey = `Software\Microsoft\Windows\CurrentVersion\Run`
-const autostartValue = "WorkBuddy2API"
+const autostartValue = "WorkBuddy-Wild"
 
 // SetAutostart 设置/取消当前 exe 的开机自启。
 func SetAutostart(on bool) error {

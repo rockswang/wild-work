@@ -1,4 +1,4 @@
-// WorkBuddy2API 托盘面板逻辑（原生 JS，无构建步骤）
+// WorkBuddy-Wild 托盘面板逻辑（原生 JS，无构建步骤）
 /* global window */
 "use strict";
 

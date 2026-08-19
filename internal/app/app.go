@@ -30,7 +30,7 @@ import (
 )
 
 // Version 面板展示的版本号。
-const Version = "0.2.0"
+const Version = "0.2.2"
 
 const (
 	loginTimeout   = 5 * time.Minute
@@ -227,7 +227,7 @@ func (a *App) OnStartup(ctx context.Context) {
 	a.ctx = ctx
 	a.positionPanel()
 	winutil.HideFromTaskbar(winutil.MainWindow())
-	log.Printf("workbuddy2api %s 已启动，API 监听 %s（账号 %d）",
+	log.Printf("workbuddy-wild %s 已启动，API 监听 %s（账号 %d）",
 		Version, a.cfg.Listen.Addr(), a.totalAccounts())
 	a.emitAccounts()
 }
@@ -255,7 +255,7 @@ func (a *App) ShowSecondInstanceNotice() {
 		if host == "" || host == "0.0.0.0" || host == "::" {
 			host = "127.0.0.1"
 		}
-		if winutil.AskYesNo("WorkBuddy2API 已启动",
+		if winutil.AskYesNo("WorkBuddy-Wild 已启动",
 			fmt.Sprintf("OpenAI 兼容 API 地址：\nhttp://%s:%d\n\n是否打开管理面板？\n（选择“否”将退出程序）", host, a.cfg.Listen.Port)) {
 			a.ShowPanel()
 		} else {
@@ -270,7 +270,7 @@ func (a *App) showStartupNotice() {
 	if host == "" || host == "0.0.0.0" || host == "::" {
 		host = "127.0.0.1" // 面板/提示里展示本机可达地址
 	}
-	winutil.InfoBox("WorkBuddy2API 已启动",
+	winutil.InfoBox("WorkBuddy-Wild 已启动",
 		fmt.Sprintf("OpenAI 兼容 API 地址：\nhttp://%s:%d\n\n点击右下角托盘图标打开管理面板。", host, a.cfg.Listen.Port))
 }
 
