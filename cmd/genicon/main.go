@@ -1,7 +1,9 @@
 // genicon 从仓库根目录 icon.png 生成构建资产：
+//   - build/appicon.png       ：Wails 默认应用图标源（直接同步 icon.png）
 //   - build/windows/icon.ico  ：exe 图标（多分辨率 16/32/48/64/128/256，含透明）
 //   - build/trayicon.ico      ：托盘图标（同上，主体放大更清晰）
 //   - build/logo64.png        ：前端标题栏 logo 源（再内联进 index.html）
+//
 // 用法：go run ./cmd/genicon （在项目根目录执行）
 //
 // 图标源要求：正方形 PNG（建议 >= 512x512，带透明背景），放在仓库根目录 icon.png。
@@ -83,8 +85,8 @@ func scaleImage(src image.Image, dst *image.RGBA) {
 // writeICO 把一组 PNG 帧（按尺寸为键）打包成多条目 ICO（PNG 压缩条目，Vista+ 可用）。
 func writeICO(path string, frames map[int]*bytes.Buffer) error {
 	var buf bytes.Buffer
-	_ = binary.Write(&buf, binary.LittleEndian, uint16(0))         // reserved
-	_ = binary.Write(&buf, binary.LittleEndian, uint16(1))         // type = icon
+	_ = binary.Write(&buf, binary.LittleEndian, uint16(0))           // reserved
+	_ = binary.Write(&buf, binary.LittleEndian, uint16(1))           // type = icon
 	_ = binary.Write(&buf, binary.LittleEndian, uint16(len(frames))) // count
 	offset := 6 + 16*len(frames)
 	for _, sz := range icoSizes {
@@ -100,8 +102,8 @@ func writeICO(path string, frames map[int]*bytes.Buffer) error {
 			_ = buf.WriteByte(byte(sz)) // 宽度
 			_ = buf.WriteByte(byte(sz)) // 高度
 		}
-		_ = buf.WriteByte(0)            // palette
-		_ = buf.WriteByte(0)            // reserved
+		_ = buf.WriteByte(0)                                    // palette
+		_ = buf.WriteByte(0)                                    // reserved
 		_ = binary.Write(&buf, binary.LittleEndian, uint16(1))  // planes
 		_ = binary.Write(&buf, binary.LittleEndian, uint16(32)) // bitcount
 		_ = binary.Write(&buf, binary.LittleEndian, uint32(len(data)))
@@ -142,6 +144,14 @@ func main() {
 	icoDir := filepath.Join(root, "build", "windows")
 	_ = os.MkdirAll(trayDir, 0o755)
 	_ = os.MkdirAll(icoDir, 0o755)
+	// Wails 默认读取 build/appicon.png；同步写入根目录 icon.png，避免回退到旧图标。
+	iconRaw, err := os.ReadFile(srcPath)
+	if err != nil {
+		panic(err)
+	}
+	if err := os.WriteFile(filepath.Join(trayDir, "appicon.png"), iconRaw, 0o644); err != nil {
+		panic(err)
+	}
 
 	// 裁掉透明留白，主体居中正方形
 	cropped := cropSquare(src)
@@ -180,10 +190,9 @@ func main() {
 	_ = png.Encode(lf, logo64)
 	_ = lf.Close()
 
-	fmt.Printf("generated: %s, %s, %s\n",
+	fmt.Printf("generated: %s, %s, %s, %s\n",
+		filepath.Join(trayDir, "appicon.png"),
 		filepath.Join(icoDir, "icon.ico"),
 		filepath.Join(trayDir, "trayicon.ico"),
 		logoFP)
 }
-
-

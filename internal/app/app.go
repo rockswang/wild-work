@@ -30,7 +30,7 @@ import (
 )
 
 // Version 面板展示的版本号。
-const Version = "0.1.0"
+const Version = "0.2.0"
 
 const (
 	loginTimeout   = 5 * time.Minute
@@ -161,6 +161,13 @@ func (a *App) findRuntimeAuth(uid string) (*Runtime, *auth.Auth) {
 func (a *App) checkinHours() []int {
 	if rt := a.firstRuntime(); rt != nil && rt.Scheduler != nil {
 		return rt.Scheduler.CheckinHours()
+	}
+	return nil
+}
+
+func (a *App) checkinTimes() []string {
+	if rt := a.firstRuntime(); rt != nil && rt.Scheduler != nil {
+		return rt.Scheduler.CheckinTimes()
 	}
 	return nil
 }
@@ -419,7 +426,8 @@ type AccountView struct {
 // State 面板初始数据。
 type State struct {
 	Accounts       []AccountView `json:"accounts"`
-	CheckinHours   []int         `json:"checkin_hours"`
+	CheckinHours   []int         `json:"checkin_hours"` // 旧前端兼容
+	CheckinTimes   []string      `json:"checkin_times"`
 	KeepaliveHours []int         `json:"keepalive_hours"`
 	ListenHost     string        `json:"listen_host"`
 	ListenPort     int           `json:"listen_port"`
@@ -435,6 +443,7 @@ type State struct {
 func (a *App) GetState() State {
 	st := State{
 		CheckinHours:   a.checkinHours(),
+		CheckinTimes:   a.checkinTimes(),
 		KeepaliveHours: a.keepaliveHours(),
 		ListenHost:     a.cfg.Listen.Host,
 		ListenPort:     a.cfg.Listen.Port,
@@ -566,6 +575,7 @@ func (a *App) CancelLogin() error {
 	cancel()
 	_ = ctx
 	_ = os.Remove(a.loginStateFP)
+	log.Printf("登录已取消")
 	return nil
 }
 
@@ -611,8 +621,8 @@ func (a *App) pollLogin(ctx context.Context) {
 			if errors.Is(err, logintrae.ErrPending) {
 				a.emitLogin("waiting", "等待 Trae 浏览器回调…")
 			} else {
-				log.Printf("trae login poll: %v", err)
-				a.emitLogin("waiting", "轮询暂时不可达，自动重试中…")
+				log.Printf("trae login poll failed: %v", err)
+				a.emitLogin("waiting", "Trae 登录轮询失败，自动重试："+shortErr(err))
 			}
 			continue
 		}
@@ -624,8 +634,8 @@ func (a *App) pollLogin(ctx context.Context) {
 		if errors.Is(err, login.ErrPending) {
 			a.emitLogin("waiting", "等待浏览器完成登录…")
 		} else {
-			log.Printf("login poll: %v", err)
-			a.emitLogin("waiting", "轮询暂时不可达，自动重试中…")
+			log.Printf("workbuddy login poll failed: %v", err)
+			a.emitLogin("waiting", "登录轮询失败，自动重试："+shortErr(err))
 		}
 	}
 }
@@ -633,12 +643,14 @@ func (a *App) pollLogin(ctx context.Context) {
 // completeLogin 登录成功：写 auth 文件、重载账号池，然后异步签到 + 查积分
 // （慢网络下签到可能耗时较长，不能阻塞登录完成的提示）。
 func (a *App) completeLogin(r login.Result) {
+	log.Printf("workbuddy 登录成功 uid=%s nickname=%s expires_in=%d refresh_token=%t", r.UID, r.Nickname, r.ExpiresIn, r.RefreshToken != "")
 	fp, err := login.SaveAuth(a.cfg.AuthDir, r)
 	if err != nil {
+		log.Printf("workbuddy 登录保存凭证失败 uid=%s err=%v", r.UID, err)
 		a.emitLogin("failed", "保存凭证失败: "+err.Error())
 		return
 	}
-	log.Printf("新账号已保存: %s", filepath.Base(fp))
+	log.Printf("workbuddy 登录凭证已保存 uid=%s file=%s", r.UID, filepath.Base(fp))
 	a.reloadAccounts()
 	name := r.Nickname
 	if name == "" && len(r.UID) >= 8 {
@@ -666,12 +678,14 @@ func (a *App) completeLogin(r login.Result) {
 }
 
 func (a *App) completeTraeLogin(r logintrae.Result) {
+	log.Printf("traework 登录成功 uid=%s nickname=%s expires_at=%d refresh_token=%t", r.UID, r.Nickname, r.ExpiresAt, r.RefreshToken != "")
 	fp, err := logintrae.SaveAuth(a.cfg.AuthDir, r)
 	if err != nil {
+		log.Printf("traework 登录保存凭证失败 uid=%s err=%v", r.UID, err)
 		a.emitLogin("failed", "保存凭证失败: "+err.Error())
 		return
 	}
-	log.Printf("TraeWork 新账号已保存: %s", filepath.Base(fp))
+	log.Printf("traework 登录凭证已保存 uid=%s file=%s", r.UID, filepath.Base(fp))
 	a.reloadAccounts()
 	name := r.Nickname
 	if name == "" && len(r.UID) >= 8 {
@@ -732,13 +746,14 @@ func (a *App) CheckinAccount(uid string) (scheduler.CheckinResult, error) {
 	res, err := rt.Scheduler.CheckinAccount(uid)
 	a.emitAccounts()
 	if err != nil {
+		log.Printf("checkin failed uid=%s err=%v", uid, err)
 		return res, err
 	}
-	log.Printf("签到 %s：%s", shortUID(uid), res.Msg)
+	log.Printf("checkin uid=%s ok=%t msg=%s remain=%d has_remain=%t", uid, res.OK, res.Msg, res.Remain, res.HasRemain)
 	return res, nil
 }
 
-// CheckinAll 全部账号立即签到。
+// CheckinAll 全部账号立即签到，返回每个账号的真实结果（包括失败）。
 func (a *App) CheckinAll() []scheduler.CheckinResult {
 	results := make([]scheduler.CheckinResult, 0)
 	for _, rt := range a.runtimes {
@@ -747,17 +762,27 @@ func (a *App) CheckinAll() []scheduler.CheckinResult {
 		}
 		for _, st := range rt.Pool.List() {
 			if st.Disabled {
+				res := scheduler.CheckinResult{UID: st.UID, Msg: "账号已禁用"}
+				results = append(results, res)
+				log.Printf("checkin result platform=%s uid=%s ok=false msg=%s", rt.Kind, st.UID, res.Msg)
 				continue
 			}
 			res, err := rt.Scheduler.CheckinAccount(st.UID)
 			if err != nil {
-				continue
+				res = scheduler.CheckinResult{UID: st.UID, Msg: err.Error()}
+				log.Printf("checkin result platform=%s uid=%s ok=false msg=%s", rt.Kind, st.UID, res.Msg)
 			}
 			results = append(results, res)
 		}
 	}
 	a.emitAccounts()
-	log.Printf("批量签到完成：%d 个账号", len(results))
+	ok := 0
+	for _, r := range results {
+		if r.OK {
+			ok++
+		}
+	}
+	log.Printf("批量签到完成：total=%d ok=%d failed=%d", len(results), ok, len(results)-ok)
 	return results
 }
 
@@ -767,11 +792,14 @@ func (a *App) RefreshCredits(uid string) (int64, error) {
 	if rt == nil || au == nil {
 		return 0, fmt.Errorf("unknown account %s", uid)
 	}
+	log.Printf("credits refresh start platform=%s uid=%s", rt.Kind, uid)
 	remain, err := rt.Upstream.UserResource(au)
 	if err != nil {
+		log.Printf("credits refresh failed platform=%s uid=%s err=%v", rt.Kind, uid, err)
 		return 0, err
 	}
 	rt.Pool.SetCredits(uid, remain)
+	log.Printf("credits refresh success platform=%s uid=%s remain=%d", rt.Kind, uid, remain)
 	a.emitAccounts()
 	return remain, nil
 }
@@ -787,10 +815,12 @@ func (a *App) RefreshAll() {
 			if au == nil || au.AccessToken == "" {
 				continue
 			}
+			log.Printf("credits refresh start platform=%s uid=%s", rt.Kind, st.UID)
 			if remain, err := rt.Upstream.UserResource(au); err == nil {
 				rt.Pool.SetCredits(st.UID, remain)
+				log.Printf("credits refresh success platform=%s uid=%s remain=%d", rt.Kind, st.UID, remain)
 			} else {
-				log.Printf("refresh credits %s/%s: %v", rt.Kind, st.UID, err)
+				log.Printf("credits refresh failed platform=%s uid=%s err=%v", rt.Kind, st.UID, err)
 			}
 		}
 	}
@@ -816,14 +846,36 @@ func (a *App) RemoveAccount(uid string) error {
 // 配置操作
 // ---------------------------------------------------------------------------
 
-// SetCheckinHours 更新自动签到时间并写回 config.json（运行时生效）。
+// SetCheckinHours 保留旧前端 API，仅支持整点并转发到分钟配置。
 func (a *App) SetCheckinHours(hours []int) error {
-	clean := normalizeHours(hours)
+	minutes := make([]int, 0, len(hours))
+	for _, h := range hours {
+		minutes = append(minutes, h*60)
+	}
+	return a.SetCheckinMinutes(minutes)
+}
+
+// SetCheckinTimes 更新自动签到时间（HH:MM）并立即唤醒两个调度器。
+func (a *App) SetCheckinTimes(times []string) error {
+	minutes, err := config.ParseClockTimes(times)
+	if err != nil {
+		return err
+	}
+	return a.SetCheckinMinutes(minutes)
+}
+
+func (a *App) SetCheckinMinutes(minutes []int) error {
+	clean := normalizeMinutes(minutes)
 	if len(clean) == 0 {
 		return errors.New("请至少保留一个签到时间")
 	}
+	times := make([]string, 0, len(clean))
+	for _, m := range clean {
+		times = append(times, fmt.Sprintf("%02d:%02d", m/60, m%60))
+	}
 	a.mu.Lock()
-	a.cfg.Schedule.CheckinHours = clean
+	a.cfg.Schedule.CheckinTimes = times
+	a.cfg.Schedule.CheckinHours = nil // 避免旧整点配置造成歧义；旧读取器会使用默认行为
 	err := config.Save(a.cfg, a.cfgPath)
 	a.mu.Unlock()
 	if err != nil {
@@ -831,10 +883,10 @@ func (a *App) SetCheckinHours(hours []int) error {
 	}
 	for _, rt := range a.runtimes {
 		if rt != nil && rt.Scheduler != nil {
-			rt.Scheduler.SetCheckinHours(clean)
+			rt.Scheduler.SetCheckinMinutes(clean)
 		}
 	}
-	log.Printf("自动签到时间已更新：%s", hoursStr(clean))
+	log.Printf("自动签到时间已更新：%s", strings.Join(times, "、"))
 	return nil
 }
 
@@ -890,6 +942,31 @@ func (a *App) SetAutostart(on bool) error {
 // ---------------------------------------------------------------------------
 // 事件与日志
 // ---------------------------------------------------------------------------
+
+// NotifyRefresh 将 token 刷新结果推送到日志和面板。
+func (a *App) NotifyRefresh(platform, uid string, ok bool, msg string) {
+	log.Printf("GUI refresh platform=%s uid=%s ok=%t msg=%s", platform, uid, ok, msg)
+	if !ok && a.ctx != nil {
+		runtime.EventsEmit(a.ctx, "refresh", map[string]any{"platform": platform, "uid": uid, "ok": ok, "msg": msg})
+	}
+	a.emitAccounts()
+}
+
+// NotifyCheckin 将自动/手动签到结果推送到日志和面板。
+func (a *App) NotifyCheckin(platform string, r scheduler.CheckinResult) {
+	log.Printf("GUI checkin platform=%s uid=%s ok=%t msg=%s remain=%d has_remain=%t", platform, r.UID, r.OK, r.Msg, r.Remain, r.HasRemain)
+	a.emitAccounts()
+	if a.ctx != nil {
+		runtime.EventsEmit(a.ctx, "checkin", map[string]any{
+			"platform":   platform,
+			"uid":        r.UID,
+			"ok":         r.OK,
+			"msg":        r.Msg,
+			"remain":     r.Remain,
+			"has_remain": r.HasRemain,
+		})
+	}
+}
 
 func (a *App) emitAccounts() {
 	if a.ctx != nil {
@@ -955,12 +1032,25 @@ func (a *App) safeGo(f func()) {
 // ---------------------------------------------------------------------------
 
 func normalizeHours(hours []int) []int {
+	minutes := make([]int, 0, len(hours))
+	for _, h := range hours {
+		minutes = append(minutes, h*60)
+	}
+	out := normalizeMinutes(minutes)
+	hoursOut := make([]int, 0, len(out))
+	for _, m := range out {
+		hoursOut = append(hoursOut, m/60)
+	}
+	return hoursOut
+}
+
+func normalizeMinutes(minutes []int) []int {
 	seen := map[int]bool{}
 	out := []int{}
-	for _, h := range hours {
-		if h >= 0 && h <= 23 && !seen[h] {
-			seen[h] = true
-			out = append(out, h)
+	for _, m := range minutes {
+		if m >= 0 && m < 24*60 && !seen[m] {
+			seen[m] = true
+			out = append(out, m)
 		}
 	}
 	sort.Ints(out)
@@ -987,4 +1077,12 @@ func shortUID(uid string) string {
 		return uid
 	}
 	return uid[:10] + "…"
+}
+
+func shortErr(err error) string {
+	s := strings.TrimSpace(err.Error())
+	if len(s) > 160 {
+		return s[:160]
+	}
+	return s
 }

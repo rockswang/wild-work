@@ -19,7 +19,7 @@
 | `internal/app` | wails 绑定层：面板数据/操作/事件、登录编排、端口热切换、日志 | 所有方法都是 wails Bind（导出方法）；`ShowPanel` 必须先等 `domReadyCh`（防白窗口）且托盘回调需 `go` 化（防卡死）；**任何写日志的地方不得含 token** |
 | `internal/config` | 配置加载/校验/原子写回 | `Listen` 兼容旧字符串格式与对象格式；`os.IsNotExist` 不穿透 `%w` 包装，判断文件缺失必须用 `errors.Is(err, fs.ErrNotExist)` |
 | `internal/pool` | 账号池：挑号（余额最高）、冷却/禁用状态机、state.json 持久化 | `Disabled` 同时排除调度与挑号；state 格式**向后兼容**（只加字段别删） |
-| `internal/scheduler` | 定时签到 + token 保活 + 冷却解冻 + 签到记录 | 支持运行时改时间（`SetCheckinHours` + wake 通道）；`CheckinAccount` 单账号手动签到 |
+| `internal/scheduler` | 定时签到 + token 保活 + 冷却解冻 + 签到记录 | 支持分钟级运行时改时间（`SetCheckinMinutes` + wake 通道）；`CheckinAccount` 单账号手动签到；结果推送 GUI/日志 |
 | `internal/upstream` | 上游 HTTP（chat/billing/auth）+ 错误分类 | **`PrepareBody` 三件套勿动**（见 §2）；账单接口用短超时 `BillingHTTP`(30s)；聊天 120s |
 | `internal/server` | OpenAI 兼容 HTTP handler | APIKey 运行时可变（`SetAPIKey` 带锁）；`/status` 需鉴权 |
 | `internal/login` | CN OAuth 登录（state/token/account）+ 登录页跳转链解析 | state 落 `data/login-state.json`（不用系统临时目录） |
@@ -45,11 +45,11 @@
 【请求】客户端 → /v1/chat/completions → server(鉴权) → pool.PickExcluding(余额最高)
       → upstream.ChatStream(PrepareBody 三改写) → copilot.tencent.com/v2/chat/completions
       → SSE 流回 → 错误按分类驱动冷却状态机
-【签到】scheduler(9/21点或面板触发) → DailyCheckin → UserResource(30s短超时)
-      → ReenableIfCredits 解冻 → RecordCheckin 落 state.json → 事件推面板
+【签到】scheduler(分钟级定时或面板触发) → token 校验/必要时刷新 → DailyCheckin → UserResource
+      → ReenableIfCredits 解冻 → RecordCheckin 落 state.json → 结果写 app.log + 事件推面板
 【登录】面板"添加账号" → login.Start(auth/state) → ResolveAuthURL 跳转链 → 无痕浏览器打开
       → 轮询 auth/token(2s) → 成功写 auths/ 文件 → pool 重载 → 异步签到
-【配置】面板修改 → config.Save 原子写回 → 运行时生效（SetListen 热切换监听 / SetCheckinHours 唤醒调度）
+【配置】面板修改 → config.Save 原子写回 → 运行时生效（SetListen 热切换监听 / SetCheckinMinutes 唤醒调度）
 ```
 
 ## 4. 常用命令（Agent 实际操作）
@@ -58,7 +58,7 @@
 go build ./... && go vet ./... && go test ./...     # 全量校验（6 个包）
 go run ./cmd/server -config config.json              # 无头模式起服务（调试 HTTP 链路，无需 GUI/桌面）
 wails build -platform windows/amd64 -skipbindings    # 出 build/bin/workbuddy-wild.exe
-go run ./cmd/genicon                                 # 重新生成图标
+bash genicon.sh                                      # icon.png 变更后重新生成图标（普通 build.sh 不重复生成）
 # 桌面 GUI 测试：本机如无交互桌面（SSH/服务会话），WebView2 无法创建，
 # go-webview2 的 errorCallback 会直接 os.Exit(1)（recover 无效）——必须用真实桌面会话验证 GUI。
 ```
@@ -147,7 +147,7 @@ wails build -platform darwin/universal -skipbindings   # 或 darwin/arm64 / darw
 | `api_key` | `WorkBuddy2API` | 客户端 Bearer 密钥；空 = 不鉴权 |
 | `auth_dir` / `state_file` | `./auths` / `./data/state.json` | 相对 exe 目录 |
 | `region` | `cn` | 上游区域（仅 cn） |
-| `schedule.checkin_hours` | `[9,21]` | 每日签到整点（面板可改，即时生效） |
+| `schedule.checkin_times` | `["09:00","21:00"]` | 每日签到时间（支持分钟，面板可改，即时生效；兼容旧 `checkin_hours`） |
 | `schedule.keepalive_hours` | `[22]` | token 保活时间 |
 | `cooldown.*` | 12h/60s/5/10m | 余额不足/429/连续错误 冷却 |
 | `upstream.timeout_seconds` | `120` | 聊天超时（账单接口固定 30s） |

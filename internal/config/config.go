@@ -8,6 +8,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -101,8 +102,9 @@ type Config struct {
 	} `json:"cooldown"`
 
 	Schedule struct {
-		CheckinHours   []int `json:"checkin_hours"`   // [9,21]
-		KeepaliveHours []int `json:"keepalive_hours"` // [22]
+		CheckinHours   []int    `json:"checkin_hours,omitempty"` // 旧格式：[9,21]
+		CheckinTimes   []string `json:"checkin_times,omitempty"` // 新格式：["09:00","21:30"]
+		KeepaliveHours []int    `json:"keepalive_hours"`         // [22]
 	} `json:"schedule"`
 
 	Upstream struct {
@@ -129,6 +131,7 @@ func Default() *Config {
 	c.Cooldown.ErrThresh = 3
 	c.Cooldown.ErrCooldown = "10m"
 	c.Schedule.CheckinHours = []int{9, 21}
+	c.Schedule.CheckinTimes = []string{"09:00", "21:00"}
 	c.Schedule.KeepaliveHours = []int{22}
 	c.Upstream.TimeoutSeconds = 120
 	return c
@@ -144,6 +147,16 @@ func Load(path string) (*Config, error) {
 		}
 		if err := json.Unmarshal(raw, c); err != nil {
 			return nil, fmt.Errorf("parse config: %w", err)
+		}
+		// Default() 带有新字段默认值；老配置没有 checkin_times 时必须让旧的
+		// checkin_hours 生效，而不能被 Default 的 [09:00,21:00] 覆盖。
+		var shape struct {
+			Schedule map[string]json.RawMessage `json:"schedule"`
+		}
+		if json.Unmarshal(raw, &shape) == nil {
+			if _, ok := shape.Schedule["checkin_times"]; !ok {
+				c.Schedule.CheckinTimes = nil
+			}
 		}
 	}
 	applyEnv(c)
@@ -167,6 +180,48 @@ func Save(c *Config, path string) error {
 		return err
 	}
 	return os.Rename(tmp, path)
+}
+
+// ParseClockTimes 将 HH:MM 列表转换为当天分钟数（0..1439）。
+func ParseClockTimes(values []string) ([]int, error) {
+	seen := map[int]bool{}
+	out := make([]int, 0, len(values))
+	for _, v := range values {
+		parts := strings.Split(strings.TrimSpace(v), ":")
+		if len(parts) != 2 {
+			return nil, fmt.Errorf("invalid time %q", v)
+		}
+		h, errH := strconv.Atoi(parts[0])
+		m, errM := strconv.Atoi(parts[1])
+		if errH != nil || errM != nil || h < 0 || h > 23 || m < 0 || m > 59 {
+			return nil, fmt.Errorf("invalid time %q", v)
+		}
+		minute := h*60 + m
+		if !seen[minute] {
+			seen[minute] = true
+			out = append(out, minute)
+		}
+	}
+	sort.Ints(out)
+	return out, nil
+}
+
+// FormatClockTimes 将当天分钟数格式化为排序后的 HH:MM 列表。
+func FormatClockTimes(minutes []int) []string {
+	out := make([]int, 0, len(minutes))
+	seen := map[int]bool{}
+	for _, m := range minutes {
+		if m >= 0 && m < 24*60 && !seen[m] {
+			seen[m] = true
+			out = append(out, m)
+		}
+	}
+	sort.Ints(out)
+	formatted := make([]string, 0, len(out))
+	for _, m := range out {
+		formatted = append(formatted, fmt.Sprintf("%02d:%02d", m/60, m%60))
+	}
+	return formatted
 }
 
 func applyEnv(c *Config) {
@@ -234,6 +289,28 @@ func (c *Config) normalize() error {
 	c.Region = strings.ToLower(c.Region)
 	if c.Region != "cn" && c.Region != "global" {
 		return fmt.Errorf("region must be cn or global, got %q", c.Region)
+	}
+	// 兼容旧版 checkin_hours；新版本统一规范化为 HH:MM。
+	if len(c.Schedule.CheckinTimes) == 0 {
+		c.Schedule.CheckinTimes = make([]string, 0, len(c.Schedule.CheckinHours))
+		for _, h := range c.Schedule.CheckinHours {
+			if h < 0 || h > 23 {
+				return fmt.Errorf("schedule.checkin_hours: hour out of range: %d", h)
+			}
+			c.Schedule.CheckinTimes = append(c.Schedule.CheckinTimes, fmt.Sprintf("%02d:00", h))
+		}
+	}
+	mins, err := ParseClockTimes(c.Schedule.CheckinTimes)
+	if err != nil {
+		return fmt.Errorf("schedule.checkin_times: %w", err)
+	}
+	c.Schedule.CheckinTimes = FormatClockTimes(mins)
+	if len(c.Schedule.CheckinHours) == 0 {
+		for _, m := range mins {
+			if m%60 == 0 {
+				c.Schedule.CheckinHours = append(c.Schedule.CheckinHours, m/60)
+			}
+		}
 	}
 	return nil
 }

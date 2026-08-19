@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"sort"
 	"strings"
@@ -265,7 +266,9 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		}
 		tried[acct.UID] = true
 		if acct.NeedsRefresh(h.cfg.RefreshSkew) {
+			log.Printf("refresh start platform=%s uid=%s reason=request", rt.Kind, acct.UID)
 			if err := rt.Upstream.RefreshToken(acct); err != nil {
+				log.Printf("refresh failed platform=%s uid=%s err=%v", rt.Kind, acct.UID, err)
 				lastErr = err
 				var ue *provider.Error
 				if errors.As(err, &ue) && ue.Kind == provider.ErrSessionDead {
@@ -275,7 +278,10 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				}
 				continue
 			}
-			_ = acct.SaveAtomic()
+			if err := acct.SaveAtomic(); err != nil {
+				log.Printf("refresh save failed platform=%s uid=%s err=%v", rt.Kind, acct.UID, err)
+			}
+			log.Printf("refresh success platform=%s uid=%s expires_at=%d", rt.Kind, acct.UID, acct.ExpiresAt)
 		}
 		rc, status, respBody, terr := rt.Upstream.ChatStream(acct, body)
 		if terr != nil {

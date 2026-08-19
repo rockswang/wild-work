@@ -47,17 +47,18 @@ func Classify(status int, body string) provider.ErrKind {
 
 // Client Trae SOLO 上游 HTTP 客户端。
 type Client struct {
-	HTTP       *http.Client
-	StreamHTTP *http.Client
-	AgentHost  string
-	UgHost     string
-	OAuthHost  string
-	ClientID   string
+	HTTP              *http.Client
+	StreamHTTP        *http.Client
+	AgentHost         string
+	UgHost            string
+	OAuthHost         string
+	ClientID          string
+	CheckinRetryDelay time.Duration // 9074 限流后的重试等待；生产默认 8s
 }
 
 func New() *Client {
 	tr := &http.Transport{MaxIdleConns: 100, MaxIdleConnsPerHost: 20, IdleConnTimeout: 90 * time.Second, ResponseHeaderTimeout: 120 * time.Second}
-	return &Client{HTTP: &http.Client{Timeout: 120 * time.Second, Transport: tr}, StreamHTTP: &http.Client{Transport: tr}, AgentHost: AgentHost, UgHost: UgHost, OAuthHost: OAuthHost, ClientID: ClientID}
+	return &Client{HTTP: &http.Client{Timeout: 120 * time.Second, Transport: tr}, StreamHTTP: &http.Client{Transport: tr}, AgentHost: AgentHost, UgHost: UgHost, OAuthHost: OAuthHost, ClientID: ClientID, CheckinRetryDelay: 8 * time.Second}
 }
 
 func (c *Client) agentBase() string { return c.AgentHost }
@@ -81,8 +82,12 @@ func (c *Client) doJSON(req *http.Request) (json.RawMessage, error) {
 func (c *Client) RefreshToken(a *auth.Auth) error {
 	a.Lock()
 	defer a.Unlock()
+	oldRefresh := a.RefreshToken
+	log.Printf("traework refresh start uid=%s", a.UID)
 	if strings.TrimSpace(a.RefreshToken) == "" {
-		return fmt.Errorf("no refreshToken")
+		err := fmt.Errorf("no refreshToken")
+		log.Printf("traework refresh failed uid=%s err=%v", a.UID, err)
+		return err
 	}
 	host := a.ApiHost
 	if host == "" {
@@ -97,6 +102,7 @@ func (c *Client) RefreshToken(a *auth.Auth) error {
 	OAuthHeaders(req)
 	data, err := c.doJSON(req)
 	if err != nil {
+		log.Printf("traework refresh failed uid=%s err=%v", a.UID, err)
 		return err
 	}
 	var resp struct {
@@ -108,10 +114,14 @@ func (c *Client) RefreshToken(a *auth.Auth) error {
 		} `json:"Result"`
 	}
 	if err := json.Unmarshal(data, &resp); err != nil {
-		return fmt.Errorf("exchange parse: %w", err)
+		err = fmt.Errorf("exchange parse: %w", err)
+		log.Printf("traework refresh failed uid=%s err=%v", a.UID, err)
+		return err
 	}
 	if resp.Result.Token == "" {
-		return fmt.Errorf("refresh_failed: no token in response — re-login required")
+		err := fmt.Errorf("refresh_failed: no token in response — re-login required")
+		log.Printf("traework refresh failed uid=%s err=%v", a.UID, err)
+		return err
 	}
 	a.AccessToken = resp.Result.Token
 	if resp.Result.RefreshToken != "" {
@@ -128,6 +138,7 @@ func (c *Client) RefreshToken(a *auth.Auth) error {
 		}
 		a.ExpiresAt = time.Now().Add(d).Unix()
 	}
+	log.Printf("traework refresh success uid=%s refresh_rotated=%t expires_at=%d", a.UID, a.RefreshToken != oldRefresh, a.ExpiresAt)
 	return nil
 }
 
@@ -214,41 +225,129 @@ func (c *Client) CheckinStatus(a *auth.Auth) (checkedIn bool, credits int64, ena
 	UgHeaders(req, a)
 	data, err := c.doJSON(req)
 	if err != nil {
+		log.Printf("traework checkin status failed uid=%s err=%v", a.UID, err)
 		return false, 0, false, err
 	}
 	var resp struct {
-		CheckedIn bool  `json:"checked_in"`
-		Credits   int64 `json:"credits"`
-		Enable    bool  `json:"enable"`
+		CheckedIn bool   `json:"checked_in"`
+		Credits   int64  `json:"credits"`
+		Enable    bool   `json:"enable"`
+		Code      int    `json:"code"`
+		Message   string `json:"message"`
+		Msg       string `json:"msg"`
+		Success   *bool  `json:"success"`
 	}
 	if err := json.Unmarshal(data, &resp); err != nil {
-		return false, 0, false, fmt.Errorf("checkin status parse: %w", err)
+		err = fmt.Errorf("checkin status parse: %w", err)
+		log.Printf("traework checkin status failed uid=%s err=%v", a.UID, err)
+		return false, 0, false, err
 	}
+	if resp.Code != 0 {
+		err := fmt.Errorf("checkin status code=%d msg=%s", resp.Code, checkinResponseMessage(resp.Message, resp.Msg))
+		log.Printf("traework checkin status failed uid=%s err=%v", a.UID, err)
+		return false, 0, false, err
+	}
+	if resp.Success != nil && !*resp.Success {
+		err := fmt.Errorf("checkin status failed: %s", checkinResponseMessage(resp.Message, resp.Msg))
+		log.Printf("traework checkin status failed uid=%s err=%v", a.UID, err)
+		return false, 0, false, err
+	}
+	log.Printf("traework checkin status uid=%s checked_in=%t credits=%d enable=%t", a.UID, resp.CheckedIn, resp.Credits, resp.Enable)
 	return resp.CheckedIn, resp.Credits, resp.Enable, nil
 }
 
 func (c *Client) CheckinClaim(a *auth.Auth) error {
-	req, err := http.NewRequest(http.MethodPost, c.ugBase()+EpCheckinClaim, bytes.NewReader([]byte("{}")))
-	if err != nil {
-		return err
+	log.Printf("traework checkin claim start uid=%s", a.UID)
+	for attempt := 0; attempt < 2; attempt++ {
+		req, err := http.NewRequest(http.MethodPost, c.ugBase()+EpCheckinClaim, bytes.NewReader([]byte("{}")))
+		if err != nil {
+			log.Printf("traework checkin claim failed uid=%s err=%v", a.UID, err)
+			return err
+		}
+		UgHeaders(req, a)
+		data, err := c.doJSON(req)
+		if err != nil {
+			log.Printf("traework checkin claim failed uid=%s err=%v", a.UID, err)
+			return err
+		}
+		code, msg, success, err := parseCheckinResponse(data)
+		if err != nil {
+			log.Printf("traework checkin claim failed uid=%s err=%v", a.UID, err)
+			return err
+		}
+		if code == 9074 && attempt == 0 {
+			delay := c.CheckinRetryDelay
+			if delay > 0 {
+				log.Printf("traework checkin claim rate-limited uid=%s code=9074 retry_after=%s", a.UID, delay)
+				time.Sleep(delay)
+			}
+			continue
+		}
+		if code != 0 {
+			err := fmt.Errorf("checkin claim code=%d msg=%s", code, msg)
+			log.Printf("traework checkin claim failed uid=%s err=%v", a.UID, err)
+			return err
+		}
+		if success != nil && !*success {
+			err := fmt.Errorf("checkin claim failed: %s", msg)
+			log.Printf("traework checkin claim failed uid=%s err=%v", a.UID, err)
+			return err
+		}
+		log.Printf("traework checkin claim response uid=%s code=%d msg=%s", a.UID, code, msg)
+		return nil // 9095 等业务无害响应交给后置 status 验证最终状态
 	}
-	UgHeaders(req, a)
-	_, err = c.doJSON(req)
-	return err
+	return fmt.Errorf("checkin claim rate limited: code=9074")
 }
 
 func (c *Client) DailyCheckin(a *auth.Auth) error {
+	log.Printf("traework checkin start uid=%s", a.UID)
 	checked, _, enable, err := c.CheckinStatus(a)
 	if err != nil {
 		return err
 	}
 	if checked {
+		log.Printf("traework checkin already uid=%s", a.UID)
 		return fmt.Errorf("已签到")
 	}
 	if !enable {
-		return fmt.Errorf("checkin disabled")
+		err := fmt.Errorf("checkin disabled")
+		log.Printf("traework checkin rejected uid=%s err=%v", a.UID, err)
+		return err
 	}
-	return c.CheckinClaim(a)
+	if err := c.CheckinClaim(a); err != nil {
+		return err
+	}
+	checked, _, _, err = c.CheckinStatus(a)
+	if err != nil {
+		return fmt.Errorf("checkin verification: %w", err)
+	}
+	if !checked {
+		err := fmt.Errorf("checkin verification failed: checked_in=false")
+		log.Printf("traework checkin failed uid=%s err=%v", a.UID, err)
+		return err
+	}
+	log.Printf("traework checkin verified uid=%s", a.UID)
+	return nil
+}
+
+func parseCheckinResponse(data []byte) (code int, msg string, success *bool, err error) {
+	var resp struct {
+		Code    int    `json:"code"`
+		Message string `json:"message"`
+		Msg     string `json:"msg"`
+		Success *bool  `json:"success"`
+	}
+	if err := json.Unmarshal(data, &resp); err != nil {
+		return 0, "", nil, fmt.Errorf("checkin response parse: %w", err)
+	}
+	return resp.Code, checkinResponseMessage(resp.Message, resp.Msg), resp.Success, nil
+}
+
+func checkinResponseMessage(message, msg string) string {
+	if strings.TrimSpace(message) != "" {
+		return strings.TrimSpace(message)
+	}
+	return strings.TrimSpace(msg)
 }
 
 func (c *Client) UserResource(a *auth.Auth) (remain int64, err error) { return c.UserEntUsage(a) }

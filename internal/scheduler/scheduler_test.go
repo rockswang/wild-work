@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -39,6 +40,19 @@ func TestNextFireMergesSchedules(t *testing.T) {
 	next := nextFire(now, []int{9, 21, 22})
 	if next.Hour() != 21 {
 		t.Errorf("next=%v want 21 (earliest of 21/22)", next)
+	}
+}
+
+func TestNextFireMinutes(t *testing.T) {
+	now := time.Date(2026, 7, 27, 9, 5, 0, 0, time.Local)
+	next := nextFireMinutes(now, []int{9 * 60, 9*60 + 30, 21 * 60})
+	if next.Hour() != 9 || next.Minute() != 30 || next.Day() != 27 {
+		t.Errorf("next=%v want 09:30 same day", next)
+	}
+	now = time.Date(2026, 7, 27, 9, 30, 0, 0, time.Local)
+	next = nextFireMinutes(now, []int{9*60 + 30})
+	if next.Day() != 28 || next.Hour() != 9 || next.Minute() != 30 {
+		t.Errorf("exact match should roll to next day: %v", next)
 	}
 }
 
@@ -189,6 +203,73 @@ func TestSetCheckinHoursRoundtrip(t *testing.T) {
 	got := s.CheckinHours()
 	if len(got) != 2 || got[0] != 7 || got[1] != 19 {
 		t.Errorf("hours=%v want [7 19]", got)
+	}
+}
+
+func TestSetCheckinMinutesRoundtrip(t *testing.T) {
+	s := New(Config{})
+	s.SetCheckinMinutes([]int{21*60 + 30, 7*60 + 5})
+	got := s.CheckinTimes()
+	if len(got) != 2 || got[0] != "07:05" || got[1] != "21:30" {
+		t.Errorf("times=%v", got)
+	}
+}
+
+func TestCheckinRefreshesExpiredToken(t *testing.T) {
+	f := &fakeUpstream{resourceRemain: 300}
+	srv := f.server()
+	defer srv.Close()
+
+	p := pool.New("")
+	a := &auth.Auth{UID: "u1", AccessToken: "old", RefreshToken: "rt", ExpiresAt: 1, FilePath: filepath.Join(t.TempDir(), "auth.json")}
+	p.Add(a)
+	up := &upstream.Client{
+		HTTP:            srv.Client(),
+		ChatBaseCN:      srv.URL,
+		BillingBaseCN:   srv.URL,
+		ChatBaseGlobal:  srv.URL,
+		BillingBaseGlob: srv.URL,
+	}
+	s := New(Config{Pool: p, Upstream: up})
+	res, err := s.CheckinAccount("u1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.OK || f.refreshCalls.Load() != 1 || f.checkinCalls.Load() != 1 {
+		t.Errorf("res=%+v refresh=%d checkin=%d", res, f.refreshCalls.Load(), f.checkinCalls.Load())
+	}
+	if got := p.AuthByUID("u1").AccessToken; got != "new" {
+		t.Errorf("access token=%q want new", got)
+	}
+}
+
+func TestIsAlreadyRequiresExplicitMarker(t *testing.T) {
+	if isAlready(errors.New("checkin claim failed: operation too frequent")) {
+		t.Fatal("rate limit must not be treated as already checked in")
+	}
+	if !isAlready(errors.New("checkin claim code=9095")) {
+		t.Fatal("code 9095 should be treated as already checked in")
+	}
+}
+
+func TestCheckinObserverReceivesFailure(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "upstream down", http.StatusBadGateway)
+	}))
+	defer srv.Close()
+
+	p := pool.New("")
+	p.Add(&auth.Auth{UID: "u1", AccessToken: "at", RefreshToken: "rt", ExpiresAt: 9999999999})
+	up := &upstream.Client{HTTP: srv.Client(), BillingBaseCN: srv.URL, ChatBaseCN: srv.URL, BillingBaseGlob: srv.URL, ChatBaseGlobal: srv.URL}
+	s := New(Config{Pool: p, Upstream: up, Name: "traework"})
+	var got CheckinResult
+	s.SetCheckinObserver(func(r CheckinResult) { got = r })
+	res, err := s.CheckinAccount("u1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.OK || got.OK || got.Msg == "" {
+		t.Fatalf("result=%+v observer=%+v", res, got)
 	}
 }
 

@@ -93,9 +93,13 @@ func main() {
 	wbUp.HTTP.Timeout = time.Duration(cfg.Upstream.TimeoutSeconds) * time.Second
 	trUp := traework.New()
 	trUp.HTTP.Timeout = time.Duration(cfg.Upstream.TimeoutSeconds) * time.Second
+	checkinMinutes, err := config.ParseClockTimes(cfg.Schedule.CheckinTimes)
+	if err != nil {
+		fatal("解析签到时间失败：%v", err)
+	}
 
-	wbSch := scheduler.New(scheduler.Config{Pool: wbPool, Upstream: wbUp, CheckinHours: cfg.Schedule.CheckinHours, KeepaliveHours: cfg.Schedule.KeepaliveHours})
-	trSch := scheduler.New(scheduler.Config{Pool: trPool, Upstream: trUp, CheckinHours: cfg.Schedule.CheckinHours, KeepaliveHours: cfg.Schedule.KeepaliveHours})
+	wbSch := scheduler.New(scheduler.Config{Pool: wbPool, Upstream: wbUp, Name: "workbuddy", CheckinMinutes: checkinMinutes, KeepaliveHours: cfg.Schedule.KeepaliveHours})
+	trSch := scheduler.New(scheduler.Config{Pool: trPool, Upstream: trUp, Name: "traework", CheckinMinutes: checkinMinutes, KeepaliveHours: cfg.Schedule.KeepaliveHours})
 
 	runtimes := map[provider.Kind]*server.Runtime{
 		provider.WorkBuddy: {Kind: provider.WorkBuddy, Pool: wbPool, Upstream: wbUp, StaticModels: server.WorkBuddyStaticModels()},
@@ -124,6 +128,11 @@ func main() {
 	if err != nil {
 		fatal("初始化失败：%v", err)
 	}
+	// 定时签到结果实时推送面板；手动签到也复用同一回调。
+	wbSch.SetCheckinObserver(func(r scheduler.CheckinResult) { appInst.NotifyCheckin("workbuddy", r) })
+	trSch.SetCheckinObserver(func(r scheduler.CheckinResult) { appInst.NotifyCheckin("traework", r) })
+	wbSch.SetRefreshObserver(func(uid string, ok bool, msg string) { appInst.NotifyRefresh("workbuddy", uid, ok, msg) })
+	trSch.SetRefreshObserver(func(uid string, ok bool, msg string) { appInst.NotifyRefresh("traework", uid, ok, msg) })
 	if err := appInst.StartServer(); err != nil {
 		log.Printf("listen %s failed: %v（面板中将提示）", cfg.Listen.Addr(), err)
 	}

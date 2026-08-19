@@ -173,8 +173,12 @@ func (c *Client) doJSONWith(client *http.Client, req *http.Request) (json.RawMes
 func (c *Client) RefreshToken(a *auth.Auth) error {
 	a.Lock()
 	defer a.Unlock()
+	oldRefresh := a.RefreshToken
+	log.Printf("workbuddy refresh start uid=%s", a.UID)
 	if strings.TrimSpace(a.RefreshToken) == "" {
-		return fmt.Errorf("no refreshToken")
+		err := fmt.Errorf("no refreshToken")
+		log.Printf("workbuddy refresh failed uid=%s err=%v", a.UID, err)
+		return err
 	}
 	url := c.chatBase(a) + "/v2/plugin/auth/token/refresh"
 	req, err := http.NewRequest(http.MethodPost, url, nil)
@@ -184,6 +188,7 @@ func (c *Client) RefreshToken(a *auth.Auth) error {
 	RefreshHeaders(req, a)
 	data, err := c.doJSON(req)
 	if err != nil {
+		log.Printf("workbuddy refresh failed uid=%s err=%v", a.UID, err)
 		return err
 	}
 	var tok struct {
@@ -193,7 +198,9 @@ func (c *Client) RefreshToken(a *auth.Auth) error {
 		Domain       string `json:"domain"`
 	}
 	if err := json.Unmarshal(data, &tok); err != nil || tok.AccessToken == "" {
-		return fmt.Errorf("refresh_failed: no accessToken in response — re-login required")
+		err := fmt.Errorf("refresh_failed: no accessToken in response — re-login required")
+		log.Printf("workbuddy refresh failed uid=%s err=%v", a.UID, err)
+		return err
 	}
 	a.AccessToken = tok.AccessToken
 	if tok.RefreshToken != "" {
@@ -206,6 +213,7 @@ func (c *Client) RefreshToken(a *auth.Auth) error {
 	if tok.ExpiresIn > 0 {
 		a.ExpiresAt = time.Now().Add(time.Duration(tok.ExpiresIn) * time.Second).Unix()
 	}
+	log.Printf("workbuddy refresh success uid=%s refresh_rotated=%t expires_at=%d", a.UID, a.RefreshToken != oldRefresh, a.ExpiresAt)
 	return nil
 }
 
@@ -388,6 +396,7 @@ func (c *Client) UserResource(a *auth.Auth) (remain int64, err error) {
 
 // DailyCheckin 执行每日签到。已签到（业务 code 非 0）也返回错误，调用方按 msg 区分。
 func (c *Client) DailyCheckin(a *auth.Auth) error {
+	log.Printf("workbuddy checkin start uid=%s", a.UID)
 	url := c.billingBase(a) + "/v2/billing/meter/daily-checkin"
 	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader([]byte("{}")))
 	if err != nil {
@@ -395,7 +404,12 @@ func (c *Client) DailyCheckin(a *auth.Auth) error {
 	}
 	BillingHeaders(req, a)
 	_, err = c.doJSONBilling(req)
-	return err
+	if err != nil {
+		log.Printf("workbuddy checkin failed uid=%s err=%v", a.UID, err)
+		return err
+	}
+	log.Printf("workbuddy checkin success uid=%s", a.UID)
+	return nil
 }
 
 // Classify 实现 provider.Upstream。

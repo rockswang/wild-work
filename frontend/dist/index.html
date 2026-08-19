@@ -40,7 +40,7 @@
       <div id="hoursBox" class="hours"></div>
       <button class="icon-btn" id="btnAddHour" title="增加一个时间">＋</button>
     </div>
-    <div class="hint">保活 22:00 自动 · 下次 <span id="nextCheckin"></span></div>
+    <div class="hint">签到支持分钟 · 保活 22:00 自动 · 下次 <span id="nextCheckin"></span></div>
   </div>
 
   <!-- API 监听 -->
@@ -74,6 +74,7 @@
       <label class="switch"><input type="checkbox" id="chkAutostart"><span class="slider"></span></label>
     </div>
     <button class="btn block" id="btnLog">查看日志</button>
+    <button class="btn block" id="btnAbout">关于软件</button>
   </div>
 
   <button class="btn danger block" id="btnQuit">退出</button>
@@ -102,6 +103,25 @@
     <div class="modal-actions">
       <button class="btn small" id="btnConfirmCancel">取消</button>
       <button class="btn small danger" id="btnConfirmOk">删除</button>
+    </div>
+  </div>
+</div>
+
+<!-- 关于软件 -->
+<div class="overlay hidden" id="aboutOverlay">
+  <div class="modal about-modal">
+    <div class="modal-title">关于 WorkBuddy2API</div>
+    <div class="about-body">
+      <div class="about-mark">W<span>²</span></div>
+      <div class="about-name">WorkBuddy2API</div>
+      <div class="about-meta">WorkBuddy / TraeWork OpenAI 兼容代理</div>
+      <div class="about-line"><span>版本</span><strong id="aboutVersion">-</strong></div>
+      <div class="about-line"><span>作者</span><strong>rockswang</strong></div>
+      <div class="about-line about-link"><span>项目</span><a id="aboutProject" href="https://github.com/rockswang/workbuddy-wild">github.com/rockswang/workbuddy-wild</a></div>
+      <div class="about-line"><span>许可</span><strong>MIT License</strong></div>
+    </div>
+    <div class="modal-actions">
+      <button class="btn small" id="btnAboutClose">关闭</button>
     </div>
   </div>
 </div>

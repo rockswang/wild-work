@@ -34,7 +34,20 @@ if [ -d "$BIN" ]; then
     echo "备份用户数据: $(find "$BACKUP" -type f | wc -l) files"
 fi
 
-# 3. 杀旧进程（如果有）
+# 3. 图标由 genicon.sh 单独生成；构建时只校验资产，避免每次覆盖图标。
+#    icon.png 变更后先执行：bash genicon.sh
+for icon in build/appicon.png build/trayicon.ico build/windows/icon.ico; do
+    if [ ! -f "$icon" ]; then
+        echo "缺少图标资产: $icon，请先执行 bash genicon.sh" >&2
+        exit 1
+    fi
+done
+if ! cmp -s icon.png build/appicon.png; then
+    echo "build/appicon.png 不是当前 icon.png 生成，请先执行 bash genicon.sh" >&2
+    exit 1
+fi
+
+# 4. 杀旧进程（如果有）
 OLD_PID=$(tasklist //NH //FI "IMAGENAME eq workbuddy-wild.exe" 2>/dev/null | grep -i workbuddy | awk '{print $2}' || true)
 if [ -n "$OLD_PID" ]; then
     echo "关闭旧进程 PID=$OLD_PID..."
@@ -42,11 +55,11 @@ if [ -n "$OLD_PID" ]; then
     sleep 1
 fi
 
-# 4. wails build
+# 5. wails build
 echo "=== wails build ==="
 "$WAILS" build -platform windows/amd64 -clean -skipbindings "$@"
 
-# 5. 恢复备份
+# 6. 恢复备份
 if [ -d "$BACKUP" ]; then
     # config.json
     [ -f "$BACKUP/config.json" ] && cp "$BACKUP/config.json" "$BIN/"

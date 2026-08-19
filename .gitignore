@@ -25,6 +25,7 @@ SPEC.md
 AGENTS.md
 HANDOFF.md
 temp/
+test/
 
 # Generated binary
 genicon.exe

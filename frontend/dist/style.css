@@ -162,6 +162,22 @@ input, select, button { font: inherit; color: inherit; }
 .modal-body { font-size: 12px; word-break: break-all; }
 .countdown { margin-top: 8px; color: var(--muted); font-size: 12px; font-family: var(--mono); }
 .modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 14px; }
+.about-modal { width: 248px; }
+.about-body { text-align: center; }
+.about-mark {
+  width: 42px; height: 42px; margin: 2px auto 6px; border-radius: 12px;
+  display: flex; align-items: center; justify-content: center;
+  background: linear-gradient(145deg, var(--accent2), #0d9488); color: #fff;
+  font-size: 22px; font-weight: 800; letter-spacing: -3px; box-shadow: 0 4px 10px rgba(37, 99, 235, .22);
+}
+.about-mark span { font-size: 11px; margin: -13px 0 0 1px; letter-spacing: 0; }
+.about-name { font-size: 14px; font-weight: 700; }
+.about-meta { color: var(--muted); font-size: 10px; margin: 2px 0 12px; }
+.about-line { display: flex; align-items: center; gap: 8px; padding: 5px 0; border-top: 1px solid var(--border); text-align: left; font-size: 11px; }
+.about-line > span { width: 34px; color: var(--muted); flex: none; }
+.about-line strong { font-weight: 500; }
+.about-link a { color: var(--accent2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-decoration: none; }
+.about-link a:hover { text-decoration: underline; }
 
 /* toast */
 .toast {

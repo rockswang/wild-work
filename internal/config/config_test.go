@@ -106,6 +106,48 @@ func TestEnvOverride(t *testing.T) {
 	}
 }
 
+func TestClockTimes(t *testing.T) {
+	got, err := ParseClockTimes([]string{"21:30", "09:05", "09:05"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 || got[0] != 9*60+5 || got[1] != 21*60+30 {
+		t.Fatalf("minutes=%v", got)
+	}
+	if _, err := ParseClockTimes([]string{"24:00"}); err == nil {
+		t.Fatal("want invalid time error")
+	}
+	if got := FormatClockTimes(got); got[0] != "09:05" || got[1] != "21:30" {
+		t.Fatalf("times=%v", got)
+	}
+}
+
+func TestLoadLegacyCheckinHours(t *testing.T) {
+	dir := t.TempDir()
+	fp := filepath.Join(dir, "c.json")
+	os.WriteFile(fp, []byte(`{"schedule":{"checkin_hours":[8,20]}}`), 0o600)
+	c, err := Load(fp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := c.Schedule.CheckinTimes; len(got) != 2 || got[0] != "08:00" || got[1] != "20:00" {
+		t.Fatalf("times=%v", got)
+	}
+}
+
+func TestLoadMinuteCheckinTimes(t *testing.T) {
+	dir := t.TempDir()
+	fp := filepath.Join(dir, "c.json")
+	os.WriteFile(fp, []byte(`{"schedule":{"checkin_times":["09:05","21:30"]}}`), 0o600)
+	c, err := Load(fp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := c.Schedule.CheckinTimes; len(got) != 2 || got[0] != "09:05" || got[1] != "21:30" {
+		t.Fatalf("times=%v", got)
+	}
+}
+
 func TestBadDuration(t *testing.T) {
 	dir := t.TempDir()
 	fp := filepath.Join(dir, "c.json")

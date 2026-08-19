@@ -144,10 +144,12 @@ function accountStatus(a) {
 
 function renderHours() {
   const box = $("hoursBox");
-  box.innerHTML = (state.checkin_hours || []).map((h, i) => {
-    const v = String(h).padStart(2, "0") + ":00";
+  // 新格式支持分钟；旧后端只返回 checkin_hours 时仍兼容整点显示。
+  const times = state.checkin_times || (state.checkin_hours || []).map((h) => String(h).padStart(2, "0") + ":00");
+  state.checkin_times = times.slice();
+  box.innerHTML = times.map((v, i) => {
     return `<span class="hour-chip">
-      <input type="time" value="${v}" step="3600">
+      <input type="time" value="${v}" step="60">
       <button class="del" data-i="${i}" title="删除">×</button>
     </span>`;
   }).join("");
@@ -157,7 +159,7 @@ function renderHours() {
   });
   box.querySelectorAll(".del").forEach((btn) => {
     btn.onclick = () => {
-      state.checkin_hours.splice(Number(btn.dataset.i), 1);
+      state.checkin_times.splice(Number(btn.dataset.i), 1);
       renderHours();
       commitHours();
     };
@@ -167,17 +169,17 @@ function renderHours() {
 function collectHours() {
   const out = [];
   $("hoursBox").querySelectorAll("input[type=time]").forEach((inp) => {
-    const m = /^(\d{1,2}):/.exec(inp.value || "");
-    if (m) out.push(parseInt(m[1], 10));
+    const m = /^(\d{1,2}):(\d{2})/.exec(inp.value || "");
+    if (m) out.push(`${String(parseInt(m[1], 10)).padStart(2, "0")}:${m[2]}`);
   });
-  return out;
+  return [...new Set(out)].sort();
 }
 
 function commitHours() {
-  const hours = collectHours();
-  if (hours.length === 0) { toast("至少保留一个时间"); renderHours(); return; }
-  Go.SetCheckinHours(hours).then(() => {
-    state.checkin_hours = hours.sort((a, b) => a - b);
+  const times = collectHours();
+  if (times.length === 0) { toast("至少保留一个时间"); renderHours(); return; }
+  Go.SetCheckinTimes(times).then(() => {
+    state.checkin_times = times;
     toast("签到时间已保存");
   }).catch((e) => { toast("保存失败：" + e); renderHours(); });
 }
@@ -292,6 +294,18 @@ function bind() {
       toast("已用记事本打开日志");
     } catch (e) { toast("打开日志失败：" + e); }
   };
+  $("btnAbout").onclick = () => {
+    $("aboutVersion").textContent = state?.version || "-";
+    $("aboutOverlay").classList.remove("hidden");
+  };
+  $("btnAboutClose").onclick = () => $("aboutOverlay").classList.add("hidden");
+  $("aboutOverlay").onclick = (e) => {
+    if (e.target === $("aboutOverlay")) $("aboutOverlay").classList.add("hidden");
+  };
+  $("aboutProject").onclick = (e) => {
+    e.preventDefault();
+    rt.BrowserOpenURL("https://github.com/rockswang/workbuddy-wild");
+  };
 
   // API-Key：点击明文值进入编辑，blur/Enter 即生效，Esc 取消
   $("keyVal").onclick = editKey;
@@ -303,8 +317,8 @@ function bind() {
 
   // 自动签到时间：变更即生效；增加时间
   $("btnAddHour").onclick = () => {
-    if ((state.checkin_hours || []).length >= 4) { toast("最多 4 个时间"); return; }
-    state.checkin_hours.push(9);
+    if ((state.checkin_times || []).length >= 4) { toast("最多 4 个时间"); return; }
+    state.checkin_times.push("09:00");
     renderHours();
     commitHours();
   };
@@ -332,7 +346,9 @@ function bind() {
     try {
       const res = await Go.CheckinAll();
       const ok = res.filter((r) => r.ok).length;
-      toast(`签到完成：成功 ${ok}/${res.length}`);
+      const failed = res.filter((r) => !r.ok);
+      const detail = failed.length ? `；失败：${failed.map((r) => `${r.uid}: ${r.msg || "未知错误"}`).join("；")}` : "";
+      toast(`签到完成：成功 ${ok}/${res.length}${detail}`);
     } catch (e) { toast("签到失败：" + e); }
     finally { $("btnCheckinAll").disabled = false; }
   };
@@ -406,6 +422,13 @@ function bind() {
     if (!state) return;
     state.accounts = accts;
     renderAccounts();
+  });
+  rt.EventsOn("checkin", (e) => {
+    const prefix = e.platform ? `${e.platform} ${e.uid}: ` : "签到：";
+    toast(prefix + (e.ok ? (e.msg || "成功") : `失败：${e.msg || "未知错误"}`));
+  });
+  rt.EventsOn("refresh", (e) => {
+    toast(`${e.platform || "账号"} ${e.uid || ""} 令牌刷新失败：${e.msg || "未知错误"}`);
   });
   rt.EventsOn("login", (e) => handleLoginEvent(e));
 }
