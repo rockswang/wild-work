@@ -142,6 +142,10 @@ curl http://127.0.0.1:7863/v1/models -H "Authorization: Bearer WorkBuddy2API"
 
 如果对本仓库发布包不放心，可以自行基于源码构建（见开发文档）。
 
+**TraeWork 多账号自动签到失败**
+
+TraeWork有风控机制，无法确保多账号能可靠自动签到，这种情况建议使用客户端手动签到，登出客户端重新用另一账号登录即可签到。本工具的 API 转换功能不受影响。
+
 ## 开发者
 
 构建方式、配置项、命令行工具、上游接口、已知限制等，见 [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md)。
