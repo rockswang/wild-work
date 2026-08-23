@@ -30,7 +30,7 @@ import (
 )
 
 // Version 面板展示的版本号。
-const Version = "0.2.3"
+const Version = "0.2.4"
 
 const (
 	loginTimeout   = 5 * time.Minute
