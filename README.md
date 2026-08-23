@@ -5,7 +5,7 @@
 双平台支持：聚合多个 WorkBuddy 和/或 TraeWork 账号，提供统一 OpenAI 兼容 API。
 支持模型前缀区分（`workbuddy/<model>`、`traework/<model>`），自动路由到对应上游。
 
-面向普通用户：**下载即用**，一个 exe 搞定账号登录、自动签到、积分查看、模型路由，为你的 AI 客户端（pi、Claude Code、Cursor 等）提供 OpenAI 兼容接口。
+面向普通用户：**下载即用**，一个 exe 搞定账号登录、自动签到、积分查看、模型路由，为你的 AI 客户端（pi、OpenCode、Cursor 等）提供 OpenAI 兼容接口。
 
 > 本项目源于两个原始项目，在其基础上重做为 Windows 双平台托盘应用：
 > - [Sliverkiss/workbuddy2api](https://github.com/Sliverkiss/workbuddy2api) — WorkBuddy/CodeBuddy 上游
@@ -62,7 +62,7 @@
 - Windows 10 21H2 及以上（自带 WebView2 运行时；更早版本首次运行自动安装）
 - 无其他任何依赖
 
-## 客户端兼容性（pi / Claude Code 等）
+## 客户端兼容性（pi / OpenCode 等）
 
 兼容标准 OpenAI 格式（`/v1/chat/completions`）。特别的兼容处理：
 
@@ -82,6 +82,41 @@ curl http://127.0.0.1:7863/v1/models -H "Authorization: Bearer WorkBuddy2API"
 
 返回的列表中每模型都带 `workbuddy/` 或 `traework/` 前缀。
 可以让 agent 先拉取模型列表，再依据下面的配置示例自动生成 models.json。
+
+#### 当前可用模型清单（获取时间：2026-08-23 12:06，共 51 个：WorkBuddy 13 + TraeWork 38）
+
+> 模型列表随上游版本动态变化，`glm-5.3` 等需对齐客户端版本（v0.2.3 起已含）。
+> 下表为去前缀后的名称，实际调用须带 `workbuddy/` 或 `traework/` 前缀。
+
+**WorkBuddy（13 个）**
+
+| 模型 | 模型 |
+|------|------|
+| auto | deepseek-v4-flash |
+| deepseek-v4-pro | glm-5.1 |
+| glm-5.2 | glm-5.3 |
+| glm-5v-turbo | hy3 |
+| hy3-x | kimi-k2.6 |
+| kimi-k2.7 | kimi-k3-1 |
+| minimax-m3 |  |
+
+**TraeWork（38 个）**
+
+| 模型 | 模型 | 模型 |
+|------|------|------|
+| DeepSeek-V4-Flash | DeepSeek-V4-Flash-Official | DeepSeek-V4-Pro |
+| DeepSeek-V4-Pro-Official | Doubao-Seed-2.0-Code | Doubao-Seed-2.1-Pro |
+| Doubao-Seed-2.1-Turbo | Doubao-Seed-Evolving | aquila |
+| browser_use_subagent | custom_model_1M | custom_model_1M_text |
+| custom_model_claude | custom_model_deepseek_chat | custom_model_deepseek_reasoner |
+| custom_model_deepseek_v4 | custom_model_gemini | custom_model_gpt-5 |
+| custom_model_kimi | custom_model_no-fc | custom_model_placeholder |
+| explore_sub_agent_base | explore_sub_agent_nothink | explore_sub_agent_rft |
+| explore_sub_agent_v2 | glm-5 | glm-5-turbo |
+| glm-5.2 | glm-5.3 | kimi-k2.6 |
+| kimi-k2.7-code | kimi-k3 | minimax-m3 |
+| qwen-3.7-plus | qwen3.8-max | sagitta |
+| seed-code-pro-0430 | summary |  |
 
 ### pi 配置示例
 
