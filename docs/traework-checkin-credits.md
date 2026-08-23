@@ -31,7 +31,7 @@
 | `client_id` | `en1oxy7wnw8j9n` | SOLO CN 固定值 |
 | `device_id` | 15 位数字 | **服务端绑定账号**，首次随机生成后持久化复用 |
 | `machine_id` | 64 位 hex（32 字节） | 同上 |
-| `x_device_brand` | 真实机型（如 `20Y5A002CD`） | 设备指纹 |
+| `x_device_brand` | 真实机型（如 `20Y5A00XXX`） | 设备指纹 |
 | `x_device_type` | `windows` | |
 | `x_os_version` | `Windows 10 Pro` | 真实系统版本 |
 | `x_app_version` | `0.1.52` | 客户端版本 |
@@ -60,15 +60,15 @@ POST https://api.trae.cn/trae/api/v3/oauth/ExchangeToken
 
 ```json
 {
-  "DeviceID": "375380845275844",
-  "MachineID": "<64hex>",
+  "DeviceID": "<15 位数字，首次登录自动生成并持久化>",
+  "MachineID": "<64 位 hex，首次登录自动生成并持久化>",
   "PlatformCode": "SOLO_PC",
   "DeviceType": "PC",
   "DeviceName": "<主机名>",
-  "DeviceModel": "20Y5A002CD",
+  "DeviceModel": "20Y5A00XXX",
   "ClientVersion": "0.1.52",
   "DevicePublicKey": "<ECDSA P-256 公钥 SPKI PEM>",
-  "DeviceBrand": "20Y5A002CD",
+  "DeviceBrand": "20Y5A00XXX",
   "DeviceCPU": "",
   "OSInfo": "windows",
   "OSVersion": "Windows 10 Pro"
@@ -78,6 +78,10 @@ POST https://api.trae.cn/trae/api/v3/oauth/ExchangeToken
 其中 `DevicePublicKey` 是**一次性生成的 ECDSA P-256 公私钥对**的公钥部分（SPKI PEM）。
 私钥仅在后续 refresh 续期时用于 `DeviceProof` 签名（本工具目前未做自动 refresh，
 token 过期后由调度器触发重新登录）。
+
+> 下方 `DeviceInfo` 与登录参数为**脱敏示例**（`<...>` 为占位符）。
+> `device_id` / `machine_id` 由本工具首次登录时自动生成并持久化在 `auths/` 目录，
+> **切勿在代码中硬编码或提交到仓库**——它们绑定你的账号，泄露等同于泄露账号身份。
 
 响应结构：`{Result:{Token, RefreshToken, TokenExpireAt, RefreshExpireAt}}`，
 `Token` 即 Cloud-IDE-JWT。

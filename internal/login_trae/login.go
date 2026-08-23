@@ -329,7 +329,7 @@ func getString(m map[string]any, key string) string {
 
 func randHex(n int) string { b := make([]byte, n); _, _ = rand.Read(b); return hex.EncodeToString(b) }
 
-// randNumericID 按真实客户端设备 ID 格式生成 15 位数字 ID（真实值形如 375380845275844）。
+// randNumericID 生成 15 位数字 ID，对齐官方客户端 device_id 格式（纯数字）。
 // 首次绑定随机产生并持久化到 auth 文件，后续签到沿用同一 ID。
 func randNumericID() string {
 	b := make([]byte, 4)
