@@ -195,7 +195,7 @@ func runGUI(a *app.App, webviewPath string) {
 		MinHeight:         420,
 		Frameless:         true,
 		StartHidden:       true,
-		AlwaysOnTop:       true,
+		AlwaysOnTop:       false, // 不强制置顶，避免遮挡其他窗口（issue#1）
 		HideWindowOnClose: true,
 		BackgroundColour:  options.NewRGB(246, 246, 248),
 		AssetServer:       &assetserver.Options{Assets: assets},

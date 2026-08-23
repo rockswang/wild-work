@@ -353,7 +353,9 @@ func checkinResponseMessage(message, msg string) string {
 func (c *Client) UserResource(a *auth.Auth) (remain int64, err error) { return c.UserEntUsage(a) }
 
 func (c *Client) UserEntUsage(a *auth.Auth) (remain int64, err error) {
-	req, err := http.NewRequest(http.MethodPost, c.ugBase()+EpEntUsage, bytes.NewReader([]byte("{}")))
+	// 网页版 web_user_ent_usage：require_usage=true 返回每个包的 usage.credits_amount（实际用量），
+	// 剩余 = Σ(credits_limit - credits_amount)。
+	req, err := http.NewRequest(http.MethodPost, c.ugBase()+EpEntUsage, bytes.NewReader([]byte(`{"require_usage":true}`)))
 	if err != nil {
 		return 0, err
 	}
@@ -366,18 +368,22 @@ func (c *Client) UserEntUsage(a *auth.Auth) (remain int64, err error) {
 		UserEntitlementPackList []struct {
 			EntitlementBaseInfo struct {
 				Quota struct {
-					CreditsLimit int64 `json:"credits_limit"`
+					CreditsLimit float64 `json:"credits_limit"`
 				} `json:"quota"`
 			} `json:"entitlement_base_info"`
+			Usage struct {
+				CreditsAmount float64 `json:"credits_amount"`
+			} `json:"usage"`
 		} `json:"user_entitlement_pack_list"`
 	}
 	if err := json.Unmarshal(data, &resp); err != nil {
 		return 0, fmt.Errorf("ent usage parse: %w", err)
 	}
+	remainF := 0.0
 	for _, p := range resp.UserEntitlementPackList {
-		remain += p.EntitlementBaseInfo.Quota.CreditsLimit
+		remainF += p.EntitlementBaseInfo.Quota.CreditsLimit - p.Usage.CreditsAmount
 	}
-	return remain, nil
+	return int64(remainF), nil
 }
 
 func (c *Client) GetUserInfo(a *auth.Auth) (uid, nickname, enterpriseID string, err error) {

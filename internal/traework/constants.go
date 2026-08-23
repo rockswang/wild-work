@@ -8,10 +8,11 @@ const (
 	ConsoleHost    = "https://www.trae.cn"
 	ClientID       = "en1oxy7wnw8j9n"
 	AppID          = "6eefa01c-1036-4c7e-9ca5-d891f63bfcd8"
-	IdeVersion     = "0.1.43"
-	IdeVersionCode = "20260716"
-	DeviceBrand    = "83DG"
-	OSVersion      = "Windows 11 Pro"
+	IdeVersion     = "0.1.52" // 对齐 connectedGraph/traework2api 上游，对应更新更全的模型配置表（含 glm-5.3）
+	IdeVersionCode = "20260811"
+	DeviceBrand    = "20Y5A002CD"   // 真实客户端机型号（issue#3 设备指纹）
+	OSVersion      = "Windows 10 Pro" // 真实客户端系统版本
+	PluginVersion  = "2.3.73734"     // 真实客户端插件版本（登录 URL 用）
 	Function       = "solo_work_lite"
 
 	EpChat          = "/api/agent/v3/llm_utils_chat"
@@ -20,7 +21,7 @@ const (
 	EpUserInfo      = "/cloudide/api/v3/trae/GetUserInfo"
 	EpCheckinStatus = "/trae/api/v2/ug/checkin_credits/status"
 	EpCheckinClaim  = "/trae/api/v2/ug/checkin_credits/claim"
-	EpEntUsage      = "/trae/api/v2/pay/ide_user_ent_usage"
+	EpEntUsage      = "/trae/api/v2/pay/web_user_ent_usage" // 网页版积分接口（带 require_usage 拿实际用量）
 )
 
 const DefaultConfigName = "glm-5.2"

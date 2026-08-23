@@ -37,7 +37,7 @@ func SOLOHeaders(req *http.Request, a *auth.Auth, stream bool) {
 		req.Header.Set("X-Machine-Id", a.MachineID)
 	}
 	if a.DeviceID != "" {
-		req.Header.Set("X-Device-Id", a.DeviceID)
+		req.Header.Set("x-device-id", a.DeviceID)
 	}
 }
 
@@ -47,8 +47,13 @@ func UgHeaders(req *http.Request, a *auth.Auth) {
 	req.Header.Set("User-Agent", clientUA)
 	req.Header.Set("Authorization", "Cloud-IDE-JWT "+a.JWT())
 	req.Header.Set("X-User-Region", "CN")
+	// 设备指纹头（官方客户端 bb() 注入；UG 签到/积分接口校验，缺任一环节会以 9074 拒绝）
+	req.Header.Set("x-device-brand", DeviceBrand)
+	req.Header.Set("x-device-type", "windows")
+	req.Header.Set("x-os-version", OSVersion)
+	req.Header.Set("x-app-version", IdeVersion)
 	if a.DeviceID != "" {
-		req.Header.Set("X-Device-Id", a.DeviceID)
+		req.Header.Set("x-device-id", a.DeviceID) // 小写 key，值须为账号真实注册设备 ID
 	}
 }
 

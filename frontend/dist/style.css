@@ -39,7 +39,8 @@ input, select, button { font: inherit; color: inherit; }
 .grow { flex: 1; min-width: 0; }
 
 /* 头部 */
-.header { display: flex; align-items: center; gap: 8px; padding-bottom: 8px; border-bottom: 1px solid var(--border); }
+.header { display: flex; align-items: center; gap: 8px; padding-bottom: 8px; border-bottom: 1px solid var(--border); -webkit-app-region: drag; }
+.header button, .header a, .header img, .header input, .header select { -webkit-app-region: no-drag; }
 .logo {
   width: 24px; height: 24px; border-radius: 6px; flex: none;
   object-fit: contain; display: block;
