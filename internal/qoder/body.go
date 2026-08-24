@@ -12,10 +12,11 @@ import (
 //   - messages：客户端原始消息列表（可含 system/assistant/tool 多轮）
 //   - modelKey：上游模型 key（如 dmodel）
 //   - tools：客户端传来的 OpenAI tools 数组；为空则不注入 tools 字段
+//   - enableReasoning：是否启用思考模式
+//   - reasoningEffort：思考强度 low/medium/high，空串表示不传
 //
-// 注意：developer 角色必须改写为 system。实测 Qoder 上游对 role=developer
-// 的消息会静默拒答（HTTP 200 但 content 为空），与 WorkBuddy 上游行为一致。
-func buildAgentBody(messages []map[string]any, modelKey string, tools []any) ([]byte, error) {
+// 注意：developer 角色必须改写为 system。
+func buildAgentBody(messages []map[string]any, modelKey string, tools []any, enableReasoning bool, reasoningEffort string) ([]byte, error) {
 	// developer → system（浅拷贝消息避免污染调用方数据）
 	msgs := make([]map[string]any, len(messages))
 	for i, m := range messages {
@@ -55,13 +56,13 @@ func buildAgentBody(messages []map[string]any, modelKey string, tools []any) ([]
 		"is_reply":         true,
 		"image_urls":       nil,
 		"session_type":     "qodercli",
-		"model_config":     map[string]any{"key": modelKey, "is_reasoning": false},
+		"model_config":     map[string]any{"key": modelKey, "is_reasoning": enableReasoning},
 		"chat_context": map[string]any{
 			"chatPrompt": "",
 			"text":       map[string]any{"type": "text", "text": prompt},
 			"extra": map[string]any{
 				"context":         []any{},
-				"modelConfig":     map[string]any{"key": modelKey, "is_reasoning": false},
+				"modelConfig":     map[string]any{"key": modelKey, "is_reasoning": enableReasoning},
 				"originalContent": map[string]any{"type": "text", "text": prompt},
 			},
 			"features":  []any{},

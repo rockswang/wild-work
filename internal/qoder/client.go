@@ -211,21 +211,36 @@ func (c *Client) RefreshToken(a *auth.Auth) error {
 // ChatStream 发 chat 请求并返回原始嵌套 SSE body 流（调用方负责 Close）。
 // 非 2xx 时 rc 为 nil、respBody 为上游响应体、err 为 nil；只有传输层失败才返回 err。
 func (c *Client) ChatStream(a *auth.Auth, body []byte) (rc io.ReadCloser, status int, respBody []byte, err error) {
-	// body 是 server 侧改写后的 OpenAI 请求；qoder 需要 messages/model/tools。
+	// body 是 server 侧改写后的 OpenAI 请求；qoder 需要 messages/model/tools/reasoning_effort。
 	var reqOpenAI struct {
-		Model    string           `json:"model"`
-		Messages []map[string]any `json:"messages"`
-		Tools    []any            `json:"tools"`
+		Model           string           `json:"model"`
+		Messages        []map[string]any `json:"messages"`
+		Tools           []any            `json:"tools"`
+		ReasoningEffort string           `json:"reasoning_effort"`
+		Thinking        *struct {
+			Type string `json:"type"`
+		} `json:"thinking"`
 	}
 	if err := json.Unmarshal(body, &reqOpenAI); err != nil {
 		return nil, 0, nil, fmt.Errorf("parse chat body: %w", err)
 	}
-	c.setLastModel(reqOpenAI.Model) // 记录客户端模型名（Aggregate/Stream 覆盖 model 字段用）
-	modelKey := c.modelKey(reqOpenAI.Model) // 动态/静态映射（客户端名 → 上游 key）
+	c.setLastModel(reqOpenAI.Model)
+	modelKey := c.modelKey(reqOpenAI.Model)
 	if modelKey == "" {
-		modelKey = reqOpenAI.Model // 兜底直接用客户端名（如 auto）
+		modelKey = reqOpenAI.Model
 	}
-	rawBody, err := buildAgentBody(reqOpenAI.Messages, modelKey, reqOpenAI.Tools)
+
+	// 思考开关：reasoning_effort 或 thinking:{type:"enabled"} → 启用推理
+	enableReasoning := false
+	reasoningEffort := ""
+	if reqOpenAI.ReasoningEffort != "" {
+		enableReasoning = true
+		reasoningEffort = reqOpenAI.ReasoningEffort
+	} else if reqOpenAI.Thinking != nil && reqOpenAI.Thinking.Type == "enabled" {
+		enableReasoning = true
+	}
+
+	rawBody, err := buildAgentBody(reqOpenAI.Messages, modelKey, reqOpenAI.Tools, enableReasoning, reasoningEffort)
 	if err != nil {
 		return nil, 0, nil, fmt.Errorf("build qoder body: %w", err)
 	}

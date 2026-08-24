@@ -315,8 +315,11 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			default:
 				rt.Pool.NoteError(acct.UID, h.cfg.ErrThreshold, h.cfg.ErrCooldown)
 			}
-			lastErr = &provider.Error{Kind: kind, Status: status, Msg: string(respBody)}
-			continue
+			// 上游错误直接透传给客户端，不做包装
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(status)
+			_, _ = w.Write(respBody)
+			return
 		}
 		defer rc.Close()
 		rt.Pool.NoteSuccess(acct.UID)

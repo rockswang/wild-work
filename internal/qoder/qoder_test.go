@@ -80,7 +80,7 @@ func TestBuildAgentBodyDeveloperToSystem(t *testing.T) {
 		{"role": "system", "content": "保持简洁"},
 		{"role": "user", "content": "你好"},
 	}
-	raw, err := buildAgentBody(msgs, "dmodel", nil)
+	raw, err := buildAgentBody(msgs, "dmodel", nil, false, "")
 	if err != nil {
 		t.Fatalf("buildAgentBody: %v", err)
 	}
