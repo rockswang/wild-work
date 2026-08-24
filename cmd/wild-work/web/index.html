@@ -1,0 +1,205 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>wild-work 管理面板</title>
+<link rel="stylesheet" href="./style.css">
+</head>
+<body>
+<div id="app">
+
+  <!-- 顶部 -->
+  <header class="topbar">
+    <div class="brand">
+      <img class="logo" src="./logo64.png" alt="logo" onerror="this.style.display='none'">
+      <div class="brand-text">
+        <div class="title">wild-work <span class="ver" id="ver"></span></div>
+        <div class="sub" id="serverLine"></div>
+      </div>
+    </div>
+    <div class="top-info">
+      <div class="info-cell">
+        <span class="info-label">OpenAI接口</span>
+        <code class="info-value" id="apiAddr" title="点击修改监听地址"></code>
+      </div>
+      <div class="info-cell">
+        <span class="info-label">API-Key</span>
+        <code class="info-value" id="apiKeyDisplay" title="点击修改"></code>
+      </div>
+    </div>
+    <div class="top-icons">
+      <span class="icon-link" id="btnHelp" title="帮助">?</span>
+      <span class="icon-link" id="btnAbout" title="关于">i</span>
+    </div>
+  </header>
+
+  <!-- 账号管理 -->
+  <section class="panel">
+    <div class="panel-head">
+      <h2>账号管理</h2>
+      <div class="panel-actions">
+        <button class="btn primary" id="btnRefreshAll">刷新积分</button>
+        <button class="btn" id="btnCheckinAll">全部签到</button>
+        <button class="btn primary" id="btnAddWB">＋ WorkBuddy</button>
+        <button class="btn primary alt" id="btnAddTrae">＋ TraeWork</button>
+        <button class="btn primary alt qoder" id="btnAddQoder">＋ Qoder</button>
+      </div>
+    </div>
+    <div id="acctList" class="acct-grid"></div>
+    <div id="acctEmpty" class="empty hidden">还没有账号，点击上方按钮添加</div>
+  </section>
+
+  <!-- 自动签到 + 开机自启 -->
+  <section class="panel">
+    <div class="panel-head"><h2>自动签到</h2></div>
+    <div class="config-grid">
+      <div class="config-left">
+        <div class="row wrap">
+          <div id="timesBox" class="times"></div>
+          <button class="icon-btn" id="btnAddTime" title="增加一个签到时间">＋</button>
+        </div>
+        <div class="hint">保活 22:00 自动 · 下次 <span id="nextCheckin">-</span></div>
+      </div>
+      <div class="config-right">
+        <div class="row">
+          <span>开机自启</span>
+          <label class="switch"><input type="checkbox" id="chkAutostart"><span class="slider"></span></label>
+        </div>
+        <div class="hint">程序随系统启动自动运行</div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 渠道费率 -->
+  <section class="panel">
+    <div class="panel-head">
+      <h2>渠道费率</h2>
+      <button class="btn small" id="btnRefreshFees">刷新费率</button>
+    </div>
+    <div id="feesBox" class="fees"></div>
+  </section>
+
+  <div class="footer">wild-work — 多渠道账号聚合 · 仅供个人学习 · 右键托盘图标退出</div>
+</div>
+
+<!-- 添加账号确认弹层 -->
+<div class="overlay hidden" id="loginConfirmOverlay">
+  <div class="modal">
+    <div class="modal-title" id="lcTitle">添加账号</div>
+    <div class="modal-body">
+      <p id="lcMsg">点击下方按钮将打开浏览器窗口，请按照指示正常登录，登录成功后关闭浏览器窗口即可。</p>
+    </div>
+    <div class="modal-actions">
+      <button class="btn small" id="btnLoginConfirmCancel">取消</button>
+      <button class="btn small primary" id="btnLoginConfirm">登录</button>
+    </div>
+  </div>
+</div>
+
+<!-- 添加账号弹层 -->
+<div class="overlay hidden" id="loginOverlay">
+  <div class="modal">
+    <div class="modal-title" id="loginTitle">添加账号</div>
+    <div class="modal-body">
+      <div id="loginMsg">请在浏览器新窗口中完成登录…</div>
+      <div class="login-buttons">
+        <button class="btn small" id="btnCopyUrl">复制链接</button>
+        <button class="btn small danger" id="btnCancelLogin">取消</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- 确认弹层 -->
+<div class="overlay hidden" id="confirmOverlay">
+  <div class="modal">
+    <div class="modal-title">确认操作</div>
+    <div class="modal-body" id="confirmMsg">确定执行该操作？</div>
+    <div class="modal-actions">
+      <button class="btn small" id="btnConfirmCancel">取消</button>
+      <button class="btn small danger" id="btnConfirmOk">确定</button>
+    </div>
+  </div>
+</div>
+
+<!-- API 配置弹层 -->
+<div class="overlay hidden" id="apiConfigOverlay">
+  <div class="modal">
+    <div class="modal-title">API 配置</div>
+    <div class="modal-body">
+      <div class="row">
+        <label class="lbl">监听</label>
+        <select id="selHost" class="select">
+          <option value="127.0.0.1">127.0.0.1（本机）</option>
+          <option value="0.0.0.0">0.0.0.0（全部）</option>
+          <option value="__custom__">自定义…</option>
+        </select>
+        <span class="muted">:</span>
+        <input id="inPort" class="input port" type="number" min="1" max="65535">
+      </div>
+      <div id="customHostRow" class="row hidden"><input id="inHost" class="input grow" placeholder="如 192.168.1.100" spellcheck="false"></div>
+      <div class="risk-tip">⚠️ 监听 0.0.0.0 时，局域网内任何设备都可访问本 API 与账号管理，风险请自行评估。</div>
+    </div>
+    <div class="modal-actions">
+      <button class="btn small" id="btnApiCancel">取消</button>
+      <button class="btn small primary" id="btnApiSave">保存</button>
+    </div>
+  </div>
+</div>
+
+<!-- API Key 弹层 -->
+<div class="overlay hidden" id="apiKeyOverlay">
+  <div class="modal">
+    <div class="modal-title">修改 API-Key</div>
+    <div class="modal-body">
+      <input id="keyInput" class="input grow" style="width:100%" spellcheck="false" placeholder="留空 = 不鉴权">
+    </div>
+    <div class="modal-actions">
+      <button class="btn small" id="btnKeyCancel">取消</button>
+      <button class="btn small primary" id="btnKeySave">保存</button>
+    </div>
+  </div>
+</div>
+
+<!-- 帮助弹层 -->
+<div class="overlay hidden" id="helpOverlay">
+  <div class="modal" style="max-width:540px">
+    <div class="modal-title">配置说明</div>
+    <div class="modal-body docs">
+      <p>1. 添加账号后自动完成登录（Qoder 渠道当前无签到活动，仅 API 转发）。</p>
+      <p>2. AI 客户端配置：Base URL <code>http://127.0.0.1:7863/v1</code>，API Key 见页面顶部。</p>
+      <p>3. 模型 ID 需带渠道前缀：<code>workbuddy/&lt;model&gt;</code>、<code>traework/&lt;model&gt;</code>、<code>qoder/&lt;model&gt;</code>。</p>
+      <p>4. 积分会随聊天消耗实时变化，"全部刷新积分"可即时获取最新余额。</p>
+      <p>5. 日志文件位于 exe 目录下 <code>data/app.log</code>，可从托盘菜单"查看日志"打开。</p>
+      <p>6. 退出程序：右键托盘图标选择"退出"。</p>
+      <p>7. 本工具仅供个人学习使用，请遵守各上游平台服务条款。</p>
+    </div>
+    <div class="modal-actions">
+      <button class="btn small primary" id="btnHelpClose">知道了</button>
+    </div>
+  </div>
+</div>
+
+<!-- 关于弹层 -->
+<div class="overlay hidden" id="aboutOverlay">
+  <div class="modal" style="text-align:center">
+    <img class="logo" src="./logo64.png" alt="logo" style="width:64px;height:64px;margin-bottom:12px">
+    <div class="modal-title">wild-work</div>
+    <div class="modal-body" style="color:var(--muted)">
+      <p>版本 <span id="aboutVer"></span></p>
+      <p>多渠道账号聚合工具</p>
+      <p>基于 WorkBuddy + TraeWork + Qoder 上游</p>
+      <p style="margin-top:8px;font-size:12px">仅供个人学习使用</p>
+    </div>
+    <div class="modal-actions" style="justify-content:center">
+      <button class="btn small primary" id="btnAboutClose">关闭</button>
+    </div>
+  </div>
+</div>
+
+<div id="toast" class="toast hidden"></div>
+
+<script src="./app.js"></script>
+</body>
+</html>

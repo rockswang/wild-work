@@ -1,0 +1,23 @@
+# 编译产物
+dist/
+cmd/wild-work/rsrc_windows_amd64.syso
+cmd/wild-work/icon.ico
+
+# 运行时数据（含敏感凭据）
+data/
+auths/
+config.json
+*.log
+
+# 临时文件
+temp/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# 系统
+.DS_Store
+Thumbs.dbgithub_token.txt
