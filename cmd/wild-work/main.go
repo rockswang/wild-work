@@ -13,7 +13,9 @@ import (
 	"io/fs"
 	"log"
 	"os"
+	"os/signal"
 	"path/filepath"
+	"syscall"
 	"time"
 
 	"wild-work/internal/app"
@@ -45,10 +47,15 @@ func main() {
 	cfgPath := "config.json"
 	cfg, err := config.Load(cfgPath)
 	// --autostart 由开机自启项附带：开机启动不弹提示
+	// --no-tray 无头模式（无桌面 Linux/服务器）
 	autostart := false
+	noTray := false
 	for _, arg := range os.Args[1:] {
-		if arg == "--autostart" {
+		switch arg {
+		case "--autostart":
 			autostart = true
+		case "--no-tray":
+			noTray = true
 		}
 	}
 	if err != nil {
@@ -172,18 +179,41 @@ func main() {
 	go qdSch.Run(sctx)
 
 	// 启动提示（非 --autostart）：系统通知
-	if !autostart {
+	if !autostart && !noTray {
 		platform.Notify("wild-work 已启动",
-			fmt.Sprintf("OpenAI 兼容 API 地址：\nhttp://%s:%d\n\n点击右下角托盘图标或菜单“打开主界面”。", displayHost(cfg), cfg.Listen.Port))
+			fmt.Sprintf("OpenAI 兼容 API 地址：\nhttp://%s:%d\n\n点击右下角托盘图标或菜单打开主界面。", displayHost(cfg), cfg.Listen.Port))
+	}
+
+	if noTray {
+		// 无头模式：打印信息，阻塞等待信号
+		addr := cfg.Listen.Addr()
+		host := displayHost(cfg)
+		fmt.Printf("wild-work headless mode started\n")
+		fmt.Printf("  OpenAI API:    http://%s:%d/v1\n", host, cfg.Listen.Port)
+		fmt.Printf("  API-Key:       %s\n", cfg.APIKey)
+		fmt.Printf("  Web UI:        http://%s:%d/\n", host, cfg.Listen.Port)
+		fmt.Printf("  Listen:        %s\n", addr)
+		fmt.Printf("  Accounts:      workbuddy=%d traework=%d qoder=%d\n", len(wbAuths), len(trAuths), len(qdAuths))
+		fmt.Printf("\nPress Ctrl+C to exit\n")
+		sig := make(chan os.Signal, 1)
+		signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
+		<-sig
+		fmt.Printf("\nShutting down...\n")
+		stop()
+		appInst.Stop()
+		return
 	}
 
 	// 系统托盘（阻塞）。无桌面环境（如 SSH/服务会话）下托盘初始化失败时
-	// 捕获 panic，HTTP 服务与调度器继续运行（无头兜底）。
+	// 捕获 panic，提示用户使用 --no-tray 参数启动。
 	func() {
 		defer func() {
 			if r := recover(); r != nil {
-				log.Printf("托盘初始化失败，以无头模式继续运行: %v", r)
-				select {} // 保持进程存活（HTTP 服务 + 调度器仍在跑）
+				fmt.Fprintf(os.Stderr, "Tray init failed: %v\n", r)
+				fmt.Fprintf(os.Stderr, "Use --no-tray to run in headless mode\n")
+				stop()
+				appInst.Stop()
+				os.Exit(1)
 			}
 		}()
 		systray.Run(trayIconICO, "wild-work — 渠道聚合代理", systray.Actions{
