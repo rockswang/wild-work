@@ -12,6 +12,7 @@
 - **Web 管理面板**：账号管理（添加/签到/刷新/停用/删除）、积分明细、渠道费率、API 配置
 - **系统托盘**：常驻右下角，双击打开面板，右键菜单操作
 - **跨平台**：Windows（完整支持）、macOS（代码已就绪，CI 构建）、Linux（无头模式）
+- **developer→system 角色转换**：自动将下游 Agent 发送的 `<developer>` 角色改写为 `<system>`，避免上游触发内容过滤
 
 ## 项目渊源
 
@@ -25,14 +26,7 @@
 2. 放到任意目录，双击启动
 3. 右下角出现 W 图标，**双击托盘图标** → 浏览器打开 Web 管理面板
 4. 在面板中点击「+ WorkBuddy」或「+ TraeWork」或「+ Qoder」添加账号
-5. 将 AI 客户端（如 Pi、ChatGPT-Next-Web）指向：
-
-```
-Base URL: http://127.0.0.1:7863/v1
-API Key:  WildWorkAPI
-```
-
-6. 模型 ID 需带渠道前缀，例如：`workbuddy/glm-5.3`、`traework/DeepSeek-V4-Pro`、`qoder/qwen3.8-max`
+5. 根据下方配置说明接入你的 AI 客户端
 
 ### 托盘菜单
 
@@ -48,16 +42,109 @@ API Key:  WildWorkAPI
 
 启动后打印 API 地址、Key 等信息，阻塞运行，Ctrl+C 退出。
 
-## 配置说明（以 Pi 为例）
+## 配置 AI 客户端
 
-在 Pi 中配置 wild-work 作为模型提供方：
+### 1. 获取模型列表
 
-1. 打开 Pi 设置 → 模型
-2. 添加自定义 Provider：
-   - **名称**：wild-work
-   - **Base URL**：`http://127.0.0.1:7863/v1`
-   - **API Key**：`WildWorkAPI`
-3. 在模型列表中启用带前缀的模型，如 `workbuddy/auto`、`qoder/qwen3.8-max`
+wild-work 的 `/v1/models` 端点返回当前所有可用模型。在终端中执行：
+
+```bash
+curl -s -H "Authorization: Bearer WildWorkAPI" http://127.0.0.1:7863/v1/models
+```
+
+### 2. 配置 Pi（models.json）
+
+Pi 不支持自动拉取模型列表，需要手动编辑 `~/.pi/agent/models.json`（Windows 路径 `C:\Users\<用户名>\.pi\agent\models.json`），在 `providers` 中加入 wild-work 配置：
+
+```json
+{
+  "providers": {
+    "wild-work": {
+      "name": "wild-work",
+      "api": "openai-completions",
+      "baseUrl": "http://127.0.0.1:7863/v1",
+      "apiKey": "WildWorkAPI",
+      "models": [
+        {
+          "id": "workbuddy/auto",
+          "name": "自动路由 (WorkBuddy)",
+          "reasoning": false,
+          "input": ["text"],
+          "contextWindow": 168000,
+          "maxTokens": 32000,
+          "compat": { "maxTokensField": "max_tokens" }
+        },
+        {
+          "id": "workbuddy/deepseek-v4-pro",
+          "name": "DeepSeek V4 Pro (WorkBuddy)",
+          "reasoning": true,
+          "input": ["text"],
+          "contextWindow": 1000000,
+          "maxTokens": 50000,
+          "compat": {
+            "thinkingFormat": "deepseek",
+            "supportsReasoningEffort": true,
+            "maxTokensField": "max_tokens"
+          }
+        },
+        {
+          "id": "workbuddy/glm-5.3",
+          "name": "GLM-5.3 (WorkBuddy)",
+          "reasoning": true,
+          "input": ["text"],
+          "contextWindow": 1000000,
+          "maxTokens": 48000,
+          "compat": { "maxTokensField": "max_tokens" }
+        },
+        {
+          "id": "traework/DeepSeek-V4-Pro",
+          "name": "DeepSeek V4 Pro (TraeWork)",
+          "reasoning": true,
+          "input": ["text"],
+          "contextWindow": 1000000,
+          "maxTokens": 50000,
+          "compat": {
+            "thinkingFormat": "deepseek",
+            "supportsReasoningEffort": true,
+            "maxTokensField": "max_tokens"
+          }
+        },
+        {
+          "id": "traework/glm-5.2",
+          "name": "GLM-5.2 (TraeWork)",
+          "reasoning": true,
+          "input": ["text"],
+          "contextWindow": 1000000,
+          "maxTokens": 48000,
+          "compat": { "maxTokensField": "max_tokens" }
+        },
+        {
+          "id": "qoder/qwen3.8-max",
+          "name": "Qwen3.8-Max (Qoder)",
+          "reasoning": true,
+          "input": ["text"],
+          "contextWindow": 180000,
+          "maxTokens": 32000,
+          "compat": { "maxTokensField": "max_tokens" }
+        }
+      ]
+    }
+  }
+}
+```
+
+> 上面只列出了部分常用模型，完整列表请通过 `/v1/models` 端点获取后自行添加。
+
+### 3. 其他客户端
+
+支持 OpenAI 兼容 API 的客户端均可接入：
+
+```
+Base URL: http://127.0.0.1:7863/v1
+API Key:  WildWorkAPI
+```
+
+模型 ID 需带渠道前缀：`workbuddy/<model>`、`traework/<model>`、`qoder/<model>`。
 
 ## 面板操作指南
 
