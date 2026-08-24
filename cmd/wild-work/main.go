@@ -7,6 +7,7 @@ package main
 import (
 	"context"
 	"embed"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -66,6 +67,9 @@ func main() {
 
 	// 多渠道运行时：workbuddy / traework / qoder 各自独立 pool + state + scheduler。
 	stateDir := filepath.Dir(cfg.StateFile)
+	// 旧版兼容：迁移 state.json → 分渠道 state-{kind}.json
+	migrateStateFiles(cfg.StateFile, stateDir)
+
 	wbAuths, err := auth.LoadWorkBuddyDir(cfg.AuthDir, cfg.Region)
 	if err != nil {
 		fatal("读取 WorkBuddy 账号目录失败：%v", err)
@@ -216,4 +220,35 @@ func fatal(format string, args ...any) {
 	log.Printf("%s", msg)
 	platform.InfoBox("wild-work", msg)
 	os.Exit(1)
+}
+
+// migrateStateFiles 旧版 state.json 兼容：旧版 WorkBuddy 状态文件名为 state.json，
+// 新版改为 state-workbuddy.json。若旧文件存在且新文件不存在，则重命名。
+// TraeWork 状态文件始终是 state-traework.json，无需迁移。
+func migrateStateFiles(oldStateFile, stateDir string) {
+	newFp := filepath.Join(stateDir, "state-workbuddy.json")
+	if _, err := os.Stat(newFp); err == nil {
+		return // 新文件已存在
+	}
+	if _, err := os.Stat(oldStateFile); err != nil {
+		return // 旧文件不存在
+	}
+	// 读旧文件确认是有效的 state JSON
+	raw, err := os.ReadFile(oldStateFile)
+	if err != nil {
+		return
+	}
+	var sf struct {
+		Accounts map[string]json.RawMessage `json:"accounts"`
+	}
+	if err := json.Unmarshal(raw, &sf); err != nil {
+		log.Printf("state.json 解析失败，跳过迁移: %v", err)
+		return
+	}
+	if err := os.WriteFile(newFp, raw, 0o600); err != nil {
+		log.Printf("迁移 state.json 失败: %v", err)
+		return
+	}
+	_ = os.Rename(oldStateFile, oldStateFile+".old")
+	log.Printf("已迁移 state.json → state-workbuddy.json")
 }
