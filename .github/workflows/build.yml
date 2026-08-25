@@ -85,9 +85,7 @@ jobs:
       contents: write
     steps:
       - uses: actions/download-artifact@v4
-        with:
-          path: artifacts
-          merge-multiple: true
+        # 不指定 path：默认下载到当前工作目录下的 artifacts/（每个 artifact 一个子目录）
 
       - uses: actions/checkout@v4
         with:
@@ -98,7 +96,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # 收集产物（download-artifact 可能保留子目录结构，用 find 平铺）
+          # 收集产物（默认下载到 artifacts/ 子目录结构，find 平铺）
           mkdir -p release-assets
           find artifacts -type f -exec cp {} release-assets/ \;
           echo "=== release-assets 内容 ==="
