@@ -47,7 +47,11 @@ jobs:
             suffix: ""
     runs-on: ${{ matrix.os }}
     steps:
+      # 始终构建 dev 分支代码（workflow 需存在于默认分支 master 才能显示手动触发按钮，
+      # 但构建目标固定在 dev，避免误用 master 旧代码）
       - uses: actions/checkout@v4
+        with:
+          ref: dev
       - uses: actions/setup-go@v5
         with:
           go-version: '1.25'
