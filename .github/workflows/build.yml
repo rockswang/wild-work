@@ -98,18 +98,24 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          # 收集产物（download-artifact 可能保留子目录结构，用 find 平铺）
+          mkdir -p release-assets
+          find artifacts -type f -exec cp {} release-assets/ \;
+          echo "=== release-assets 内容 ==="
+          ls -la release-assets/
+
           # tag 触发 → 创建新正式 release（不会碰其他分支的 release）
           if [[ "${{ github.event_name }}" == "push" ]]; then
             TAG="${GITHUB_REF#refs/tags/}"
-            gh release create "$TAG" artifacts/* --generate-notes
+            gh release create "$TAG" release-assets/* --generate-notes
             exit 0
           fi
-          # workflow_dispatch（dev 分支）→ 每次更新同一个 dev-build 专属 release
+          # workflow_dispatch → 每次更新同一个 dev-build 专属 release
           # 复用固定 tag，避免堆积；不会删除 master 分支的任何发布包
           DEV_TAG="dev-build"
           if gh release view "$DEV_TAG" >/dev/null 2>&1; then
             gh release delete "$DEV_TAG" --yes --cleanup-tag
           fi
-          gh release create "$DEV_TAG" artifacts/* --prerelease \
+          gh release create "$DEV_TAG" release-assets/* --prerelease \
             --title "Dev Build $(date '+%Y-%m-%d %H:%M')" \
             --notes "Dev 分支自动构建（commit ${{ github.sha }}）"
