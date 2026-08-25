@@ -7,7 +7,7 @@
 ## 功能
 
 - **OpenAI 兼容代理**：`/v1/chat/completions`、`/v1/models`，支持流式/非流式，模型前缀路由
-- **三渠道聚合**：WorkBuddy(CodeBuddy) + TraeWork + Qoder，按余额自动挑号
+- **三渠道聚合**：WorkBuddy(CodeBuddy) + TraeWork + Qoder，模型前缀路由，粘性路由优先复用账号以提升会话缓存利用率
 - **自动签到**：每日定时签到领额度，token 保活，冷却状态机
 - **Web 管理面板**：账号管理（添加/签到/刷新/停用/删除）、积分明细、渠道费率、API 配置
 - **系统托盘**：常驻右下角，双击打开面板，右键菜单操作

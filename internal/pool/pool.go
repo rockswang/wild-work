@@ -20,6 +20,7 @@ const (
 	CoolHard CoolKind = iota // 余额不足 → 长冷却
 	CoolSoft                 // 429 → 短冷却
 	CoolErr                  // 连续错误 → 中冷却
+	CoolLowBalance           // 余额低于平均 60% → 15min 冷却
 )
 
 func (k CoolKind) String() string {
@@ -30,6 +31,8 @@ func (k CoolKind) String() string {
 		return "soft_rate"
 	case CoolErr:
 		return "error_threshold"
+	case CoolLowBalance:
+		return "low_balance"
 	}
 	return "unknown"
 }

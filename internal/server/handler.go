@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"wild-work/internal/auth"
 	"wild-work/internal/pool"
 	"wild-work/internal/provider"
 )
@@ -53,12 +54,23 @@ type Config struct {
 	RefreshSkew  time.Duration
 }
 
+// stickyEntry 粘性路由记录：记录上次路由账号及连续使用次数。
+// 不使用 credits（pool 中余额仅在签到/手动刷新时更新，对话后是 stale 数据），
+// 改用请求计数：连续请求 maxReqs 次后自动降级换账号。
+type stickyEntry struct {
+	uid      string
+	reqCount int
+	maxReqs  int
+}
+
 // Handler 主路由。
 type Handler struct {
 	cfg Config
 	mux *http.ServeMux
 
-	apiMu sync.RWMutex // 保护 cfg.APIKey（面板可运行时修改）
+	apiMu    sync.RWMutex // 保护 cfg.APIKey（面板可运行时修改）
+	stickyMu sync.RWMutex
+	sticky   map[string]*stickyEntry // runtimeKind → stickyEntry
 }
 
 func NewHandler(cfg Config) *Handler {
@@ -85,7 +97,7 @@ func NewHandler(cfg Config) *Handler {
 	if cfg.RefreshSkew <= 0 {
 		cfg.RefreshSkew = 10 * time.Minute
 	}
-	h := &Handler{cfg: cfg, mux: http.NewServeMux()}
+	h := &Handler{cfg: cfg, mux: http.NewServeMux(), sticky: make(map[string]*stickyEntry)}
 	h.mux.HandleFunc("POST /v1/chat/completions", h.withAuth(h.chatCompletions))
 	h.mux.HandleFunc("GET /v1/models", h.withAuth(h.models))
 	h.mux.HandleFunc("GET /status", h.withAuth(h.status))
@@ -100,6 +112,65 @@ func NewHandler(cfg Config) *Handler {
 }
 
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) { h.mux.ServeHTTP(w, r) }
+
+// stickyKey 粘性路由 key（按渠道独立）
+func (h *Handler) stickyKey(kind provider.Kind) string { return kind.String() }
+
+// pickWithSticky 粘性路由选择账号。
+// 优先使用上次成功路由的账号，直到：
+//   - 账号进入冷却/禁用状态
+//   - 连续成功请求达到 maxReqs 次（默认 50），自动轮换
+// 任一条件触发则降级为 Pick() 选新账号并重置粘性记录。
+func (h *Handler) pickWithSticky(rt *Runtime) *auth.Auth {
+	const defaultMaxReqs = 50
+
+	h.stickyMu.RLock()
+	sticky := h.sticky[h.stickyKey(rt.Kind)]
+	h.stickyMu.RUnlock()
+
+	// 尝试粘性路由
+	if sticky != nil && sticky.uid != "" && sticky.reqCount < sticky.maxReqs {
+		acct := rt.Pool.AuthByUID(sticky.uid)
+		if acct != nil {
+			status, ok := rt.Pool.Status(sticky.uid)
+			if ok && !status.Cooling && !status.Disabled {
+				log.Printf("sticky route platform=%s uid=%s count=%d/%d",
+					rt.Kind, sticky.uid, sticky.reqCount, sticky.maxReqs)
+				return acct
+			}
+		}
+	}
+
+	// 降级：选择余额最高的 healthy 账号
+	acct := rt.Pool.Pick()
+	if acct == nil {
+		return nil
+	}
+
+	// 新建粘性记录
+	h.stickyMu.Lock()
+	h.sticky[h.stickyKey(rt.Kind)] = &stickyEntry{uid: acct.UID, maxReqs: defaultMaxReqs}
+	h.stickyMu.Unlock()
+	log.Printf("new sticky route platform=%s uid=%s maxReqs=%d", rt.Kind, acct.UID, defaultMaxReqs)
+	return acct
+}
+
+// stickySuccess 粘性路由成功：递增请求计数。
+func (h *Handler) stickySuccess(rt *Runtime) {
+	h.stickyMu.Lock()
+	defer h.stickyMu.Unlock()
+	key := h.stickyKey(rt.Kind)
+	if e := h.sticky[key]; e != nil {
+		e.reqCount++
+	}
+}
+
+// stickyClear 粘性路由失败（错误/冷却）：清除粘性记录，下次请求强制重新选号。
+func (h *Handler) stickyClear(rt *Runtime) {
+	h.stickyMu.Lock()
+	defer h.stickyMu.Unlock()
+	delete(h.sticky, h.stickyKey(rt.Kind))
+}
 
 func (h *Handler) withAuth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -272,9 +343,17 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	tried := map[string]bool{}
 	var lastErr error
 	for i := 0; i < h.cfg.MaxRotate; i++ {
-		acct := rt.Pool.PickExcluding(tried)
+		acct := h.pickWithSticky(rt)
 		if acct == nil {
 			break
+		}
+		if tried[acct.UID] {
+			// 粘性路由选回已尝试的账号，清除粘性记录后重试
+			h.stickyClear(rt)
+			acct = rt.Pool.PickExcluding(tried)
+			if acct == nil {
+				break
+			}
 		}
 		tried[acct.UID] = true
 		if acct.NeedsRefresh(h.cfg.RefreshSkew) {
@@ -282,6 +361,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			if err := rt.Upstream.RefreshToken(acct); err != nil {
 				log.Printf("refresh failed platform=%s uid=%s err=%v", rt.Kind, acct.UID, err)
 				lastErr = err
+				h.stickyClear(rt)
 				var ue *provider.Error
 				if errors.As(err, &ue) && ue.Kind == provider.ErrSessionDead {
 					rt.Pool.Disable(acct.UID, "refresh session dead")
@@ -298,10 +378,12 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		rc, status, respBody, terr := rt.Upstream.ChatStream(acct, body)
 		if terr != nil {
 			lastErr = terr
+			h.stickyClear(rt)
 			rt.Pool.NoteError(acct.UID, h.cfg.ErrThreshold, h.cfg.ErrCooldown)
 			continue
 		}
 		if status >= 400 {
+			h.stickyClear(rt)
 			kind := rt.Upstream.Classify(status, string(respBody))
 			switch kind {
 			case provider.ErrHardCredit:
@@ -323,6 +405,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		}
 		defer rc.Close()
 		rt.Pool.NoteSuccess(acct.UID)
+		h.stickySuccess(rt)
 		if peek.Stream {
 			_ = rt.Upstream.Stream(w, rc)
 			return

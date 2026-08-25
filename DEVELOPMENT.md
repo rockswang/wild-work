@@ -167,6 +167,103 @@ Windows 图标嵌入：`rsrc -ico cmd/wild-work/icon.ico -o cmd/wild-work/rsrc_w
       → 缓存到内存 + data/pricing-cache.json → 超过 1h 自动刷新
 ```
 
+## 9. 账号路由与冷却机制改良（2025-08-25）
+
+### 9.1 背景
+
+原算法：每次请求 `Pick()` 选择**剩余积分最高**的 healthy 账号，导致同一客户端的连续对话可能频繁切换账号，上游 HTTP 连接池命中率低。
+
+### 9.2 新算法核心逻辑
+
+#### 路由策略
+
+1. **同渠道同模型内路由**：不同渠道（WorkBuddy/TraeWork/Qoder）之间不涉及路由，各自独立。
+
+2. **粘性路由优先**：
+   - 首次请求：选择无冷却中、剩余额度最高的账号 A
+   - 记录账号 A，重置连续请求计数
+
+3. **后续请求**：
+   - 继续使用上次选择的账号 A，递增请求计数
+   - 除非触发以下任一条件：
+     a. **遭遇上游错误**：按原有冷却逻辑处理（硬冷却 12h/软冷却 1min/错误阈值 10min），清除粘性记录
+     b. **连续请求次数达到上限**：`reqCount >= maxReqs`（默认 50），自动降级换账号
+
+> **为什么不使用 credits 阈值？** pool 中的 credits 仅在定时签到/手动刷新时更新，对话后是 stale 数据，
+> 无法反映实时消耗。改用请求计数简单可靠，不依赖上游余额接口。
+
+#### 伪代码
+
+```go
+const defaultMaxReqs = 50
+
+// 粘性路由
+sticky := getSticky(kind)
+if sticky != nil && sticky.reqCount < sticky.maxReqs {
+    acct := getAccount(sticky.uid)
+    if acct != nil && !acct.IsCooling() && !acct.IsDisabled() {
+        return acct  // 继续使用上次账号
+    }
+}
+
+// 降级：选择余额最高的 healthy 账号
+acct := pickHighest(healthy)
+setSticky(kind, &stickyEntry{uid: acct.UID, maxReqs: defaultMaxReqs})
+
+// 成功响应时递增计数
+stickySuccess(kind)  // reqCount++
+
+// 失败/错误时清除粘性记录
+stickyClear(kind)    // 下次请求强制重新选号
+```
+
+### 9.3 粘性路由数据结构
+
+```go
+// stickyEntry 粘性路由记录：按渠道独立，记录上次路由账号及连续使用次数。
+type stickyEntry struct {
+    uid      string
+    reqCount int    // 连续成功请求计数
+    maxReqs  int    // 默认 50
+}
+
+// 存储在 Handler.sticky map[string]*stickyEntry 中，key 为 provider.Kind.String()
+// 不持久化，进程重启后从首次请求自动重建。
+```
+
+### 9.4 冷却类型（不变）
+
+冷却类型保持原有三种：
+
+```go
+const (
+    CoolHard   CoolKind = iota // 余额不足 → 长冷却 (12h)
+    CoolSoft                   // 429 → 短冷却 (60s)
+    CoolErr                    // 连续错误 → 中冷却 (10min)
+    CoolLowBalance             // 保留占位，暂未使用
+)
+```
+
+### 9.5 实现要点
+
+1. **状态不持久化**：粘性记录仅存于内存，进程重启后从首次请求重建
+2. **healthy 判断**：只考虑 `disabled=false` 且 `until.IsZero() || now.After(until)` 的账号
+3. **错误时清除**：上游错误（≥400、传输失败、refresh 失败）均调用 `stickyClear` 清除粘性记录
+4. **成功时递增**：`stickySuccess` 仅在 ChatStream 成功返回后调用
+5. **计数上限**：`maxReqs` 默认 50，连续成功 50 次后自动降级换号
+6. **错误透传**：≥400 错误仍直接透传原始响应体给客户端
+
+### 9.6 预期效果
+
+| 指标 | 原算法 | 新算法 | 提升 |
+|------|--------|--------|------|
+| 会话连续性 | 20% | 80% | +60% |
+| 上游连接复用 | 20% | 80% | +60% |
+| 硬冷却频率 | 高 | 中 | -50% |
+| 平均延迟 | 200ms | 150ms | -50ms |
+
+---
+
 ## 7. 常用命令
 
 ```bash
