@@ -1,4 +1,7 @@
-# WorkBuddy Wild
+master 分支已冻结以后不再更新，建议切换到 dev 分支，可直接下载 Release 页 pre-release 版本！
+dev 分支包含重大重构，弃用 Wails 改 Web UI 减少内存占用，支持 Windows/MacOS/Linux，增加 Qoder 渠道，费率显示，余额明细，粘性路由等新功能。
+
+# 项目原名 - WorkBuddy Wild
 
 **WorkBuddy/CodeBuddy + TraeWork 账号的 OpenAI 兼容代理 + 自动签到 Windows 托盘工具。**
 
