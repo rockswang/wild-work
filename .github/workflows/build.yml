@@ -84,15 +84,16 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/download-artifact@v4
-        with:
-          path: artifacts
-          # 默认 merge-multiple=false：每个 artifact 下载到 artifacts/<name>/ 子目录
-
       - uses: actions/checkout@v4
         with:
           # tag 触发（push v*）→ 检出该 tag 代码；手动触发 → 检出 dev 分支代码
           ref: ${{ github.event_name == 'push' && github.ref || 'dev' }}
+
+      # 注意顺序：先 checkout 再 download-artifact，否则 git 检出会覆盖 artifacts/
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          # 默认 merge-multiple=false：每个 artifact 下载到 artifacts/<name>/ 子目录
 
       - name: Create or update dev release
         env:
