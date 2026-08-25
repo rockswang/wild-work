@@ -47,11 +47,11 @@ jobs:
             suffix: ""
     runs-on: ${{ matrix.os }}
     steps:
-      # 始终构建 dev 分支代码（workflow 需存在于默认分支 master 才能显示手动触发按钮，
-      # 但构建目标固定在 dev，避免误用 master 旧代码）
+      # workflow_dispatch 手动触发按钮只在默认分支（master）显示，但构建目标始终是 dev；
+      # tag 触发（push v*）则构建对应 tag 的代码
       - uses: actions/checkout@v4
         with:
-          ref: dev
+          ref: ${{ github.event_name == 'push' && github.ref || 'dev' }}
       - uses: actions/setup-go@v5
         with:
           go-version: '1.25'
@@ -90,6 +90,9 @@ jobs:
           merge-multiple: true
 
       - uses: actions/checkout@v4
+        with:
+          # tag 触发（push v*）→ 检出该 tag 代码；手动触发 → 检出 dev 分支代码
+          ref: ${{ github.event_name == 'push' && github.ref || 'dev' }}
 
       - name: Create or update dev release
         env:
