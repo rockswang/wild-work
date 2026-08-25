@@ -89,6 +89,8 @@ jobs:
           path: artifacts
           merge-multiple: true
 
+      - uses: actions/checkout@v4
+
       - name: Create or update dev release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -106,5 +108,5 @@ jobs:
             gh release delete "$DEV_TAG" --yes --cleanup-tag
           fi
           gh release create "$DEV_TAG" artifacts/* --prerelease \
-            --title "Dev Build $(date +%Y-%m-%d %H:%M)" \
+            --title "Dev Build $(date '+%Y-%m-%d %H:%M')" \
             --notes "Dev 分支自动构建（commit ${{ github.sha }}）"
