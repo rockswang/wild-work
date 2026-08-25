@@ -1,0 +1,110 @@
+name: Build Release
+
+on:
+  # 手动触发：Actions 页面选 dev 分支 → Run workflow → 构建 + 发布 dev pre-release
+  workflow_dispatch:
+  # 推送 tag（v*）自动触发正式发版
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - name: windows-amd64
+            os: ubuntu-latest
+            goos: windows
+            goarch: amd64
+            cgo: "0"
+            ldflags: "-H windowsgui"
+            needs_rsrc: true
+            suffix: .exe
+          - name: macos-arm64
+            os: macos-latest
+            goos: darwin
+            goarch: arm64
+            cgo: "1"
+            suffix: ""
+          - name: macos-amd64
+            os: macos-latest
+            goos: darwin
+            goarch: amd64
+            cgo: "1"
+            suffix: ""
+          - name: linux-amd64
+            os: ubuntu-latest
+            goos: linux
+            goarch: amd64
+            cgo: "0"
+            suffix: ""
+          - name: linux-arm64
+            os: ubuntu-latest
+            goos: linux
+            goarch: arm64
+            cgo: "0"
+            suffix: ""
+    runs-on: ${{ matrix.os }}
+    steps:
+      # 始终构建 dev 分支代码（workflow 需存在于默认分支 master 才能显示手动触发按钮，
+      # 但构建目标固定在 dev，避免误用 master 旧代码）
+      - uses: actions/checkout@v4
+        with:
+          ref: dev
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+
+      - name: Generate icon resource (rsrc)
+        if: matrix.needs_rsrc
+        run: |
+          go install github.com/akavel/rsrc@latest
+          cp build/windows/icon.ico cmd/wild-work/icon.ico
+          rsrc -ico cmd/wild-work/icon.ico -o cmd/wild-work/rsrc_windows_amd64.syso
+
+      - name: Build
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: ${{ matrix.cgo }}
+        run: |
+          OUT="dist/wild-work-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.suffix }}"
+          go build -ldflags "${{ matrix.ldflags }}" -o "$OUT" ./cmd/wild-work
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.name }}
+          path: dist/wild-work-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.suffix }}
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Create or update dev release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # tag 触发 → 创建新正式 release（不会碰其他分支的 release）
+          if [[ "${{ github.event_name }}" == "push" ]]; then
+            TAG="${GITHUB_REF#refs/tags/}"
+            gh release create "$TAG" artifacts/* --generate-notes
+            exit 0
+          fi
+          # workflow_dispatch（dev 分支）→ 每次更新同一个 dev-build 专属 release
+          # 复用固定 tag，避免堆积；不会删除 master 分支的任何发布包
+          DEV_TAG="dev-build"
+          if gh release view "$DEV_TAG" >/dev/null 2>&1; then
+            gh release delete "$DEV_TAG" --yes --cleanup-tag
+          fi
+          gh release create "$DEV_TAG" artifacts/* --prerelease \
+            --title "Dev Build $(date +%Y-%m-%d %H:%M)" \
+            --notes "Dev 分支自动构建（commit ${{ github.sha }}）"
