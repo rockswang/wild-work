@@ -5,7 +5,6 @@ on:
   push:
     tags: ["v*"]
   workflow_dispatch: # 手动触发：可指定 tag 或不指定（产物为 dev-build）
-  workflow_dispatch: # 手动触发：可指定 tag 或不指定（产物为 dev-build）
 
 permissions:
   contents: write
