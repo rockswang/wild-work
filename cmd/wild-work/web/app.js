@@ -278,7 +278,7 @@ function removeAcct(uid) {
 async function checkinAll() {
   $("btnCheckinAll").disabled = true;
   try {
-    const r = await api("/api/account/checkin_all");
+    const r = await api("/api/account/checkin_all", {});
     const ok = (r.results || []).filter((x) => x.ok).length;
     const skip = (state.accounts || []).filter((a) => a.group === "qoder").length;
     const total = (r.results || []).length + skip;
@@ -292,7 +292,7 @@ async function checkinAll() {
 async function refreshAll() {
   $("btnRefreshAll").disabled = true;
   try {
-    const r = await api("/api/account/refresh_all");
+    const r = await api("/api/account/refresh_all", {});
     toast(r.busy ? "已有刷新任务进行中" : `积分刷新完成：成功 ${r.ok} / 失败 ${r.failed}`);
     loadState();
   } catch (e) { toast(e.message); } finally {
