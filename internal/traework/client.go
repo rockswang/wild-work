@@ -466,7 +466,6 @@ func (c *Client) UserEntUsage(a *auth.Auth) (remain int64, err error) {
 	if err != nil {
 		return 0, err
 	}
-	var resp struct {
 		UserEntitlementPackList []struct {
 			EntitlementBaseInfo struct {
 				Quota struct {
@@ -504,10 +503,13 @@ func (c *Client) UserResourceDetail(a *auth.Auth) (int64, []provider.ResourceIte
 			EntitlementBaseInfo struct {
 				Quota struct {
 					CreditsLimit float64 `json:"credits_limit"`
-				} `json:"quota"`
-				PackageName string `json:"package_name"`
-				PackageType string `json:"package_type"`
+				}
+				PackageName   string `json:"package_name"`
+				PackageType   string `json:"package_type"`
 			} `json:"entitlement_base_info"`
+			DisplayDesc   string `json:"display_desc"`
+			GroupName     string `json:"group_name"`
+			GroupType     int    `json:"group_type"`
 			Usage struct {
 				CreditsAmount float64 `json:"credits_amount"`
 			} `json:"usage"`
@@ -524,12 +526,19 @@ func (c *Client) UserResourceDetail(a *auth.Auth) (int64, []provider.ResourceIte
 		remain := limit - used
 		if remain < 0 { remain = 0 }
 		total += remain
-		name := p.EntitlementBaseInfo.PackageName
+		// 优先使用 group_name（如"每日签到"、"每月登录积分"），其次 display_desc，最后兜底
+		name := p.GroupName
+		if name == "" {
+			name = p.DisplayDesc
+		}
+		if name == "" {
+			name = p.EntitlementBaseInfo.PackageName
+		}
 		if name == "" {
 			name = p.EntitlementBaseInfo.PackageType
 		}
 		if name == "" {
-			name = "套餐"
+			name = fmt.Sprintf("套餐 (group_type=%d)", p.GroupType)
 		}
 		items = append(items, provider.ResourceItem{
 			Name:   name,
