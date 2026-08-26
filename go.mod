@@ -1,6 +1,6 @@
 module wild-work
 
-go 1.25
+go 1.25.0
 
 require (
 	github.com/energye/systray v1.0.3
