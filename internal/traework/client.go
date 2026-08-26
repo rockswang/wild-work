@@ -466,6 +466,7 @@ func (c *Client) UserEntUsage(a *auth.Auth) (remain int64, err error) {
 	if err != nil {
 		return 0, err
 	}
+	var resp struct {
 		UserEntitlementPackList []struct {
 			EntitlementBaseInfo struct {
 				Quota struct {
