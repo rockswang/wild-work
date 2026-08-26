@@ -1,9 +1,21 @@
 # Wild-Work 项目提示词（AGENTS.md）
 
 > 本文件面向 AI Agent 与开发者，记录**工具设计、架构选型、决议项**与开发约定。
-> 重构基于 [workbuddy-wild](https://github.com/rockswang/workbuddy-wild)（v0.2.4），源码克隆在 `../docs/workbuddy-wild/`。
+> **项目渊源**：原始上游为 3 个分离的 xxx2api 仓库 → workbuddy-wild v0.1.x（wails GUI 包装器）→ v0.2.x（增加 traework 集成）→ v2.0.x（大改版弃用 wails，改用系统托盘 daemon + Web UI，增加 qoder 渠道）。
+> 当前 `master` 分支为 v2.0.x 版本；v0.2.x 已迁移至 `legacy-wails` 分支。
 
 ---
+
+## 0. 项目渊源
+
+Wild-Work 是 WorkBuddy/TraeWork/Qoder 三渠道账号聚合工具，演进历程：
+
+1. **上游 API 仓库**：3 个独立仓库 (`wild-work-buddy-api`, `wild-work-traework-api`, `wild-work-qoder-api`) → 提供各渠道基础 API 封装
+2. **v0.1.x (workbuddy-wild)**：Wails GUI 包装器，仅支持 WorkBuddy 单渠道
+3. **v0.2.x**：增加 TraeWork 集成，仍用 Wails
+4. **v2.0.x (当前 master)**：大改版弃用 Wails，改用**系统托盘 daemon + 浏览器 Web UI**；新增 Qoder 渠道
+
+> ⚠️ v0.2.x 代码已迁移至 `legacy-wails` 分支，不再维护。
 
 ## 0. 项目一句话
 
