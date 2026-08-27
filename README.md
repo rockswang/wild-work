@@ -166,8 +166,7 @@ API Key:  WildWorkAPI
 ```
 设置 → 更新和安全 → Windows 安全中心 → 打开 Windows 安全中心 → 病毒和威胁防护 → “病毒和威胁防护”设置/管理设置 → 排除项/添加或删除排除项 → 添加排除项（文件或文件夹），把 exe 或所在目录加进去。
 ```
-
-如果对本仓库代码不放心，可以克隆到本地让 Agent 帮你审查一遍然后本地构建。
+如果对本仓库发布包不放心，可以克隆到本地让 Agent 帮你审查一遍，然后自行基于源码构建（见 [DEVELOPMENT.md](DEVELOPMENT.md)）。
 
 ### 2. TraeWork 通用积分不能用
 
@@ -176,8 +175,6 @@ API Key:  WildWorkAPI
 ### 3. TraeWork DeepSeek V4 Flash 模型响应慢
 
 在官方客户端里这个模型也会排队，我的办法是 `ds4f` 用 WorkBuddy 的，`ds4p` 用 TraeWork 的。
-
-如果对本仓库发布包不放心，可以自行基于源码构建（见 [DEVELOPMENT.md](DEVELOPMENT.md)）。
 
 ## License
 
