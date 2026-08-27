@@ -135,10 +135,10 @@ function renderTopbar() {
   const host = (state.listen_host === "0.0.0.0" || state.listen_host === "" || state.listen_host === "::")
     ? "127.0.0.1" : state.listen_host;
   const apiURL = `http://${host}:${state.listen_port}/v1`;
-  $("apiAddr").textContent = apiURL;
+  $("apiAddr").querySelector(".val").textContent = apiURL;
 
   const key = state.api_key;
-  $("apiKeyDisplay").textContent = key === "" ? "（无鉴权）" : key;
+  $("apiKeyDisplay").querySelector(".val").textContent = key === "" ? "（无鉴权）" : key;
 }
 
 function renderAccounts() {
@@ -451,7 +451,28 @@ async function saveApiKey() {
   } catch (e) { toast(e.message); }
 }
 
-// ---------- 帮助/关于弹层 ----------
+// ---------- 复制到剪贴板 ----------
+async function copyText(text, label) {
+  try {
+    await navigator.clipboard.writeText(text);
+    toast(`${label}已复制到剪贴板`);
+  } catch (e) {
+    // 降级方案：execCommand
+    const ta = document.createElement("textarea");
+    ta.value = text;
+    ta.style.position = "fixed";
+    ta.style.opacity = "0";
+    document.body.appendChild(ta);
+    ta.select();
+    try {
+      document.execCommand("copy");
+      toast(`${label}已复制到剪贴板`);
+    } catch (err) {
+      toast("复制失败，请手动复制");
+    }
+    document.body.removeChild(ta);
+  }
+}
 function openHelp() { $("helpOverlay").classList.remove("hidden"); }
 function closeHelp() { $("helpOverlay").classList.add("hidden"); }
 function openAbout() { $("aboutOverlay").classList.remove("hidden"); }
@@ -478,8 +499,18 @@ function bind() {
   $("btnRefreshFees").onclick = refreshFees;
   $("chkAutostart").onchange = toggleAutostart;
 
-  $("apiAddr").onclick = openApiConfig;
-  $("apiKeyDisplay").onclick = openApiKey;
+  $("apiAddr").onclick = () => {
+    const v = $("apiAddr").querySelector(".val").textContent;
+    copyText(v, "OpenAI 接口地址");
+  };
+  $("apiKeyDisplay").onclick = () => {
+    const v = $("apiKeyDisplay").querySelector(".val").textContent;
+    if (v === "（无鉴权）") { toast("当前未设置 API-Key"); return; }
+    copyText(v, "API-Key");
+  };
+  // 修改图标点击弹配置对话框（不触发复制）
+  document.querySelectorAll(".icon-edit")[0].onclick = openApiConfig;
+  document.querySelectorAll(".icon-edit")[1].onclick = openApiKey;
 
   $("btnHelp").onclick = openHelp;
   $("btnAbout").onclick = openAbout;

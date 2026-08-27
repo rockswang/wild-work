@@ -193,7 +193,8 @@ func (c *Client) FetchModels(a *auth.Auth) ([]provider.ModelInfo, error) {
 		ConfigInfoList []struct {
 			ConfigName    string `json:"config_name"`
 			DisplayConfig struct {
-				DisplayName string `json:"display_name"`
+				DisplayName   string `json:"display_name"`
+				IsCustomModel bool   `json:"is_custom_model"` // 自定义模型（第三方代理）需额外授权
 			} `json:"display_config"`
 		} `json:"config_info_list"`
 	}
@@ -201,11 +202,17 @@ func (c *Client) FetchModels(a *auth.Auth) ([]provider.ModelInfo, error) {
 		return nil, fmt.Errorf("models parse: %w", err)
 	}
 	// 按 config_name 去重：上游可能为同一模型返回流式/非流式两条配置。
+	// 过滤掉 is_custom_model=true 或 config_name 以 custom_model_ 开头的自定义模型（第三方代理，需额外授权）
 	seen := make(map[string]bool, len(resp.ConfigInfoList))
 	out := make([]provider.ModelInfo, 0, len(resp.ConfigInfoList))
 	for _, cfg := range resp.ConfigInfoList {
 		name := strings.TrimSpace(cfg.ConfigName)
 		if name == "" || seen[name] {
+			continue
+		}
+		// 跳过自定义模型：部分模型上游不返回 is_custom_model，直接用前缀匹配兜底
+		if cfg.DisplayConfig.IsCustomModel || strings.HasPrefix(name, "custom_model_") {
+			log.Printf("traework skip custom model: %s", name)
 			continue
 		}
 		seen[name] = true
