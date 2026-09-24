@@ -158,7 +158,7 @@ func (c *Client) RefreshToken(a *auth.Auth) error {
 		DeviceToken  string `json:"device_token"`
 		RefreshToken string `json:"refresh_token"`
 		ExpiresAt    string `json:"expires_at"`
-		ExpiresIn    int64  `json:"expires_in"` // ms
+		ExpiresIn    int64  `json:"expires_in"` // 秒（与 access token JWT 寿命同量纲，见下）
 	}
 	if err := json.Unmarshal(raw, &out); err != nil {
 		log.Printf("qwenwork refresh parse failed uid=%s err=%v", a.UID, err)
@@ -174,17 +174,27 @@ func (c *Client) RefreshToken(a *auth.Auth) error {
 	a.AccessToken = dt
 	a.RefreshToken = out.RefreshToken
 	now := time.Now()
-	if out.ExpiresIn > 0 {
-		a.ExpiresAt = now.Add(time.Duration(out.ExpiresIn) * time.Millisecond).Unix()
-	} else if out.ExpiresAt != "" {
+	// 过期时刻优先取绝对字段 expires_at，再回退相对 expires_in。
+	// expires_in 单位是【秒】——与 workbuddyai 同口径，且实测 expires_in=604800
+	// 恰好等于 access token JWT 的 iat→exp（7 天）。
+	// 回归：早期误按毫秒处理（*time.Millisecond），把 7 天压成 604.8 秒 →
+	// 落盘 expiresAt 比真实寿命少 ~7 天 → NeedsRefresh 恒为真 → 每次请求都刷 token，
+	// 与千问办公 App 高频互踩直至 refresh token 作废、账号被禁用。
+	// 佐证：同仓 workbuddy/trae/workbuddyai 的 auth 文件 expiresAt 与 JWT exp 逐秒一致，
+	// 仅 qwenwork 偏离 6.99 天（见渠道备忘）。
+	if out.ExpiresAt != "" {
 		if t, err := time.Parse(time.RFC3339, out.ExpiresAt); err == nil {
 			a.ExpiresAt = t.Unix()
 		}
 	}
-	if a.ExpiresAt == 0 {
-		a.ExpiresAt = now.Add(24 * time.Hour).Unix() // 网页 JWT 观测寿命 48h，保守 24h
+	if a.ExpiresAt == 0 && out.ExpiresIn > 0 {
+		a.ExpiresAt = now.Add(time.Duration(out.ExpiresIn) * time.Second).Unix()
 	}
-	log.Printf("qwenwork refresh success uid=%s expires_at=%d", a.UID, a.ExpiresAt)
+	if a.ExpiresAt == 0 {
+		// 上游两字段都缺失：JWT 观测寿命 7 天，保守取一半。
+		a.ExpiresAt = now.Add(84 * time.Hour).Unix()
+	}
+	log.Printf("qwenwork refresh success uid=%s expires_at=%d (in=%ds)", a.UID, a.ExpiresAt, out.ExpiresIn)
 	return nil
 }
 
@@ -238,6 +248,12 @@ func (c *Client) ChatStream(a *auth.Auth, body []byte) (rc io.ReadCloser, status
 // 注意：server 层正常会把 model 去前缀后传入，但防御性兼容「qwenwork/flash」带前缀形式。
 // 另：x-model-key 决定实际路由（优先级高于 body model），缺省或非法档位 → 上游包 403
 // "Model is not available for this user"（envelope 内嵌，HTTP 仍 200）。
+//
+// business 段（2026-09-24 上游 1.0.4 起强校验）：网关按 body.business.{product,type}
+// 解析模型目录，缺失时对话恒返回 HTTP 200 + envelope 503 "Model catalog unavailable"
+// （模型列表/余额/费率均不受影响，只有推理路径受影响）。仅补 Cosy-Business-* 头
+// 不能替代该字段（已实测四组对照：body 缺 business 的头/原生两种 body 均 503，
+// 补上后均 200；原生 body 结构、Encode=1 组包、机器指纹均非必要条件）。
 func (c *Client) prepareChatBody(body []byte) ([]byte, error) {
 	var obj map[string]any
 	if err := json.Unmarshal(body, &obj); err != nil {
@@ -255,6 +271,13 @@ func (c *Client) prepareChatBody(body []byte) ([]byte, error) {
 	}
 	if s, _ := obj["session_id"].(string); strings.TrimSpace(s) == "" {
 		obj["session_id"] = uuid4()
+	}
+	// 模型目录标识：与 Cosy-Business-Product / Cosy-Business-Type 静态头同源
+	obj["business"] = map[string]any{
+		"product":          BusinessProduct,
+		"type":             BusinessType,
+		"version":          "1",
+		"feature_switches": map[string]any{},
 	}
 	// stream 强制 true：上游为 SSE-only 端点（非流式由 Stream/Aggregate 聚合实现）
 	obj["stream"] = true

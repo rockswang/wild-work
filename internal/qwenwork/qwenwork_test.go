@@ -9,7 +9,9 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
+	"wild-work/internal/auth"
 	"wild-work/internal/provider"
 )
 
@@ -87,6 +89,21 @@ func TestPrepareChatBody(t *testing.T) {
 	}
 	if obj["stream"] != true {
 		t.Fatal("stream 未强制 true")
+	}
+	// business 段：上游 1.0.4 起按 body.business 解析模型目录，缺失即 503
+	// "Model catalog unavailable"（仅补 Cosy-Business-* 头无效，见 client.go 注释）
+	biz, ok := obj["business"].(map[string]any)
+	if !ok {
+		t.Fatal("business 段缺失（回归：503 Model catalog unavailable）")
+	}
+	if biz["product"] != "qoder_work" || biz["type"] != "agent" {
+		t.Fatalf("business 字段错误: %v", biz)
+	}
+	if biz["version"] != "1" {
+		t.Fatalf("business.version = %v, want \"1\"", biz["version"])
+	}
+	if _, ok := biz["feature_switches"].(map[string]any); !ok {
+		t.Fatalf("business.feature_switches 应为空对象: %v", biz["feature_switches"])
 	}
 
 	// 旧 key 兼容映射
@@ -316,4 +333,34 @@ func TestStream_Transfer(t *testing.T) {
 // base64Raw 标准 base64 解码辅助。
 func base64Raw(s string) ([]byte, error) {
 	return base64.StdEncoding.DecodeString(s)
+}
+
+// TestRefreshExpiresInSeconds 验证 refresh 响应的 expires_in 按【秒】解释。
+// 回归：早期误按毫秒处理（*time.Millisecond），把 7 天压成 604.8 秒，
+// 落盘 expiresAt 比 access token 真实寿命少 ~7 天 → NeedsRefresh 恒为真 →
+// 每次请求都刷 token，与千问办公 App 高频互踩直至 refresh token 作废。
+// 证据：上游 expires_in=604800 恰好等于 access token JWT 的 iat→exp（7 天）。
+func TestRefreshExpiresInSeconds(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		// 上游真实形态：expires_in 以【秒】计
+		_, _ = w.Write([]byte(`{"device_token":"dt-new","refresh_token":"rt-new","expires_in":604800}`))
+	}))
+	defer srv.Close()
+
+	a := &auth.Auth{UID: "u1", AccessToken: "old", RefreshToken: "rt-old"}
+	c := New()
+	c.Gateway = srv.URL
+	before := time.Now().Unix()
+	if err := c.RefreshToken(a); err != nil {
+		t.Fatalf("RefreshToken: %v", err)
+	}
+	got := a.ExpiresAt - before
+	want := int64(604800)
+	if got < want-60 || got > want+60 {
+		t.Fatalf("expiresAt 距现在 %ds，want ≈%ds（7 天）；按毫秒解释会得到 ≈604s", got, want)
+	}
+	if a.AccessToken != "dt-new" || a.RefreshToken != "rt-new" {
+		t.Fatalf("token 未更新: %q / %q", a.AccessToken, a.RefreshToken)
+	}
 }

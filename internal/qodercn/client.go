@@ -410,9 +410,16 @@ func (c *Client) UserResourceDetail(a *auth.Auth) (int64, []provider.ResourceIte
 	return total, items, nil
 }
 
-// DailyCheckin 每日签到（双路径：daily-check-in → campaigns）。
-// 详见 checkin.go。已签到/无活动均视为成功（幂等），返回 nil。
+// DailyCheckin 每日签到（campaigns 活动路径）。详见 checkin.go。
+// 已签到/无活动均视为成功（幂等），返回 nil；仅网络/401 等才返回 error。
 func (c *Client) DailyCheckin(a *auth.Auth) error {
+	_, err := checkin(a)
+	return err
+}
+
+// DailyCheckinReport 实现 provider.CheckinReporter：额外返回结构化状态，
+// 供调度器区分 no_campaign（需在窗口内重试）与已领取（当日完成）。
+func (c *Client) DailyCheckinReport(a *auth.Auth) (provider.CheckinReport, error) {
 	return checkin(a)
 }
 

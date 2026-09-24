@@ -3,6 +3,7 @@
 package auth
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -370,6 +371,12 @@ func LoadQoderCOMDir(dir string) ([]*Auth, error) {
 // LoadQwenWorkDir 扫描千问办公凭证（qwenwork-*.json）。
 // 文件名前缀不能与 qoder*.json 冲突（LoadQoderDir 的 glob 会先吞掉 qwenwork- 前缀，
 // 故前缀必须以 q 开头但不含 qoder 字样 —— 取 qwenwork- 无冲突）。
+//
+// 加载后修正 expiresAt：历史版本把 refresh 响应的 expires_in（秒）误当毫秒，
+// 落盘的 expiresAt 比 access token 真实寿命少 ~7 天（实测 607s vs 7 天）。
+// 后果是 NeedsRefresh 几乎恒为真 → 每次请求都刷 token → 与千问办公 App 互踩。
+// access token 的 JWT exp 由上游签名、权威可信，故以其为准原地校正（仅内存，
+// 不写盘：校正后不再触发刷新路径，也就无需回写；token 真过期或刷新后自然落盘正确值）。
 func LoadQwenWorkDir(dir string) ([]*Auth, error) {
 	files, err := filepath.Glob(filepath.Join(dir, "qwenwork-*.json"))
 	if err != nil {
@@ -386,7 +393,47 @@ func LoadQwenWorkDir(dir string) ([]*Auth, error) {
 			continue
 		}
 		a.Kind, a.FilePath = "qwenwork", f
+		a.AdoptJWTExpiry()
 		out = append(out, a)
 	}
 	return out, nil
+}
+
+// AdoptJWTExpiry 用 access token 的 JWT exp 校正本地 expiresAt（仅当 JWT 更晚时）。
+// 用于修复历史上 expires_in 单位误判造成的偏短 expiresAt（见 LoadQwenWorkDir）。
+// 只在 exp 可解析且确实晚于当前值时才覆盖，避免把正常值改坏。
+func (a *Auth) AdoptJWTExpiry() {
+	exp := jwtExpiry(a.JWT())
+	if exp <= 0 {
+		return
+	}
+	a.Lock()
+	defer a.Unlock()
+	if exp > a.ExpiresAt {
+		a.ExpiresAt = exp
+	}
+}
+
+// jwtExpiry 解出 JWT payload 的 exp（Unix 秒）；非 JWT/无 exp 时返回 0。
+// 不校验签名：用途仅是从本地凭证自身的 payload 读出自报到期时刻。
+func jwtExpiry(token string) int64 {
+	parts := strings.Split(token, ".")
+	if len(parts) < 2 {
+		return 0
+	}
+	p := parts[1]
+	if r := len(p) % 4; r != 0 {
+		p += strings.Repeat("=", 4-r)
+	}
+	raw, err := base64.URLEncoding.DecodeString(p)
+	if err != nil {
+		return 0
+	}
+	var payload struct {
+		Exp int64 `json:"exp"`
+	}
+	if json.Unmarshal(raw, &payload) != nil {
+		return 0
+	}
+	return payload.Exp
 }

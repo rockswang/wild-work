@@ -185,7 +185,17 @@
           <label class="lbl wide">API-Key</label>
           <input id="keyInput" class="input grow" spellcheck="false" placeholder="留空 = 不鉴权">
         </div>
-        <div class="risk-tip">⚠️ 监听 0.0.0.0 时，局域网内任何设备都可访问本 API 与账号管理，风险请自行评估。</div>
+        <div class="row">
+          <label class="lbl wide" title="面板登录口令（与给 AI 客户端用的 API-Key 是两套）">管理密码<span id="adminPassReq" class="req hidden" title="监听非本机地址时必填">*</span></label>
+          <input id="adminPassInput" class="input grow" type="password" spellcheck="false" placeholder="留空 = 面板不鉴权（仅本机监听时允许）" autocomplete="new-password">
+        </div>
+        <div class="row" style="align-items:center">
+          <label class="lbl wide"></label>
+          <button class="btn small" id="btnAdminLogout">退出登录</button>
+          <button class="btn small" id="btnClearAdminPass" title="关闭面板鉴权（仅监听 127.0.0.1 时允许）">清除密码</button>
+          <span class="hint" style="margin-left:8px">改密码后所有已登录会话立即失效</span>
+        </div>
+        <div id="listenRiskTip" class="risk-tip hidden">⚠️ 监听 0.0.0.0 时必须设置管理密码，否则局域网内任何设备都可访问本 API 与账号管理。</div>
       </div>
 
       <!-- 模型路由（cc/codex 映射） -->
@@ -304,7 +314,7 @@
           <li>使用本工具可能<b>违反上游平台的服务条款</b>，存在<b>账号被限制、封禁或追责的风险</b>，请自行评估并承担全部后果。</li>
           <li>请使用小号或可承受损失的账号接入，<b>切勿将主力账号用于本工具</b>。</li>
           <li>本工具仅限<b>个人学习与研究</b>用途，严禁用于商业用途或大规模滥用；请遵守各上游平台服务条款与当地法律法规。</li>
-          <li>监听 <code>0.0.0.0</code> 会将 API 与账号管理暴露给局域网，请确认网络环境可信。</li>
+          <li>监听 <code>0.0.0.0</code> 会将 API 与账号管理暴露给局域网，<strong>必须配置管理密码</strong>（面板登录用，与 API-Key 是两套凭据）；请确认网络环境可信。</li>
           <li>本软件按"现状"提供，作者不对使用本软件造成的任何直接或间接损失（含账号损失、积分损失、数据丢失等）承担责任。</li>
           <li>本软件与上游各平台（WorkBuddy/CodeBuddy、TraeWork、Qoder、千问办公、OpenCode 等）无任何关联，商标权归其各自所有者。</li>
         </ul>
@@ -334,6 +344,21 @@
 </div>
 
 <div id="toast" class="toast hidden"></div>
+
+<!-- 管理面板登录层（开启管理密码时；未登录状态下覆盖全部内容） -->
+<div class="overlay hidden" id="adminLoginOverlay">
+  <div class="modal" style="width:360px">
+    <div class="modal-title">管理面板登录</div>
+    <div class="modal-body">
+      <div class="hint" style="margin:0 0 8px">当前监听地址已对外暴露，请输入管理员密码（config.json 的 <code>admin_password</code>）。</div>
+      <input id="adminLoginPass" class="input" type="password" placeholder="管理员密码" style="width:100%" autocomplete="current-password">
+      <div class="hint" id="adminLoginErr" style="color:var(--danger)"></div>
+    </div>
+    <div class="modal-actions">
+      <button class="btn small primary" id="btnAdminLogin">登录</button>
+    </div>
+  </div>
+</div>
 
 <script src="https://cdn.staticfile.org/echarts/4.3.0/echarts.min.js"></script>
 <script src="./app.js"></script>

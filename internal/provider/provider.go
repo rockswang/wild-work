@@ -167,6 +167,50 @@ type Upstream interface {
 	Aggregate(r io.Reader, model string) (map[string]any, error)
 }
 
+// CheckinReporter 由「签到结果可结构化上报」的渠道实现（当前 QoderCN / QoderCOM）。
+// 调度器优先使用它；未实现的渠道回退 DailyCheckin + isAlready 文本判定。
+// 之所以需要独立接口：error 通道无法区分 no_campaign 与 error——两者都不是
+// 「已签到」，却都需要在当日窗口内继续重试，而 error 文本判定做不到。
+type CheckinReporter interface {
+	DailyCheckinReport(a *auth.Auth) (CheckinReport, error)
+}
+
+// CheckinStatus 是签到结果状态（语义对齐上游 qoder2api 的 checkinStatus*）。
+// 决定调度器的「当日是否已完成」判定与窗口内重试策略。
+type CheckinStatus string
+
+const (
+	// CheckinClaimed 本次真正领取成功（金额可能为 0：上游未回填 benefit）。
+	CheckinClaimed CheckinStatus = "claimed"
+	// CheckinAlready 今日已领取（幂等：409 / CLAIMED / replayed）。
+	CheckinAlready CheckinStatus = "already_claimed"
+	// CheckinNoCampaign 无可用签到活动（含 legacy DISABLED）：可能是活动尚未创建，
+	// 属于「可重试」状态——上游 10:00 整点存在延迟。
+	CheckinNoCampaign CheckinStatus = "no_campaign"
+	// CheckinNoToken 本地无可用凭据（可重试，refresh 后可能恢复）。
+	CheckinNoToken CheckinStatus = "no_token"
+	// CheckinError 其它失败（可重试）。
+	CheckinError CheckinStatus = "error"
+)
+
+// Retryable 报告该状态是否应在当日窗口内继续重试。
+// 只有「已领取」和「本次领取成功」算完成——上游同款判定。
+func (s CheckinStatus) Retryable() bool {
+	switch s {
+	case CheckinClaimed, CheckinAlready:
+		return false
+	default:
+		return true
+	}
+}
+
+// CheckinReport 单次签到的结构化结果（Upstream.DailyCheckinReport 返回值）。
+type CheckinReport struct {
+	Status CheckinStatus // 结果状态
+	Msg    string        // 展示文案（含金额），可为空
+	Amount int64         // 本次领取金额（仅 Status==CheckinClaimed 时有意义）
+}
+
 // ResourceItem 积分明细条目。
 type ResourceItem struct {
 	Name   string `json:"name"`

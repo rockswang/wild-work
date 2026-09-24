@@ -42,7 +42,7 @@ import (
 )
 
 // Version 版本号。
-const Version = "2.5.2"
+const Version = "2.5.3"
 
 const (
 	loginTimeout   = 5 * time.Minute
@@ -94,6 +94,9 @@ type App struct {
 	loginKind    provider.Kind
 	pricingFP    string
 
+	// auth 管理面板会话（cookie）；详见 session.go
+	auth *authState
+
 	logFile *os.File
 
 	// compatSyncer 面板保存 compat 后同步给外层兼容层（热更新路由表）。
@@ -129,6 +132,7 @@ func New(opts Options) (*App, error) {
 		cfg:      opts.Config,
 		runtimes: opts.Runtimes,
 		handler:  opts.Handler,
+		auth:     newAuthState(),
 	}
 	a.loginStateFP = filepath.Join(filepath.Dir(opts.Config.StateFile), "login-state.json")
 	a.pricingFP = filepath.Join(filepath.Dir(opts.Config.StateFile), "pricing-cache.json")
@@ -245,7 +249,7 @@ func sortChannelsByOrder[T any](items []T, kindOf func(T) provider.Kind) {
 // WorkBuddy 国际版改为定时自动对话保活并领取日活奖励（详见 workbuddyai.DailyCheckin），
 // 无需用户手动触发，故也不提供手动签到入口；
 // 千问办公无签到活动且每日积分服务端被动发放，无需领取/保活。
-// QoderCN 已实现双路径签到（campaigns 主路径），支持手动按钮。
+// QoderCN/QoderCOM 已实现 campaigns 签到，支持手动按钮（上游同一套机制）。
 // OpenCodeZen 匿名通道无账号概念，既无签到也无积分。
 func noExplicitCheckin(k provider.Kind) bool {
 	return k == provider.WorkBuddyAI || k == provider.QwenWork || k == provider.Oczen
@@ -292,6 +296,15 @@ func (a *App) SetHandler(h *server.Handler) {
 	if a.httpRoot == nil {
 		a.httpRoot = h
 	}
+}
+
+// PanelAuthEnabled 管理面板是否启用密码鉴权（供启动提示使用）。
+func (a *App) PanelAuthEnabled() bool { return a.panelAuthEnabled() }
+
+// AdminPassIsWeak 管理员密码是否过弱（< 8 位）：仅用于启动告警，不阻断。
+func (a *App) AdminPassIsWeak() bool {
+	p := a.adminPass()
+	return p != "" && len(p) < 8
 }
 
 // SetRootHandler 注入对外服务的根 handler（通常是「兼容层 mux + 内层 handler」的组合）。
@@ -935,7 +948,7 @@ func (a *App) CheckinAccount(uid string) (scheduler.CheckinResult, error) {
 		log.Printf("checkin failed uid=%s err=%v", uid, err)
 		return res, err
 	}
-	log.Printf("checkin uid=%s ok=%t msg=%s remain=%d has_remain=%t", uid, res.OK, res.Msg, res.Remain, res.HasRemain)
+	log.Printf("checkin uid=%s ok=%t retryable=%t msg=%s remain=%d has_remain=%t", uid, res.OK, res.Retryable, res.Msg, res.Remain, res.HasRemain)
 	return res, nil
 }
 
@@ -1327,18 +1340,43 @@ func (a *App) SetListen(host string, port int) error {
 	if port <= 0 || port > 65535 {
 		return fmt.Errorf("端口无效：%d", port)
 	}
-	addr := config.Listen{Host: host, Port: port}.Addr()
+	next := config.Listen{Host: host, Port: port}
 
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	if err := a.serveLocked(addr); err != nil {
-		return fmt.Errorf("监听 %s 失败（可能被占用）：%v", addr, err)
+	// 对外暴露（非环回地址）必须同时设置管理密码：否则局域网任何设备
+	// 都可无凭据访问面板（含登录入口、退出按钮）。与 SetAdminPassword 互成先决。
+	if requireRemoteAuth(next) && strings.TrimSpace(a.cfg.AdminPass) == "" {
+		return errors.New("监听非 127.0.0.1 时必须先设置「管理密码」（设置面板中一并保存）")
 	}
-	a.cfg.Listen = config.Listen{Host: host, Port: port}
+	if err := a.serveLocked(next.Addr()); err != nil {
+		return fmt.Errorf("监听 %s 失败（可能被占用）：%v", next.Addr(), err)
+	}
+	a.cfg.Listen = next
 	if err := config.Save(a.cfg, a.cfgPath); err != nil {
 		log.Printf("save config after listen change: %v", err)
 	}
-	log.Printf("API 监听已切换至 %s", addr)
+	log.Printf("API 监听已切换至 %s", next.Addr())
+	return nil
+}
+
+// SetAdminPassword 修改管理面板密码（空串 = 关闭面板鉴权）。
+// 当前监听为对外地址时不允许清空（见 SetListen）；改密码后所有旧会话立即失效。
+func (a *App) SetAdminPassword(pass string) error {
+	pass = strings.TrimSpace(pass)
+	a.mu.Lock()
+	if pass == "" && requireRemoteAuth(a.cfg.Listen) {
+		a.mu.Unlock()
+		return errors.New("监听非 127.0.0.1 时不允许清空管理密码")
+	}
+	a.cfg.AdminPass = pass
+	err := config.Save(a.cfg, a.cfgPath)
+	a.mu.Unlock()
+	if err != nil {
+		return err
+	}
+	a.auth.dropAll() // 密码变更：旧 cookie 的 label 失配，已自动失效，这里同步清内存
+	log.Printf("管理密码已更新：%s", map[bool]string{true: "已启用", false: "已关闭"}[pass != ""])
 	return nil
 }
 
@@ -1587,7 +1625,17 @@ type State struct {
 	ListenHost     string        `json:"listen_host"`
 	ListenPort     int           `json:"listen_port"`
 	APIKey         string        `json:"api_key"`
-	LoginBusy      bool          `json:"login_busy"`
+
+	// AdminPassSet 是否已配置管理密码（不回显密码本身）；
+	// AuthEnabled = 面板鉴权已生效（密码非空）；
+	// AuthSession = 当前浏览器 cookie 对应的口令指纹（已登录时非空且等于服务端口令指纹）。
+	// 前端靠 AuthSession 判断登录态：HttpOnly cookie 不可读，但指纹可回显。
+	AdminPassSet   bool   `json:"admin_pass_set"`
+	AuthEnabled    bool   `json:"auth_enabled"`
+	AuthSession    string `json:"auth_session"`
+	AuthRequired   bool   `json:"auth_required"` // 当前监听地址是否必须配置密码（非环回）
+
+	LoginBusy      bool   `json:"login_busy"`
 	NextCheckin    string        `json:"next_checkin"`
 	Version        string        `json:"version"`
 	Autostart      bool          `json:"autostart"`
@@ -1614,12 +1662,25 @@ type State struct {
 
 // GetState 返回面板初始数据。
 func (a *App) GetState() State {
+	a.mu.Lock()
+	pass, listen := a.cfg.AdminPass, a.cfg.Listen
+	a.mu.Unlock()
+	authOn := strings.TrimSpace(pass) != ""
+	brief := passBrief(pass)
+	session := ""
+	if authOn {
+		session = brief // 仅当请求通过 authGuard 时才会走到这里（无有效 cookie 已被 401 拦截）
+	}
 	st := State{
 		CheckinTimes:   a.checkinTimes(),
 		KeepaliveHours: a.keepaliveHours(),
-		ListenHost:     a.cfg.Listen.Host,
-		ListenPort:     a.cfg.Listen.Port,
+		ListenHost:     listen.Host,
+		ListenPort:     listen.Port,
 		APIKey:         a.cfg.APIKey,
+		AdminPassSet:   authOn,
+		AuthEnabled:    authOn,
+		AuthSession:    session,
+		AuthRequired:   requireRemoteAuth(listen),
 		LoginBusy:      a.LoginBusy(),
 		NextCheckin:    fmtTime(a.nextFire()),
 		Version:        Version,
@@ -1740,8 +1801,62 @@ func apiError(w http.ResponseWriter, status int, msg string) {
 }
 
 // HandleAPI 注册管理 API 路由（挂到 server handler 的 /api/* 上）。
-// 无鉴权（个人单机工具），监听 0.0.0.0 时风险由用户承担。
+// 开启管理密码（config.admin_password 非空）时，除 /api/auth/* 外全部须先登录；
+// 密码为空 = 不鉴权，此时仅允许监听环回地址（见 SetListen / SetAdminPassword）。
 func (a *App) HandleAPI(mux *http.ServeMux) {
+	// 登录/登出/会话探针：挂在 /api/auth/* 上（比 /api/ 更具体，不经过会话鉴权）。
+	mux.HandleFunc("POST /api/auth/login", func(w http.ResponseWriter, r *http.Request) {
+		if !a.panelAuthEnabled() {
+			writeJSON(w, http.StatusOK, map[string]any{"ok": true, "session": ""})
+			return
+		}
+		var req struct {
+			Password string `json:"password"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		token, brief, ok, msg := a.panelLogin(req.Password, clientIP(r))
+		if !ok {
+			writeJSON(w, http.StatusUnauthorized, map[string]any{"error": msg})
+			return
+		}
+		setSessionCookie(w, r, token)
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "session": brief})
+	})
+	mux.HandleFunc("POST /api/auth/logout", func(w http.ResponseWriter, r *http.Request) {
+		a.panelLogout(r)
+		setSessionCookie(w, r, "") // 置空 + MaxAge<0 删除 cookie
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+	})
+	mux.HandleFunc("GET /api/auth/state", func(w http.ResponseWriter, r *http.Request) {
+		// 会话探针：不返回 401，未登录时只回鉴权元信息（绝不回传 API-Key/账号/代理等
+		// 已鉴权内容），供前端在首次加载时就弹出登录层。
+		a.mu.Lock()
+		pass, listen, version := a.cfg.AdminPass, a.cfg.Listen, Version
+		a.mu.Unlock()
+		// 未登录时只回鉴权元信息（结构体故意最小化：不回传 API-Key/账号/代理等任何已鉴权内容）
+		authOn := strings.TrimSpace(pass) != ""
+		probe := struct {
+			AuthEnabled  bool   `json:"auth_enabled"`
+			AuthSession  string `json:"auth_session"`
+			AuthRequired bool   `json:"auth_required"`
+			Version      string `json:"version"`
+		}{authOn, "", requireRemoteAuth(listen), version}
+		if authOn {
+			if c, err := r.Cookie(sessionCookie); err == nil && a.auth.valid(c.Value, passBrief(pass)) {
+				st := a.GetState() // 已持有有效会话：与 /api/state 等价
+				writeJSON(w, http.StatusOK, st)
+				return
+			}
+		}
+		writeJSON(w, http.StatusOK, probe)
+	})
+
+	// 其余管理 API 统一挂到私有 mux，最后整体套一层会话鉴权中间件：
+	// 路由注册代码零改动，也避免逐个 handler 漏包。
+	api := http.NewServeMux()
+	mux.Handle("/api/", a.guardMux(api))
+	mux = api
+
 	mux.HandleFunc("GET /api/state", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, a.GetState())
 	})
@@ -1861,11 +1976,31 @@ func (a *App) HandleAPI(mux *http.ServeMux) {
 	})
 	mux.HandleFunc("POST /api/config/listen", func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
-			Host string `json:"host"`
-			Port int    `json:"port"`
+			Host        string  `json:"host"`
+			Port        int     `json:"port"`
+			AdminPass   *string `json:"admin_password"` // 指针：区分「未携带」与「显式清空」
 		}
 		_ = json.NewDecoder(r.Body).Decode(&req)
+		// 同一请求内先存密码再切监听：面板把「改成 0.0.0.0」与「填密码」合并保存，
+		// 避免中间态因缺少密码而被拒。
+		if req.AdminPass != nil {
+			if err := a.SetAdminPassword(*req.AdminPass); err != nil {
+				apiError(w, http.StatusBadRequest, err.Error())
+				return
+			}
+		}
 		if err := a.SetListen(req.Host, req.Port); err != nil {
+			apiError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+	})
+	mux.HandleFunc("POST /api/config/admin_password", func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Password string `json:"password"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		if err := a.SetAdminPassword(req.Password); err != nil {
 			apiError(w, http.StatusBadRequest, err.Error())
 			return
 		}
@@ -1990,6 +2125,50 @@ func (a *App) HandleAPI(mux *http.ServeMux) {
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 		go a.safeGo(func() { a.Quit() })
 	})
+}
+
+// guardMux 会话鉴权中间件：密码为空（未启用）时原样放行，否则要求有效 cookie 会话。
+// 另叠加 stdlib 的跨站请求保护（CSRF）：SameSite=Lax 已在浏览器侧拦跨站 POST，
+// 这里是二次防御（非浏览器客户端无 Origin/Sec-Fetch-Site 头，不受影响）。
+// 挂在内层 /api/ mux 上（/api/auth/* 由外层更具体的模式直接命中，不经过这里）。
+func (a *App) guardMux(inner http.Handler) http.Handler {
+	csrf := http.NewCrossOriginProtection()
+	return csrf.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if a.panelAuthEnabled() {
+			c, err := r.Cookie(sessionCookie)
+			if err != nil || !a.auth.valid(c.Value, passBrief(a.adminPass())) {
+				writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "未登录或会话已过期", "need_login": true})
+				return
+			}
+		}
+		inner.ServeHTTP(w, r)
+	}))
+}
+
+// setSessionCookie 下发/删除会话 cookie。
+// HttpOnly 防脚本窃取（前端靠 /api/auth/state 的 auth_session 指纹判登录态，不读 cookie）；
+// SameSite=Lax 挡跨站 CSRF；Secure 在 HTTPS 下自动开启（本服务默认 http，故按需）。
+func setSessionCookie(w http.ResponseWriter, r *http.Request, token string) {
+	c := &http.Cookie{
+		Name:     sessionCookie,
+		Value:    token,
+		Path:     "/",
+		HttpOnly: true,
+		SameSite: http.SameSiteLaxMode,
+		Secure:   r.TLS != nil,
+	}
+	if token == "" {
+		c.MaxAge = -1 // 删除
+	}
+	http.SetCookie(w, c)
+}
+
+// clientIP 取登录限流用的客户端 IP（RemoteAddr 形如 host:port）。
+func clientIP(r *http.Request) string {
+	if host, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
+		return host
+	}
+	return r.RemoteAddr
 }
 
 // ---------------------------------------------------------------------------

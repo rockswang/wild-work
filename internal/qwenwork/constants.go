@@ -39,6 +39,13 @@ const (
 // ChannelName 费率面板中的渠道标识。
 const ChannelName = "qwenwork"
 
+// 上游模型目录标识（2026-09-24 起推理 body 必须携带，见 prepareChatBody 注释）。
+// 与 Cosy-Business-Product / Cosy-Business-Type 静态头同源（官方 1.0.4 取值）。
+const (
+	BusinessProduct = "qoder_work"
+	BusinessType    = "agent"
+)
+
 // staticModelKeys 客户端模型名 → 上游 model key。
 // key 即 /api/v2/model/list 与 /api/chat-modes 的档位 key（两处 price_factor 一致）。
 // 兼容旧 key：qwork-advanced 实测仍被网关接受（路由 glm-5.2）。

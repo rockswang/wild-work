@@ -4,8 +4,11 @@
 const $ = (id) => document.getElementById(id);
 
 // ---------- API 封装 ----------
+// 管理 API 会话：cookie 为 HttpOnly 不读（fetch 需 same-origin 自动携带），
+// 前端只持有「口令指纹」用于判断登录态（session=state.auth_session）。
+let authSession = "";
 async function api(path, body) {
-  const opts = { method: "GET", headers: { "Content-Type": "application/json" } };
+  const opts = { method: "GET", headers: { "Content-Type": "application/json" }, credentials: "same-origin" };
   if (body !== undefined) {
     opts.method = "POST";
     opts.body = JSON.stringify(body);
@@ -13,9 +16,58 @@ async function api(path, body) {
   const resp = await fetch(path, opts);
   const data = await resp.json().catch(() => ({}));
   if (!resp.ok) {
+    if (resp.status === 401 && data.need_login) showLogin(); // 会话失效：即时弹登录层
     throw new Error(data.error || ("请求失败 " + resp.status));
   }
   return data;
+}
+
+// ---------- 管理面板登录 ----------
+// 注意：id 一律带 admin 前缀，与「添加账号」弹层（loginOverlay/loginMsg）语义不同，切勿混用。
+// 已渲染过面板数据时不再只盖一层遮罩，而是整页重载：彻底清掉 DOM/内存里的账号与密钥
+// （登出或会话失效后残留展示不安全）。首次加载（state 为 null）不重载，避免死循环。
+function showLogin(msg) {
+  const hadData = state !== null;
+  state = null;
+  if (hadData) { location.reload(); return; }
+  $("adminLoginOverlay").classList.remove("hidden");
+  $("adminLoginErr").textContent = msg || "";
+  $("adminLoginPass").focus();
+}
+
+async function submitLogin() {
+  const pass = $("adminLoginPass").value;
+  if (!pass) { $("adminLoginErr").textContent = "请输入管理员密码"; return; }
+  $("btnAdminLogin").disabled = true;
+  try {
+    const r = await api("/api/auth/login", { password: pass });
+    authSession = r.session || "";
+    $("adminLoginPass").value = "";
+    $("adminLoginOverlay").classList.add("hidden");
+    await loadState();
+    await loadFees();
+  } catch (e) {
+    $("adminLoginErr").textContent = e.message;
+  } finally {
+    $("btnAdminLogin").disabled = false;
+  }
+}
+
+async function logout(msg) {
+  try { await api("/api/auth/logout", {}); } catch (e) { /* 会话已失效也继续收敛到登录层 */ }
+  authSession = "";
+  showLogin(msg || "已退出登录");
+}
+
+// ensureSession 重新探测登录态：未登录弹登录层，否则加载面板数据。
+// 用于密码变更/清空后重新同步（改密码会作废旧会话，清空密码则鉴权消失）。
+async function ensureSession(msg) {
+  try {
+    const st = await api("/api/auth/state");
+    if (st.auth_enabled && !st.auth_session) { showLogin(msg); return; }
+    authSession = st.auth_session || "";
+  } catch (e) { showLogin(msg); return; }
+  await loadState();
 }
 
 // ---------- 工具 ----------
@@ -462,7 +514,10 @@ function fmtTokens(n) {
 async function checkin(uid) {
   try {
     const r = await api("/api/account/checkin", { uid });
-    toast(r.ok ? `签到成功：${r.msg}（剩余 ${r.remain}）` : `签到：${r.msg}`);
+    // 未达成且可重试（活动尚未创建/上游瞬时故障）：说明会在签到窗口内自动重试，
+    // 避免用户看到「无可用签到活动」误以为失败。
+    if (!r.ok && r.retryable) toast(`暂未领到：${r.msg}（10:00–12:00 窗口内会自动重试）`);
+    else toast(r.ok ? `签到成功：${r.msg}（剩余 ${r.remain}）` : `签到：${r.msg}`);
     loadState();
   } catch (e) { toast(e.message); }
 }
@@ -502,9 +557,12 @@ async function checkinAll() {
   try {
     const r = await api("/api/account/checkin_all", {});
     const ok = (r.results || []).filter((x) => x.ok).length;
+    const pending = (r.results || []).filter((x) => !x.ok && x.retryable).length;
     const skip = (state.accounts || []).filter((a) => noExplicitCheckin(a.group)).length;
     const total = (r.results || []).length + skip;
-    toast(skip ? `批量签到完成：成功 ${ok} / ${total}（${skip} 个账号无签到活动跳过）` : `批量签到完成：成功 ${ok} / 共 ${total}`);
+    const parts = [skip ? `成功 ${ok} / ${total}（${skip} 个无签到活动跳过）` : `成功 ${ok} / 共 ${total}`];
+    if (pending) parts.push(`${pending} 个未领到将在窗口内自动重试`);
+    toast(`批量签到完成：${parts.join("；")}`);
     loadState();
   } catch (e) { toast(e.message); } finally {
     $("btnCheckinAll").disabled = false;
@@ -644,6 +702,30 @@ function renderProxyList() {
   $("proxyErr").textContent = "";
 }
 
+// selectedHost 当前下拉框（+自定义输入）选定的监听主机名。
+// 与后端 config.Listen 归一化口径保持一致：空/`::` 等通配写法按「全部网卡」看待（即对外暴露）。
+function selectedHost() {
+  const v = $("selHost").value;
+  if (v !== "__custom__") return v;
+  return $("inHost").value.trim();
+}
+
+// isLoopbackHost 判定是否「仅本机可访问」：环回 IP / localhost。
+// 对应后端 config.Listen.IsLoopback：**显式写环回才算安全**，空主机名视为对外暴露。
+function isLoopbackHost(h) {
+  const s = (h || "").trim().toLowerCase().replace(/^\[|\]$/g, "");
+  if (s === "localhost") return true;
+  return s === "127.0.0.1" || s === "::1" || /^127\./.test(s);
+}
+
+// syncListenRisk 按当前选定的监听地址，动态显示/隐藏黄色警告条与管理密码的必填星号。
+// 默认 127.0.0.1（本机）时两者均不显示——本机监听无需密码，提示只会干扰。
+function syncListenRisk() {
+  const needPass = !isLoopbackHost(selectedHost());
+  $("listenRiskTip").classList.toggle("hidden", !needPass);
+  $("adminPassReq").classList.toggle("hidden", !needPass);
+}
+
 function openSettings() {
   // 监听
   $("inPort").value = state.listen_port;
@@ -658,6 +740,11 @@ function openSettings() {
   }
   // API-Key
   $("keyInput").value = state.api_key;
+  // 管理密码：后端不回显，只提示是否已设置（留空 = 不改动，与 oczen key 同一「未改动」约定）
+  $("adminPassInput").value = "";
+  $("adminPassInput").placeholder = state.admin_pass_set
+    ? "已设置（留空 = 不改动；填入新值 = 修改）"
+    : (state.auth_required ? "必填：监听非 127.0.0.1 时面板必须鉴权" : "留空 = 面板不鉴权（仅本机监听时允许）");
   // 模型路由
   const cc = state.compat || {};
   const channels = cc.channels || [];
@@ -679,6 +766,7 @@ function openSettings() {
   // 自动签到 + 开机自启 + 临期阈值
   $("chkAutostart").checked = !!state.autostart;
   $("selExpiring").value = String(state.expiring_days || 1);
+  syncListenRisk(); // 按当前监听地址初始化警告条与必填星号
   $("settingsOverlay").classList.remove("hidden");
 }
 
@@ -733,13 +821,24 @@ async function testOczenKey() {
 }
 
 async function saveSettings() {
-  // 1) 监听地址
+  // 1) 监听地址 + 管理密码（同请求提交：后端先存密码再切监听）
   let host = $("selHost").value;
   if (host === "__custom__") host = $("inHost").value.trim() || "127.0.0.1";
   const port = parseInt($("inPort").value, 10);
+  const adminPass = $("adminPassInput").value.trim();
+  const listenBody = { host, port };
+  if (adminPass) listenBody.admin_password = adminPass; // 空 = 不改动，避免覆盖已设密码
   try {
-    await api("/api/config/listen", { host, port });
+    await api("/api/config/listen", listenBody);
   } catch (e) { toast(e.message); return; }
+  // 刚设置/修改密码：旧会话已被作废，立即用新密码重新登录，保证本次保存的后续步骤可用。
+  // （从「本机监听 + 无密码」切到 0.0.0.0 时鉴权刚启用，此前根本没有 cookie。）
+  if (adminPass) {
+    try {
+      const r = await api("/api/auth/login", { password: adminPass });
+      authSession = r.session || "";
+    } catch (e) { toast(e.message); closeSettings(); showLogin("管理密码已变更，请重新登录"); return; }
+  }
 
   // 2) 代理（先本地校验，失败阻断保存）+ oczen key（仅在用户改动过时提交，避免把脱敏回显值存回）
   const [proxies, perr] = validateProxies();
@@ -782,9 +881,22 @@ async function saveSettings() {
     await api("/api/config/api_key", { key: $("keyInput").value.trim() });
   } catch (e) { toast(e.message); return; }
 
-  toast("设置已保存");
+  // 6) 密码已在第 1 步生效（会话已换新），无需再强制重登
+  toast(adminPass ? "设置已保存，管理密码已生效" : "设置已保存");
   closeSettings();
   loadState();
+}
+
+// clearAdminPassword 「清除」按钮：关闭面板鉴权（仅环回监听允许，后端会校验）。
+async function clearAdminPassword() {
+  if (!confirm("确定清除管理密码？清除后面板将不再鉴权（仅允许监听 127.0.0.1）。")) return;
+  try {
+    await api("/api/config/admin_password", { password: "" });
+  } catch (e) { toast(e.message); return; }
+  authSession = "";
+  toast("管理密码已清除，面板鉴权已关闭");
+  closeSettings();
+  await ensureSession();
 }
 
 // ---------- 显示名修改弹层 ----------
@@ -936,6 +1048,10 @@ function bind() {
   $("btnCancelLogin").onclick = cancelLogin;
   $("btnRefreshFees").onclick = refreshFees;
   $("chkAutostart").onchange = toggleAutostart;
+  $("btnAdminLogout").onclick = () => logout();
+  $("btnClearAdminPass").onclick = clearAdminPassword;
+  $("btnAdminLogin").onclick = submitLogin;
+  $("adminLoginPass").onkeydown = (e) => { if (e.key === "Enter") submitLogin(); };
 
   $("apiAddr").onclick = () => {
     const v = $("apiAddr").querySelector(".val").textContent;
@@ -955,7 +1071,10 @@ function bind() {
   $("btnCompatMap").onclick = toggleMapEditor;
   $("selHost").onchange = () => {
     $("customHostRow").classList.toggle("hidden", $("selHost").value !== "__custom__");
+    syncListenRisk(); // 监听地址变化 → 实时间同步警告条与必填星号
   };
+  // 自定义主机名边输边判（可能一开始就填着非本机地址）
+  $("inHost").addEventListener("input", syncListenRisk);
   $("keyInput").addEventListener("keydown", (e) => { if (e.key === "Enter") saveSettings(); });
 
   // 显示名修改弹层
@@ -989,7 +1108,12 @@ function bind() {
   bind();
   bindMainTabs();
   bindUsage();
-  loadUsage(); // 页面加载即拉取（首次渲染自动刷新，不依赖手动点击）
+  // 会话探针（不返回 401）：未登录状态下只拉这接口，避免控制台报错
+  try {
+    const st = await api("/api/auth/state");
+    if (st.auth_enabled && !st.auth_session) { showLogin(); return; }
+    authSession = st.auth_session || "";
+  } catch (e) { /* 探针失败走下面的常规加载（如代理拦截） */ }  loadUsage(); // 页面加载即拉取（首次渲染自动刷新，不依赖手动点击）
   await loadState(); // 状态瞬间返回
   await loadFees();  // 费率表用缓存/静态兜底，秒开
 })();

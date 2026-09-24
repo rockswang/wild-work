@@ -18,9 +18,7 @@ const (
 	GatewayBase = "https://gateway.qoder.com.cn" // 推理网关（COSY 签名）
 
 	EpQuotaUsage = "/api/v2/quota/usage"
-	EpCheckinSt  = "/sash/api/v1/me/daily-check-in/status"
-	EpCheckinCl  = "/sash/api/v1/me/daily-check-in/claim"
-	EpCampaigns  = "/sash/api/v1/me/campaigns" // 活动列表+领取（签到主路径，实测 daily-check-in 已 DISABLED）
+	EpCampaigns  = "/sash/api/v1/me/campaigns" // 活动列表+领取（唯一领取路径；daily-check-in 已 DISABLED）
 	EpPlan       = "/api/v2/user/plan"
 	EpUserInfo   = "/api/v1/userinfo"
 	EpDTRefresh  = "/api/v1/deviceToken/refresh"

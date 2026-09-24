@@ -2,6 +2,7 @@ package qodercn
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -247,8 +248,12 @@ func TestCheckinCampaignsClaimable(t *testing.T) {
 	defer func() { checkinHost = oldHost }()
 
 	a := newAuth()
-	if err := checkin(a); err != nil {
+	rep, err := checkin(a)
+	if err != nil {
 		t.Fatalf("checkin: %v", err)
+	}
+	if rep.Status != provider.CheckinClaimed || rep.Amount != 100 {
+		t.Errorf("report = %+v, want claimed +100", rep)
 	}
 	if claimCalled != 1 {
 		t.Errorf("claim called %d times", claimCalled)
@@ -270,21 +275,23 @@ func TestCheckinAlreadyClaimed(t *testing.T) {
 	checkinHost = srv.URL
 	defer func() { checkinHost = oldHost }()
 
-	if err := checkin(newAuth()); err != nil {
+	rep, err := checkin(newAuth())
+	if err != nil {
 		t.Fatalf("already-claimed should be success: %v", err)
+	}
+	if rep.Status != provider.CheckinAlready || rep.Status.Retryable() {
+		t.Errorf("report = %+v, want already_claimed (not retryable)", rep)
 	}
 }
 
-// TestCheckinFallbackToDailyCheckin campaigns 不可用（404）时回退 daily-check-in。
-func TestCheckinFallbackToDailyCheckin(t *testing.T) {
+// TestCheckinClaimReplayed claim 返回 replayed=true：幂等成功，不再重试。
+func TestCheckinClaimReplayed(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case EpCampaigns:
-			w.WriteHeader(http.StatusNotFound)
-		case EpCheckinSt:
-			w.Write([]byte(`{"status":"CLAIMABLE","rewardCredits":100}`))
-		case EpCheckinCl:
-			w.Write([]byte(`{"success":true,"rewardCredits":100}`))
+			w.Write([]byte(`{"campaigns":[{"campaignId":"c1","actionType":"CLAIM_BENEFIT","claimStatus":"CLAIMABLE"}]}`))
+		case EpCampaigns + "/c1/claim":
+			w.Write([]byte(`{"status":"CLAIMED","replayed":true}`))
 		default:
 			t.Errorf("unexpected path %s", r.URL.Path)
 		}
@@ -294,21 +301,25 @@ func TestCheckinFallbackToDailyCheckin(t *testing.T) {
 	checkinHost = srv.URL
 	defer func() { checkinHost = oldHost }()
 
-	if err := checkin(newAuth()); err != nil {
-		t.Fatalf("fallback checkin: %v", err)
+	rep, err := checkin(newAuth())
+	if err != nil {
+		t.Fatalf("replayed should be success: %v", err)
+	}
+	if rep.Status != provider.CheckinAlready {
+		t.Errorf("report = %+v, want already_claimed", rep)
 	}
 }
 
-// TestCheckinDailyDisabled legacy DISABLED：按无活动成功处理。
-func TestCheckinDailyDisabled(t *testing.T) {
+// TestCheckinConflict409 claim 返回 409：幂等成功。
+func TestCheckinConflict409(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case EpCampaigns:
-			w.WriteHeader(http.StatusNotFound)
-		case EpCheckinSt:
-			w.Write([]byte(`{"campaignKey":"cn_daily_check_in_legacy","status":"DISABLED","rewardCredits":100}`))
+			w.Write([]byte(`{"campaigns":[{"campaignId":"c1","actionType":"CLAIM_BENEFIT","claimStatus":"CLAIMABLE"}]}`))
+		case EpCampaigns + "/c1/claim":
+			w.WriteHeader(http.StatusConflict)
 		default:
-			t.Errorf("claim should not fire on DISABLED: %s", r.URL.Path)
+			t.Errorf("unexpected path %s", r.URL.Path)
 		}
 	}))
 	defer srv.Close()
@@ -316,12 +327,87 @@ func TestCheckinDailyDisabled(t *testing.T) {
 	checkinHost = srv.URL
 	defer func() { checkinHost = oldHost }()
 
-	if err := checkin(newAuth()); err != nil {
-		t.Fatalf("DISABLED should be success: %v", err)
+	rep, err := checkin(newAuth())
+	if err != nil {
+		t.Fatalf("409 should be success: %v", err)
+	}
+	if rep.Status != provider.CheckinAlready {
+		t.Errorf("report = %+v, want already_claimed", rep)
 	}
 }
 
-// TestCheckin401SessionDead 401 透传（供 scheduler 自愈重试）。
+// TestCheckinNoCampaignIsRetryable 活动列表为空（10:00 整点尚未创建）→ no_campaign 且可重试。
+// 这是上游 ae3d42f 修的核心问题：不能把 no_campaign 当作「当日已完成」。
+func TestCheckinNoCampaignIsRetryable(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case EpCampaigns:
+			w.Write([]byte(`{"showCampaign":true,"claimable":false,"campaigns":[]}`))
+		default:
+			t.Errorf("unexpected path %s", r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+	oldHost := checkinHost
+	checkinHost = srv.URL
+	defer func() { checkinHost = oldHost }()
+
+	rep, err := checkin(newAuth())
+	if err != nil {
+		t.Fatalf("no_campaign is not an error: %v", err)
+	}
+	if rep.Status != provider.CheckinNoCampaign || !rep.Status.Retryable() {
+		t.Errorf("report = %+v, want no_campaign (retryable)", rep)
+	}
+}
+
+// TestCheckinLegacyNeverClaims legacy daily-check-in 端点绝不被用于领取。
+// 背景：该端点已 DISABLED 却对未领取日恒返回 409，走它会造成「假成功零积分」
+// （上游 99ab022 的结论，本项目抓包同款）。
+func TestCheckinLegacyNeverClaims(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case EpCampaigns:
+			w.Write([]byte(`{"campaigns":[{"campaignId":"c1","actionType":"CLAIM_BENEFIT","claimStatus":"CLAIMABLE"}]}`))
+		case EpCampaigns + "/c1/claim":
+			w.Write([]byte(`{"status":"CLAIMED","replayed":false,"benefit":{"amount":100}}`))
+		default:
+			// EpCheckinCl / EpCheckinSt 命中即失败
+			t.Errorf("legacy endpoint must not be used: %s", r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+	oldHost := checkinHost
+	checkinHost = srv.URL
+	defer func() { checkinHost = oldHost }()
+
+	if _, err := checkin(newAuth()); err != nil {
+		t.Fatalf("checkin: %v", err)
+	}
+}
+
+// TestCheckinCampaignsUnavailable campaigns 非 200 且非 401：报告 error 且可重试（无 legacy 回退）。
+// 与上游一致：该情形不是 Go error（无 401/网络层异常），而是结果状态，由调度器决定重试。
+func TestCheckinCampaignsUnavailable(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer srv.Close()
+	oldHost := checkinHost
+	checkinHost = srv.URL
+	defer func() { checkinHost = oldHost }()
+
+	rep, err := checkin(newAuth())
+	if err != nil {
+		t.Fatalf("404 is a status, not a transport error: %v", err)
+	}
+	if rep.Status != provider.CheckinError || !rep.Status.Retryable() {
+		t.Errorf("report = %+v, want error (retryable)", rep)
+	}
+}
+
+// TestCheckin401SessionDead 401 必须是类型化的 ErrSessionDead，
+// 否则调度器的 isSessionDead（errors.As 类型断言）恒为 false，自愈失效（不变式 19）。
 func TestCheckin401SessionDead(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusUnauthorized)
@@ -332,8 +418,24 @@ func TestCheckin401SessionDead(t *testing.T) {
 	checkinHost = srv.URL
 	defer func() { checkinHost = oldHost }()
 
-	if err := checkin(newAuth()); err == nil {
+	_, err := checkin(newAuth())
+	if err == nil {
 		t.Fatal("401 should propagate error")
+	}
+	var ue *provider.Error
+	if !errors.As(err, &ue) || ue.Kind != provider.ErrSessionDead {
+		t.Errorf("err = %v (%T), want *provider.Error with ErrSessionDead", err, err)
+	}
+}
+
+// TestCheckinNoToken 无 dt- 时返回 no_token（可重试，不报 error）。
+func TestCheckinNoToken(t *testing.T) {
+	rep, err := checkin(&auth.Auth{Kind: "qodercn", UID: "u1"})
+	if err != nil {
+		t.Fatalf("no token should not error: %v", err)
+	}
+	if rep.Status != provider.CheckinNoToken || !rep.Status.Retryable() {
+		t.Errorf("report = %+v, want no_token (retryable)", rep)
 	}
 }
 

@@ -21,6 +21,20 @@ type Listen struct {
 	Port int    `json:"port"`
 }
 
+// IsLoopback 是否是「仅本机可访问」的监听地址：环回 IP / localhost / 空主机名
+// （空主机名在 Go 里等同 :port，即全部网卡，但旧配置里 ":7863" 曾被当作本机语义，
+// 这里按「显式写环回才算安全」处理——空主机名一律视为对外暴露）。
+func (l Listen) IsLoopback() bool {
+	h := strings.TrimSpace(strings.ToLower(l.Host))
+	if h == "localhost" {
+		return true
+	}
+	if ip := net.ParseIP(strings.Trim(h, "[]")); ip != nil {
+		return ip.IsLoopback()
+	}
+	return false
+}
+
 // Addr 返回 net.Listen 使用的地址串，如 "127.0.0.1:7863" / ":7863"。
 func (l Listen) Addr() string {
 	host := l.Host
@@ -91,6 +105,7 @@ func ParseListen(s string) (Listen, error) {
 type Config struct {
 	Listen    Listen `json:"listen"`
 	APIKey    string `json:"api_key"`    // 空 = 不鉴权
+	AdminPass string `json:"admin_password"` // 空 = 管理面板不鉴权（仅允许监听环回地址时为空）
 	AuthDir   string `json:"auth_dir"`   // ./auths
 	StateFile string `json:"state_file"` // ./data/state.json
 	Region    string `json:"region"`     // 只收 "cn"
@@ -264,6 +279,9 @@ func applyEnv(c *Config) {
 	if v := os.Getenv("WILDWORK_API_KEY"); v != "" {
 		c.APIKey = v
 	}
+	if v := os.Getenv("WILDWORK_ADMIN_PASSWORD"); v != "" {
+		c.AdminPass = v
+	}
 	if v := os.Getenv("WILDWORK_AUTH_DIR"); v != "" {
 		c.AuthDir = v
 	}
@@ -333,6 +351,7 @@ func (c *Config) normalize() error {
 	if c.Listen.Port <= 0 {
 		c.Listen.Port = 7863
 	}
+	c.AdminPass = strings.TrimSpace(c.AdminPass)
 	// 代理配置清洗：剔除空值，校验 URL 形态（http/https/socks5）。
 	for k, v := range c.Proxies {
 		v = strings.TrimSpace(v)

@@ -2,6 +2,7 @@ package qodercom
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -247,8 +248,12 @@ func TestCheckinCampaignsClaimable(t *testing.T) {
 	defer func() { checkinHost = oldHost }()
 
 	a := newAuth()
-	if err := checkin(a); err != nil {
+	rep, err := checkin(a)
+	if err != nil {
 		t.Fatalf("checkin: %v", err)
+	}
+	if rep.Status != provider.CheckinClaimed || rep.Amount != 100 {
+		t.Errorf("report = %+v, want claimed +100", rep)
 	}
 	if claimCalled != 1 {
 		t.Errorf("claim called %d times", claimCalled)
@@ -270,12 +275,40 @@ func TestCheckinAlreadyClaimed(t *testing.T) {
 	checkinHost = srv.URL
 	defer func() { checkinHost = oldHost }()
 
-	if err := checkin(newAuth()); err != nil {
+	rep, err := checkin(newAuth())
+	if err != nil {
 		t.Fatalf("already-claimed should be success: %v", err)
+	}
+	if rep.Status != provider.CheckinAlready || rep.Status.Retryable() {
+		t.Errorf("report = %+v, want already_claimed (not retryable)", rep)
 	}
 }
 
-// TestCheckinCampaignsUnavailable campaigns 不可用（404）时透传错误（COM 无回退路径）。
+// TestCheckinNoCampaignIsRetryable 活动列表为空 → no_campaign 且可重试（不当日完成）。
+func TestCheckinNoCampaignIsRetryable(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case EpCampaigns:
+			w.Write([]byte(`{"showCampaign":true,"claimable":false,"campaigns":[]}`))
+		default:
+			t.Errorf("unexpected path %s", r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+	oldHost := checkinHost
+	checkinHost = srv.URL
+	defer func() { checkinHost = oldHost }()
+
+	rep, err := checkin(newAuth())
+	if err != nil {
+		t.Fatalf("no_campaign is not an error: %v", err)
+	}
+	if rep.Status != provider.CheckinNoCampaign || !rep.Status.Retryable() {
+		t.Errorf("report = %+v, want no_campaign (retryable)", rep)
+	}
+}
+
+// TestCheckinCampaignsUnavailable campaigns 不可用（404）：报告 error 且可重试（COM 无回退路径）。
 func TestCheckinCampaignsUnavailable(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNotFound)
@@ -285,8 +318,12 @@ func TestCheckinCampaignsUnavailable(t *testing.T) {
 	checkinHost = srv.URL
 	defer func() { checkinHost = oldHost }()
 
-	if err := checkin(newAuth()); err == nil {
-		t.Fatal("campaigns 404 should error (no fallback in COM)")
+	rep, err := checkin(newAuth())
+	if err != nil {
+		t.Fatalf("404 is a status, not a transport error: %v", err)
+	}
+	if rep.Status != provider.CheckinError || !rep.Status.Retryable() {
+		t.Errorf("report = %+v, want error (retryable)", rep)
 	}
 }
 
@@ -304,7 +341,7 @@ func TestConstantsCOMOnly(t *testing.T) {
 	// EpCheckinSt/EpCheckinCl 在 COM 不应存在（编译期保证，此处是文档性断言）
 }
 
-// TestCheckin401SessionDead 401 透传（供 scheduler 自愈重试）。
+// TestCheckin401SessionDead 401 必须是类型化的 ErrSessionDead（不变式 19）。
 func TestCheckin401SessionDead(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusUnauthorized)
@@ -315,8 +352,24 @@ func TestCheckin401SessionDead(t *testing.T) {
 	checkinHost = srv.URL
 	defer func() { checkinHost = oldHost }()
 
-	if err := checkin(newAuth()); err == nil {
+	_, err := checkin(newAuth())
+	if err == nil {
 		t.Fatal("401 should propagate error")
+	}
+	var ue *provider.Error
+	if !errors.As(err, &ue) || ue.Kind != provider.ErrSessionDead {
+		t.Errorf("err = %v (%T), want *provider.Error with ErrSessionDead", err, err)
+	}
+}
+
+// TestCheckinNoToken 无 dt- 时返回 no_token（可重试，不报 error）。
+func TestCheckinNoToken(t *testing.T) {
+	rep, err := checkin(&auth.Auth{Kind: "qodercom", UID: "u1"})
+	if err != nil {
+		t.Fatalf("no token should not error: %v", err)
+	}
+	if rep.Status != provider.CheckinNoToken || !rep.Status.Retryable() {
+		t.Errorf("report = %+v, want no_token (retryable)", rep)
 	}
 }
 

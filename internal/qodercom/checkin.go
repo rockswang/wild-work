@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"wild-work/internal/auth"
+	"wild-work/internal/provider"
 )
 
 // checkinHost 签到 API 域名（与业务 API 同域 openapi.qoder.sh）。
@@ -65,52 +66,31 @@ func doCheckinRequest(method, path, dt string, reqBody any) (int, []byte, error)
 	return resp.StatusCode, raw, nil
 }
 
-// checkinResult 单次签到结果。
-type checkinResult struct {
-	OK      bool   // 视为成功（含已签到）
-	Msg     string // 展示文案（含金额）
-	Claimed bool   // 本次是否新领取（false=已签/无活动）
-	Amount  int64
-}
-
 // checkin 执行签到：campaigns 活动路径（COM 唯一路径）。
-// 调用方（scheduler）已处理 401 自愈（ErrSessionDead），本函数直接透传。
-func checkin(a *auth.Auth) error {
+// 返回 (报告, error)：error 非 nil 时调度器可按 isSessionDead 自愈重试。
+func checkin(a *auth.Auth) (provider.CheckinReport, error) {
 	dt := a.JWT()
 	if dt == "" {
-		return fmt.Errorf("no dt- available")
+		return provider.CheckinReport{Status: provider.CheckinNoToken, Msg: "no dt- available"}, nil
 	}
-	res, handled, err := tryCampaigns(dt)
-	if handled {
-		log.Printf("qodercom checkin campaigns uid=%s ok=%t claimed=%t amount=%d msg=%s", a.UID, res.OK, res.Claimed, res.Amount, res.Msg)
-		if res.OK {
-			return nil
-		}
-		if err != nil {
-			return err // 401 等需向 scheduler 透传（自愈重试）
-		}
-		return fmt.Errorf("%s", res.Msg)
-	}
-	if err != nil {
-		return err
-	}
-	return fmt.Errorf("qodercom checkin: campaigns unavailable")
+	rep, err := tryCampaigns(dt)
+	log.Printf("qodercom checkin campaigns uid=%s status=%s claimed=%t amount=%d msg=%s err=%v",
+		a.UID, rep.Status, rep.Status == provider.CheckinClaimed, rep.Amount, rep.Msg, err)
+	return rep, err
 }
 
 // tryCampaigns 查活动列表 → 领取 CLAIMABLE 的 CLAIM_BENEFIT。
-// 返回 (结果, handled, err)；handled=false 表示路径不可用（网络/格式异常）。
-func tryCampaigns(dt string) (checkinResult, bool, error) {
-	res := checkinResult{}
+func tryCampaigns(dt string) (provider.CheckinReport, error) {
 	status, raw, err := doCheckinRequest(http.MethodGet, EpCampaigns, dt, nil)
 	if err != nil {
-		return res, false, err
+		return provider.CheckinReport{Status: provider.CheckinError, Msg: err.Error()}, err
 	}
-	// 401 透传给上层自愈（session dead）
+	// 401 必须按 session dead 类型透传，否则调度器无法自愈（AGENTS.md 不变式 19）。
 	if status == http.StatusUnauthorized {
-		return res, true, checkinResult{Msg: fmt.Sprintf("http 401: %s", truncate(string(raw), 120))}.toErr()
+		return provider.CheckinReport{Status: provider.CheckinError}, sessionDead(status, raw)
 	}
 	if status != http.StatusOK {
-		return res, false, fmt.Errorf("campaigns http %d: %s", status, truncate(string(raw), 200))
+		return provider.CheckinReport{Status: provider.CheckinError, Msg: fmt.Sprintf("campaigns http %d: %s", status, truncate(string(raw), 200))}, nil
 	}
 	var list struct {
 		Campaigns []struct {
@@ -121,7 +101,7 @@ func tryCampaigns(dt string) (checkinResult, bool, error) {
 		} `json:"campaigns"`
 	}
 	if err := json.Unmarshal(raw, &list); err != nil {
-		return res, false, fmt.Errorf("campaigns parse: %w", err)
+		return provider.CheckinReport{Status: provider.CheckinError, Msg: fmt.Sprintf("campaigns parse: %v", err)}, nil
 	}
 	var targetID string
 	already := false
@@ -138,24 +118,25 @@ func tryCampaigns(dt string) (checkinResult, bool, error) {
 	}
 	if targetID == "" {
 		if already {
-			return checkinResult{OK: true, Msg: "已签到"}, true, nil
+			return provider.CheckinReport{Status: provider.CheckinAlready, Msg: "今日已领取"}, nil
 		}
-		return checkinResult{OK: true, Msg: "无可用签到活动"}, true, nil
+		// 活动尚未创建（10:00 整点延迟）→ 可重试状态，不可当作完成。
+		return provider.CheckinReport{Status: provider.CheckinNoCampaign, Msg: "无可用签到活动"}, nil
 	}
 
 	// 领取（空 body，抓包确认）
 	status, raw, err = doCheckinRequest(http.MethodPost, EpCampaigns+"/"+targetID+"/claim", dt, nil)
 	if err != nil {
-		return res, true, err
+		return provider.CheckinReport{Status: provider.CheckinError, Msg: err.Error()}, err
 	}
 	if status == http.StatusConflict { // 409 幂等：今日已领
-		return checkinResult{OK: true, Msg: "已签到"}, true, nil
+		return provider.CheckinReport{Status: provider.CheckinAlready, Msg: "今日已领取"}, nil
 	}
 	if status == http.StatusUnauthorized {
-		return res, true, checkinResult{Msg: fmt.Sprintf("http 401: %s", truncate(string(raw), 120))}.toErr()
+		return provider.CheckinReport{Status: provider.CheckinError}, sessionDead(status, raw)
 	}
 	if status != http.StatusOK {
-		return checkinResult{OK: false, Msg: fmt.Sprintf("领取失败 http %d: %s", status, truncate(string(raw), 150))}, true, nil
+		return provider.CheckinReport{Status: provider.CheckinError, Msg: fmt.Sprintf("领取失败 http %d: %s", status, truncate(string(raw), 150))}, nil
 	}
 	var claim struct {
 		Status   string `json:"status"`
@@ -165,20 +146,23 @@ func tryCampaigns(dt string) (checkinResult, bool, error) {
 		} `json:"benefit"`
 	}
 	if err := json.Unmarshal(raw, &claim); err != nil {
-		return res, true, fmt.Errorf("claim parse: %w", err)
+		return provider.CheckinReport{Status: provider.CheckinError, Msg: fmt.Sprintf("claim parse: %v", err)}, nil
 	}
-	if claim.Status == "CLAIMED" {
-		if claim.Replayed {
-			return checkinResult{OK: true, Msg: "已签到"}, true, nil
-		}
-		amount := int64(0)
-		if claim.Benefit != nil {
-			amount = claim.Benefit.Amount
-		}
-		return checkinResult{OK: true, Claimed: true, Amount: amount, Msg: fmt.Sprintf("签到成功 +%d", amount)}, true, nil
+	if claim.Status != "CLAIMED" {
+		return provider.CheckinReport{Status: provider.CheckinError, Msg: fmt.Sprintf("未知状态 %s", claim.Status)}, nil
 	}
-	return checkinResult{OK: false, Msg: fmt.Sprintf("未知状态 %s", claim.Status)}, true, nil
+	if claim.Replayed {
+		return provider.CheckinReport{Status: provider.CheckinAlready, Msg: "今日已领取"}, nil
+	}
+	amount := int64(0)
+	if claim.Benefit != nil {
+		amount = claim.Benefit.Amount
+	}
+	return provider.CheckinReport{Status: provider.CheckinClaimed, Amount: amount, Msg: fmt.Sprintf("签到成功 +%d", amount)}, nil
 }
 
-// toErr 把失败结果转为 error（保持 scheduler isAlready 兼容文案）。
-func (r checkinResult) toErr() error { return fmt.Errorf("%s", r.Msg) }
+// sessionDead 构造类型化的 401 错误：调度器用 errors.As(*provider.Error) 判定自愈，
+// 裸 fmt.Errorf 会让 isSessionDead 恒为 false（AGENTS.md 不变式 19）。
+func sessionDead(status int, raw []byte) error {
+	return &provider.Error{Kind: provider.ErrSessionDead, Status: status, Msg: truncate(string(raw), 200)}
+}

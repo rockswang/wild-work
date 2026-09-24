@@ -107,3 +107,30 @@ func TestNeedsRefresh(t *testing.T) {
 		t.Error("far future should not need refresh")
 	}
 }
+
+// TestAdoptJWTExpiry 验证用 JWT exp 校正偏短/缺失的本地 expiresAt，
+// 且不把正常值（已晚于 JWT）改坏——回归：expires_in 单位误判导致 expiresAt 偏短 7 天。
+func TestAdoptJWTExpiry(t *testing.T) {
+	// exp=2000000000 的 JWT（payload 由测试内构造，签名不参与校验）
+	const jwt = "aaa.eyJleHAiOiAyMDAwMDAwMDAwLCAic3ViIjogInUxIn0.bbb"
+
+	a := &Auth{AccessToken: jwt, ExpiresAt: 1789972540} // 历史脏值（比 JWT 少 ~7 天）
+	a.AdoptJWTExpiry()
+	if a.ExpiresAt != 2000000000 {
+		t.Fatalf("expiresAt = %d, want 2000000000（应采纳 JWT exp）", a.ExpiresAt)
+	}
+
+	// 已晚于 JWT：不得回退
+	b := &Auth{AccessToken: jwt, ExpiresAt: 2100000000}
+	b.AdoptJWTExpiry()
+	if b.ExpiresAt != 2100000000 {
+		t.Fatalf("expiresAt = %d, want 2100000000（不得回退）", b.ExpiresAt)
+	}
+
+	// 非 JWT：保持原值
+	c := &Auth{AccessToken: "not-a-jwt", ExpiresAt: 5}
+	c.AdoptJWTExpiry()
+	if c.ExpiresAt != 5 {
+		t.Fatalf("expiresAt = %d, want 5（非 JWT 不应改动）", c.ExpiresAt)
+	}
+}

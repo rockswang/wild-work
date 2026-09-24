@@ -19,6 +19,7 @@ cmd/wild-work/web/             # 纯静态 Web UI（index.html / app.js / style.
 cmd/genicon/                   # 图标生成（纯 Go）
 internal/
 ├── app/app.go                 # 业务编排：HTTP 管理 API + 登录流程 + 费率缓存 + 日志
+├── app/session.go             # 管理面板鉴权：cookie 会话 + 管理员密码 + 登录限流
 ├── server/handler.go          # OpenAI 兼容 HTTP handler：前缀路由 + 挑号 + 错误透传
 ├── pool/pool.go               # 账号池：余额挑号 + 冷却/禁用状态机 + state.json 持久化
 ├── scheduler/scheduler.go     # 定时签到 + token 保活 + 冷却解冻
@@ -26,7 +27,7 @@ internal/
 ├── upstream/                   # WorkBuddy(CodeBuddy) 上游：chat/billing/auth/模型/定价/脱敏
 ├── traework/                   # TraeWork/TraeCode 上游：chat(SOLO)/billing/checkin/模型/定价（TraeCode=NewTraeCode()，同上游不同 function）
 ├── qoder/                      # 旧 Qoder(QoderWork) 上游：已下线，路由保留
-├── qodercn/                    # QoderCN 上游：qoder2api 参数形态（cosyVersion 1.0.10 / 双路径签到）
+├── qodercn/                    # QoderCN 上游：qoder2api 参数形态（cosyVersion 1.0.10 / campaigns 签到）
 ├── qodercom/                   # QoderCOM 国际版上游：三域分离（openapi/api1/api2.qoder.sh）
 ├── qwenwork/                   # 千问办公上游（gateway.qwenwork.cn）
 ├── oczen/                      # OpenCodeZen 匿名免费通道：无账号（Bearer public）+ 三道闸门构造
@@ -56,6 +57,15 @@ internal/
 10. **Classify 429 优先于 hardMarkers**：三渠道 `Classify` 均须先判 `status==429` 再扫余额关键词；顺序反置会导致 429 + "quota exceeded" 误判硬冷却 12h。
 11. **脱敏层预检零分配**：`internal/sanitize` 的 `hasFingerprint` 先走 `strings.Contains` 特征快速路径，普通请求不命中即原样返回，不做 JSON Unmarshal。
 12. **RefreshHeaders 直接读 RefreshToken**：该函数调用方已持有 `a.Lock()`，不能走 `a.RefreshTokenValue()`（会死锁）。其余 API 头用 `a.AccessTokenValue()` 锁快照。
+13. **管理面板鉴权不变量**：
+    - `admin_password` 为空 ⇒ 只允许监听环回地址（启动层 fatal + `SetListen`/`SetAdminPassword` 双向把关），不得只在一处校验；
+    - `/api/auth/*`（登录/登出/探针）**不得**加会话守卫，其余 `/api/*` 一律经 `App.guardMux`；
+    - 前端不读 cookie（HttpOnly），登录态判断靠 `/api/auth/state` 回传的 `auth_session`（口令指纹，改用 SHA-256(密码) 前 8 字节）；
+    - OpenAI/兼容接口的 `api_key` 与面板密码是两套凭据，不得互换或复用；
+    - **设置弹层的监听警示必须跟着「当前选中的地址」实时联动**，不得写成静态常显：
+      `syncListenRisk()` 是唯一入口（下拉框 onchange / 自定义输入框 input / 打开弹层时各调一次），
+      同时控制黄色警告条（`#listenRiskTip`）与管理密码的必填星号（`#adminPassReq`）。
+      判定口径须与后端 `config.Listen.IsLoopback` 一致（显式环回才安全，空主机名=对外暴露）。
 
 ## 3. 渠道上游接口
 
@@ -105,7 +115,7 @@ TraeWork/TraeCode 分组去重按主 function 优先（同一模型在 `solo_age
 | 聊天 | `POST {gateway}/algo/api/v2/service/pro/sse/agent_chat_generation?...AgentId=agent_common` | gateway=`api1.qoder.sh` | COSY 签名 + dt- |
 | 模型列表 | `GET {models}/algo/api/v2/model/list?Encode=1` | models=`api2.qoder.sh`（双域分离） | COSY 签名 |
 | 余额 | `GET {base}/api/v2/quota/usage` | 同左 | dt- Bearer |
-| 签到 | `GET/POST {base}/sash/api/v1/me/campaigns[/{id}/claim]` + daily-check-in 兑底 | 仅 campaigns（无 daily-check-in） | dt- + cosy-clienttype:10 |
+| 签到 | `GET/POST {base}/sash/api/v1/me/campaigns[/{id}/claim]`（仅此路径） | 同左 | dt- + cosy-clienttype:10 |
 | 登录 | OAuth 设备流（PKCE+S256） | 同左（授权页 qoder.com） | 无 |
 
 Base: CN `openapi.qoder.com.cn`+`gateway.qoder.com.cn`；COM `openapi.qoder.sh`+`api1.qoder.sh`+`api2.qoder.sh`
@@ -117,6 +127,10 @@ identity.userType 从 `/api/v1/userinfo` 实测回填；请求体 `session_type:
 消息体经 `qoderEncode()` 编码，SSE 嵌套格式（`data:{"body":"<json>"}`）。
 模型表无静态兑底：上次成功拉取作进程内缓存；场景解析 assistant→developer→chat 三级回退。
 签到必须 `cosy-clienttype: 10`（桌面端），与推理链路的 5 不同；活动 campaignKey 每日变化不可硬码。
+**绝不用 legacy `daily-check-in/claim`**：该端点已 DISABLED 却对未领取日恒返 409，走它会造成
+「假成功零积分」（上游 qoder2api 99ab022 同款结论，2026-09-21 抓包实测）。
+签到窗口：每日 10:00（UTC+8）开放，10:00–12:00 窗口内每分钟重试（活动可能在整点后才创建），
+结果经 `provider.CheckinReporter` 结构化上报，全账号达 claimed/already 才算当日完成（见 AGENTS.md 不变量 23）。
 CN 凭据在国际端点 401（双向隔离），两渠道凭据文件前缀 `qodercn-`/`qodercom-`。
 
 模型定价：`price_factor` 字段（数字）。
@@ -155,7 +169,10 @@ model 字段回填：`Aggregate` 直接改字段；`Stream` 用 `modelRewriter` 
 > **例外：无账号渠道（oczen）**不需要第 2 步，也不需要 `internal/auth` 的 `Load<X>Dir()`：
 > 虚拟账号由 `oczen.AnonymousAuth()` 在 `main` 装配时注入 pool（`FilePath` 为空），
 > 且 **不得** 纳入 `app.reloadAccounts`——`pool.SyncToDir` 会把「目录里扫不到」的账号剔除。
-> 其 `Classify` 只能对 429 返回冷却类错误，其余 4xx 一律 `ErrPassthrough`（单账号不可轮换）。
+> 其 `Runtime` 必须设 `SingleAccount: true`（唯一且不可重登的账号 ⇒ 任何账号级惩罚
+> 都等于整条渠道下线）：handler 对传输层错误与 `>=400` 一律原文透传，不冷却不计数不禁用；
+> 启动时另调 `Pool.ClearPenalty(uid)` 清除旧版遗留的冷却。
+> `Classify` 仍做语义分类（供日志），但不再用于决定惩罚。
 > 详见 `docs/opencodezen渠道接入备忘.md`。
 
 `provider.Upstream` 接口：

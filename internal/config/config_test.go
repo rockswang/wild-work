@@ -148,6 +148,38 @@ func TestLoadMinuteCheckinTimes(t *testing.T) {
 	}
 }
 
+func TestAdminPasswordAndLoopback(t *testing.T) {
+	dir := t.TempDir()
+	fp := filepath.Join(dir, "c.json")
+	// 旧配置（无 admin_password）必须能加载，且默认空 = 面板不鉴权
+	os.WriteFile(fp, []byte(`{"listen":"127.0.0.1:9999"}`), 0o600)
+	c, err := Load(fp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.AdminPass != "" {
+		t.Errorf("缺省 admin_password 应为空，实际 %q", c.AdminPass)
+	}
+	// 新字段可读
+	os.WriteFile(fp, []byte(`{"listen":{"host":"0.0.0.0","port":8000},"admin_password":"pw12345678"}`), 0o600)
+	if c, err = Load(fp); err != nil {
+		t.Fatal(err)
+	} else if c.AdminPass != "pw12345678" {
+		t.Errorf("admin_password=%q", c.AdminPass)
+	}
+	// env 覆盖
+	t.Setenv("WILDWORK_ADMIN_PASSWORD", "env-pw")
+	if c, err = Load(fp); err != nil || c.AdminPass != "env-pw" {
+		t.Errorf("env override 失败：%v %q", err, c.AdminPass)
+	}
+	// IsLoopback
+	for host, want := range map[string]bool{"127.0.0.1": true, "localhost": true, "::1": true, "0.0.0.0": false, "": false, "192.168.1.9": false} {
+		if got := (Listen{Host: host}).IsLoopback(); got != want {
+			t.Errorf("IsLoopback(%q)=%v want %v", host, got, want)
+		}
+	}
+}
+
 func TestBadDuration(t *testing.T) {
 	dir := t.TempDir()
 	fp := filepath.Join(dir, "c.json")

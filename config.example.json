@@ -4,6 +4,7 @@
     "port": 7863
   },
   "api_key": "WildWorkAPI",
+  "admin_password": "",
   "auth_dir": "./auths",
   "state_file": "./data/state.json",
   "region": "cn",
