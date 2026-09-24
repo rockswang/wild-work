@@ -55,6 +55,12 @@ type Runtime struct {
 	Pool      *pool.Pool
 	Upstream  provider.Upstream
 	Scheduler *scheduler.Scheduler
+
+	// Alias 标记该渠道与另一渠道共用同一账号池（如 TraeCode 复用 TraeWork 的 trPool）。
+	// 有别于上游/路由独立性，账号聚合类操作（状态列表、账号计数、批量签到/刷新、
+	// uid → 账号反查）必须跳过别名渠道，否则同一账号会被计入两次（见 issue #36）。
+	// 别名渠道仍保留独立的模型/费率抓取（各自 upstream 的 function 不同）。
+	Alias bool
 }
 
 // Options 构建 App 的依赖。
@@ -196,7 +202,7 @@ func (a *App) firstRuntime() *Runtime {
 func (a *App) totalAccounts() int {
 	n := 0
 	for _, rt := range a.runtimes {
-		if rt != nil && rt.Pool != nil {
+		if rt != nil && rt.Pool != nil && !rt.Alias {
 			n += len(rt.Pool.List())
 		}
 	}
@@ -206,7 +212,8 @@ func (a *App) totalAccounts() int {
 func (a *App) allStatuses() []pool.Status {
 	out := []pool.Status{}
 	for _, rt := range a.runtimes {
-		if rt != nil && rt.Pool != nil {
+		// 别名渠道（TraeCode）复用同一 Pool：计入会导致每个账号重复一条（issue #36）。
+		if rt != nil && rt.Pool != nil && !rt.Alias {
 			out = append(out, rt.Pool.List()...)
 		}
 	}
@@ -246,7 +253,9 @@ func noExplicitCheckin(k provider.Kind) bool {
 
 func (a *App) findRuntimeAuth(uid string) (*Runtime, *auth.Auth) {
 	for _, rt := range a.runtimes {
-		if rt == nil || rt.Pool == nil {
+		// 跳过别名渠道：map 遍历无序，若命中 TraeCode 会拿到错误 upstream（function=solo_agent），
+		// 且 accountGroup 会误报 traecode；账号级操作一律归主渠道（TraeWork）。
+		if rt == nil || rt.Pool == nil || rt.Alias {
 			continue
 		}
 		if au := rt.Pool.AuthByUID(uid); au != nil {
@@ -934,7 +943,8 @@ func (a *App) CheckinAccount(uid string) (scheduler.CheckinResult, error) {
 func (a *App) CheckinAll() []scheduler.CheckinResult {
 	results := make([]scheduler.CheckinResult, 0)
 	for _, rt := range a.runtimes {
-		if rt == nil || rt.Pool == nil || rt.Scheduler == nil {
+		// 别名渠道复用同一 Pool 且无独立 Scheduler：计入会重复签到同一批账号。
+		if rt == nil || rt.Pool == nil || rt.Scheduler == nil || rt.Alias {
 			continue
 		}
 		if noExplicitCheckin(rt.Kind) { // 无签到活动渠道，跳过
@@ -1030,7 +1040,8 @@ func (a *App) StartCreditAutoRefresh(ctx context.Context, kinds []provider.Kind,
 		refresh := func() {
 			for _, k := range kinds {
 				rt := a.runtime(k)
-				if rt == nil || rt.Pool == nil || rt.Upstream == nil {
+				// 别名渠道复用主渠道 Pool：纳入会重复刷新同一批账号。
+				if rt == nil || rt.Pool == nil || rt.Upstream == nil || rt.Alias {
 					continue
 				}
 				for _, st := range rt.Pool.List() {
@@ -1142,7 +1153,8 @@ func (a *App) RefreshAll() RefreshSummary {
 	}()
 	sum := RefreshSummary{Platforms: map[string]PlatformSummary{}}
 	for _, rt := range a.runtimes {
-		if rt == nil || rt.Pool == nil || rt.Upstream == nil {
+		// 别名渠道复用同一 Pool：计入会重复刷新同一批账号。
+		if rt == nil || rt.Pool == nil || rt.Upstream == nil || rt.Alias {
 			continue
 		}
 		// oczen 无积分可刷：纳入只会产生一条无意义的「无积分」失败记录。
@@ -1954,7 +1966,7 @@ func (a *App) HandleAPI(mux *http.ServeMux) {
 		nameOf := map[string]string{}
 		chOf := map[string]string{}
 		for _, rt := range a.runtimes {
-			if rt == nil || rt.Pool == nil {
+			if rt == nil || rt.Pool == nil || rt.Alias {
 				continue
 			}
 			for _, st := range rt.Pool.List() {
