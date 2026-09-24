@@ -990,12 +990,8 @@ function bind() {
   bindMainTabs();
   bindUsage();
   loadUsage(); // 页面加载即拉取（首次渲染自动刷新，不依赖手动点击）
-  try {
-    await loadState();
-    await loadFees();
-  } catch (e) {
-    toast("无法连接后台服务：" + e.message);
-  }
+  await loadState(); // 状态瞬间返回
+  await loadFees();  // 费率表用缓存/静态兜底，秒开
 })();
 
 // ---------- 用量与流水面板 ----------

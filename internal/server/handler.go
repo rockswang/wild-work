@@ -625,6 +625,7 @@ func rewriteModel(body []byte, model string) ([]byte, error) {
 // ChannelModels 返回每个渠道当前生效的模型列表，与 /v1/models 同源
 // （含动态拉取与静态兜底），只包含已接入账号的渠道。
 // 供管理端（费率面板）复用，保证「模型列表」与「模型费率」基于同一份清单。
+// 注意：会触发上游网络请求（fetchRuntimeModels），费控面板场景用 CachedChannelModels 避免阻塞。
 func (h *Handler) ChannelModels() map[provider.Kind][]provider.ModelInfo {
 	out := make(map[provider.Kind][]provider.ModelInfo, len(h.cfg.Runtimes))
 	for _, k := range h.runtimeKinds() {
@@ -637,6 +638,29 @@ func (h *Handler) ChannelModels() map[provider.Kind][]provider.ModelInfo {
 			infos = rt.StaticModels
 		}
 		out[k] = infos
+	}
+	return out
+}
+
+// CachedChannelModels 返回各渠道生效的模型列表，仅用内存缓存/静态兜底，不触发上游网络请求。
+// 供费控面板等需要即时返回的场景使用（后台刷新比用户点面板快）。
+func (h *Handler) CachedChannelModels() map[provider.Kind][]provider.ModelInfo {
+	out := make(map[provider.Kind][]provider.ModelInfo, len(h.cfg.Runtimes))
+	for _, k := range h.runtimeKinds() {
+		rt := h.cfg.Runtimes[k]
+		if rt == nil || rt.Pool == nil || len(rt.Pool.List()) == 0 {
+			continue
+		}
+		// 取缓存：TTL 内直接返回，否则静态兜底（不触发网络请求）
+		rt.mu.RLock()
+		if len(rt.models) > 0 && time.Since(rt.fetched) < dynamicModelsTTL {
+			infos := rt.models
+			rt.mu.RUnlock()
+			out[k] = infos
+			continue
+		}
+		rt.mu.RUnlock()
+		out[k] = rt.StaticModels
 	}
 	return out
 }

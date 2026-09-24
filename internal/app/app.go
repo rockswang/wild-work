@@ -2106,10 +2106,11 @@ func (a *App) FeesInfo() map[string]any {
 		go a.safeGo(func() { a.RefreshPricing() })
 	}
 
-	// 模型列表：优先用 server 的渠道清单（与 /v1/models 完全一致）
+	// 面板秒开：模型列表只用缓存/静态兜底（不触发上游网络请求）。
+	// 后台 StartPricingAutoRefresh 每 30 分钟拉新并写入缓存，用户看到的是最近一次结果。
 	var modelsByKind map[provider.Kind][]provider.ModelInfo
 	if a.handler != nil {
-		modelsByKind = a.handler.ChannelModels()
+		modelsByKind = a.handler.CachedChannelModels()
 	} else {
 		modelsByKind = a.staticModelFallback()
 	}

@@ -46,7 +46,9 @@ type CreditEntry struct {
 
 const (
 	// keepMonths 流水分段保留月数（启动时清理更早的分段）。
-	keepMonths = 6
+	keepMonths = 1
+	// keepDays 单文件内条目保留天数（启动时裁剪更早的)。
+	keepDays = 7
 )
 
 // Ledger 双流水记账器。goroutine 安全。
@@ -69,6 +71,7 @@ func New(dir string) (*Ledger, error) {
 	}
 	l := &Ledger{dir: dir}
 	l.cleanup()
+	l.trimCurrentMonth() // 裁剪当月文件内 7 天前条目
 	return l, nil
 }
 
@@ -92,6 +95,106 @@ func (l *Ledger) cleanup() {
 			}
 		}
 	}
+}
+
+// trimCurrentMonth 裁剪当月文件内 7 天前的条目：一行行扫一遍，只保留 cutTs 之后的。
+// 日常 150 行/天的量级下走重写方式即可，无需 mmap 或 seek 优化。
+func (l *Ledger) trimCurrentMonth() {
+	cutTs := time.Now().AddDate(0, 0, -keepDays).Unix()
+	for _, prefix := range []string{"usage", "credit"} {
+		fp := filepath.Join(l.dir, monthFile(prefix, time.Now()))
+		raw, err := os.ReadFile(fp)
+		if err != nil {
+			continue
+		}
+		// 快速路径：首行时间戳已 ≤ cutTs，无需裁剪
+		if idx := findLineTs(raw); idx >= 0 && idx <= cutTs {
+			continue
+		}
+		// 双指针原地过滤（避免分配临时数组）
+		keep := raw[:0]
+		for len(raw) > 0 {
+			nl := indexByte(raw, '\n')
+			line := raw
+			if nl >= 0 {
+				line, raw = raw[:nl], raw[nl+1:]
+			} else {
+				raw = nil
+			}
+			// 取时间戳：json {"ts":1790144604,...}
+			ts := parseTs(line)
+			if ts >= cutTs {
+				keep = append(keep, line...)
+				keep = append(keep, '\n')
+			}
+		}
+		_ = os.WriteFile(fp, keep, 0o600)
+	}
+}
+
+// findLineTs 取 JSONL 文件首行时间戳（用于快速路径判断）。
+// 首行 → 裁剪边界说明全部待裁剪；首行在边界后说明全部保留。
+func findLineTs(raw []byte) int64 {
+	nl := indexByte(raw, '\n')
+	if nl < 0 {
+		nl = len(raw)
+	}
+	return parseTs(raw[:nl])
+}
+
+// parseTs 从 JSONL 行头提取 \"ts\": 后的整数（无 jq 依赖，纯字节扫描）。
+// 不成功返回 0（保守保留）。
+func parseTs(line []byte) int64 {
+	// 找 "ts":
+	const needle = `"ts":`
+	idx := indexBytes(line, []byte(needle))
+	if idx < 0 {
+		return 0
+	}
+	// 跳过空白和冒号后的空白
+	b := line[idx+len(needle):]
+	for len(b) > 0 && (b[0] == ' ' || b[0] == '\t') {
+		b = b[1:]
+	}
+	var v int64
+	for len(b) > 0 && b[0] >= '0' && b[0] <= '9' {
+		v = v*10 + int64(b[0]-'0')
+		b = b[1:]
+	}
+	return v
+}
+
+// indexByte 返回字节切片中目标字节首次出现的索引，未找到返回 -1。
+func indexByte(s []byte, c byte) int {
+	for i, b := range s {
+		if b == c {
+			return i
+		}
+	}
+	return -1
+}
+
+// indexBytes 返回字节切片中子串首次出现的索引，未找到返回 -1。
+func indexBytes(s, sub []byte) int {
+	if len(sub) == 0 {
+		return 0
+	}
+	if len(sub) > len(s) {
+		return -1
+	}
+	for i := 0; i <= len(s)-len(sub); i++ {
+		match := true
+		for j := 0; j < len(sub); j++ {
+			if s[i+j] != sub[j] {
+				match = false
+				break
+			}
+		}
+		if match {
+			return i
+		}
+	}
+	return -1
 }
 
 // monthSegment 当前（或指定时间）月份的分段文件名。
@@ -280,11 +383,11 @@ type CreditStats struct {
 	NameMap map[string]string `json:"name_map,omitempty"` // uid → 昵称
 }
 
-// Query 聚合最近 days 天的流水（days ∈ {1,7,30}，其他值按 7 处理）。
+// Query 聚合最近 days 天的流水（days ∈ {1,7}，其他值按 7 处理）。
 // 读取前自动 Flush。返回结果为新建对象，调用方可直接 JSON 序列化。
 // enrich：可选，查询后按 uid 回填账号昵称（闭包由 App 提供，拿 pool 状态）。
 func (l *Ledger) Query(days int, enrich func(uid string) (name, channel string)) *Stats {
-	if days != 1 && days != 30 {
+	if days != 1 {
 		days = 7
 	}
 	l.Flush()
