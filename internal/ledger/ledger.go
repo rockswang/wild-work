@@ -70,6 +70,7 @@ func New(dir string) (*Ledger, error) {
 		return nil, err
 	}
 	l := &Ledger{dir: dir}
+	l.migrateDupKeyCredit() // 一次性：归档旧版重复 key 差分错误流水（issue #38）
 	l.cleanup()
 	l.trimCurrentMonth() // 裁剪当月文件内 7 天前条目
 	return l, nil

@@ -8,6 +8,10 @@
 //   - 上次有、本次消失的 key        → expire（套餐/赠送包到期后从明细里整体移除是主因）
 //   - 本次新出现的 key             → earn（新发放的套餐/赠送包）
 //
+// 同 key 多条目先聚合求和再差分（issue #38）：WorkBuddy 的「套餐名|到期日」伪键
+// 可能对应多条独立套餐，逐条差分会每条都对比同一份旧快照 → 一次刷新重复记
+// spend、快照只留末条下次继续错。
+//
 // key 来源：ResourceItem.Key（渠道设置的稳定标识，如 TraeWork entitlement_id），
 // 缺失时退回 Name。快照持久化在 ledger 目录的 credit-snapshot.json（非 state 文件，
 // 可随时删除——丢了只是下次差分把全部条目误记一次 earn，无功能影响）。
@@ -17,6 +21,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"wild-work/internal/provider"
@@ -98,24 +103,46 @@ func (l *Ledger) DiffCredits(ch, uid string, balance int64, cur []provider.Resou
 
 	var events []CreditEntry
 	firstTime := len(prev) == 0 // 首次见此账号：只记一条汇总，避免存量条目刷屏
-	curMap := map[string]itemSnap{}
+
+	// 按 key 聚合本次条目（issue #38）：伪键不唯一时多条独立套餐共享一个 key，
+	// 必须先合并成一条再与快照差分，保证每 key 每次刷新最多一条事件。
+	type aggEnt struct {
+		name, expire string
+		remain       int64
+	}
+	agg := map[string]*aggEnt{} // key → 聚合条目
+	var order []string          // 首现顺序遍历，事件输出稳定可测
 	for _, it := range cur {
 		if !it.Usable {
 			continue
 		}
 		k := itemKey(it)
-		curMap[k] = itemSnap{Key: k, Remain: it.Remain, Expire: it.ExpireAt}
+		a := agg[k]
+		if a == nil {
+			a = &aggEnt{name: it.Name, expire: it.ExpireAt}
+			agg[k], order = a, append(order, k)
+		}
+		a.remain += it.Remain // 同 key 多条余额求和，视作一个整体
+		if a.expire == "" {
+			a.expire = it.ExpireAt // 到期日取首个非空（同 key 通常相同）
+		}
+	}
+
+	curMap := map[string]itemSnap{}
+	for _, k := range order {
+		a := agg[k]
+		curMap[k] = itemSnap{Key: k, Remain: a.remain, Expire: a.expire}
 		p, ok := prevMap[k]
 		if !ok {
 			// 无快照的存量条目：不在首次差分逐条展开（会把存量余额刷屏成假 earn），
 			// 仅后续刷新中新增的条目才逐条记 earn。
 			continue
 		}
-		delta := it.Remain - p.Remain
+		delta := a.remain - p.Remain
 		switch {
 		case delta > 0:
 			events = append(events, CreditEntry{Ch: ch, UID: uid, Kind: "earn",
-				Amount: delta, Balance: balance, Note: it.Name})
+				Amount: delta, Balance: balance, Note: a.name})
 		case delta < 0:
 			// 下降：到期日已过优先归因过期（签到奖励等当天到期条目的典型形态），
 			// 否则归因消耗。
@@ -124,7 +151,7 @@ func (l *Ledger) DiffCredits(ch, uid string, balance int64, cur []provider.Resou
 				kind = "expire"
 			}
 			events = append(events, CreditEntry{Ch: ch, UID: uid, Kind: kind,
-				Amount: delta, Balance: balance, Note: it.Name})
+				Amount: delta, Balance: balance, Note: a.name})
 		}
 	}
 	// 上次有、本次消失：套餐到期移除是主因，归因过期。
@@ -163,4 +190,24 @@ func (l *Ledger) DiffCredits(ch, uid string, balance int64, cur []provider.Resou
 		l.AppendCredit(e)
 	}
 	return len(events)
+}
+
+// migrateDupKeyCredit 一次性归档旧版重复 key 差分产生的错误积分流水（issue #38）。
+// 重复生成的 spend 与真实消耗混写进同一条流水，事后无法区分真伪，故整段归档为
+// old-credit-*.jsonl（不进任何查询口径，随 cleanup 保留窗口到期自清）；同时删快照
+// 让下次刷新按聚合口径重建 baseline。marker（.credit-dedup-migrated）存在即跳过。
+func (l *Ledger) migrateDupKeyCredit() {
+	mk := filepath.Join(l.dir, ".credit-dedup-migrated")
+	if _, err := os.Stat(mk); err == nil {
+		return
+	}
+	ents, _ := os.ReadDir(l.dir)
+	for _, e := range ents {
+		if n := e.Name(); strings.HasPrefix(n, "credit-") && strings.HasSuffix(n, ".jsonl") {
+			_ = os.Rename(filepath.Join(l.dir, n), filepath.Join(l.dir, "old-"+n))
+		}
+	}
+	// 旧快照对重复 key 只留末条值，与聚合后的 cur 差分会凭空多记一次 earn，一并删除重建
+	_ = os.Remove(filepath.Join(l.dir, "credit-snapshot.json"))
+	_ = os.WriteFile(mk, []byte("1"), 0o600)
 }

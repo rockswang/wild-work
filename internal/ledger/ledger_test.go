@@ -89,6 +89,80 @@ func TestDiffCreditsExpiredEntry(t *testing.T) {
 	}
 }
 
+// TestDiffCreditsDuplicateKeys 同 key 多条目先聚合再差分（issue #38 回归）：
+// WorkBuddy 伪键「套餐名|到期日」可对应多条独立套餐。修复前每条都对比同一份
+// 旧快照 → 一次刷新重复记 spend、快照只留末条下次继续错。聚合后每 key 每次
+// 刷新最多一条事件，且无变化刷新零事件。
+func TestDiffCreditsDuplicateKeys(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "ledger")
+	l, _ := New(dir)
+	defer l.Close()
+
+	// 两条同名同到期日（同 key）的独立套餐，r1+r2 为聚合余额
+	dup := func(r1, r2 int64) []provider.ResourceItem {
+		return []provider.ResourceItem{
+			{Name: "拉新权益包", Key: "拉新权益包|2099-01-01", Remain: r1, ExpireAt: "2099-01-01", Usable: true},
+			{Name: "拉新权益包", Key: "拉新权益包|2099-01-01", Remain: r2, ExpireAt: "2099-01-01", Usable: true},
+		}
+	}
+	// 首次：baseline 一条 earn = 400（聚合值，不被重复 key 折叠）
+	if n := l.DiffCredits("workbuddy", "u1", 400, dup(200, 200)); n != 1 {
+		t.Fatalf("首次应记 1 条 baseline earn，got %d", n)
+	}
+	// 消耗 30：聚合差分只产生 1 条 spend(-30)，而非两条各记一次
+	if n := l.DiffCredits("workbuddy", "u1", 370, dup(185, 185)); n != 1 {
+		t.Fatalf("消耗应记 1 条 spend，got %d", n)
+	}
+	// 无变化刷新：0 事件（验证快照存的是聚合值而非末条 185）
+	if n := l.DiffCredits("workbuddy", "u1", 370, dup(185, 185)); n != 0 {
+		t.Fatalf("无变化不应记账，got %d", n)
+	}
+
+	st := l.Query(7, nil)
+	if st.Credit.Spend != 30 {
+		t.Fatalf("spend=%d want 30（重复 key 不得重复累计）", st.Credit.Spend)
+	}
+	if st.Credit.Earn != 400 {
+		t.Fatalf("earn=%d want 400", st.Credit.Earn)
+	}
+}
+
+// TestMigrateDupKeyCredit 一次性归档：credit-*.jsonl → old-credit-*、删快照、写 marker；
+// marker 已在时二次调用不得再归档（保留升级后新产生的流水）。
+func TestMigrateDupKeyCredit(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "ledger")
+	os.MkdirAll(dir, 0o755)
+	cur := monthFile("credit", time.Now())
+	bad := []byte(`{"ts":1,"kind":"spend","amount":-200}` + "\n")
+	if err := os.WriteFile(filepath.Join(dir, cur), bad, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "credit-snapshot.json"), []byte(`{}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	l, _ := New(dir)
+	defer l.Close()
+	if _, err := os.Stat(filepath.Join(dir, "old-"+cur)); err != nil {
+		t.Fatalf("credit 分段应已归档：%v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "credit-snapshot.json")); !os.IsNotExist(err) {
+		t.Fatal("旧快照应删除（伪键只留末条，与聚合 cur 差分会凭空多记 earn）")
+	}
+	if _, err := os.Stat(filepath.Join(dir, ".credit-dedup-migrated")); err != nil {
+		t.Fatalf("marker 应已落盘：%v", err)
+	}
+
+	// marker 已在：新产生的流水不得被再次归档
+	if err := os.WriteFile(filepath.Join(dir, cur), bad, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	l.migrateDupKeyCredit()
+	if _, err := os.Stat(filepath.Join(dir, cur)); err != nil {
+		t.Fatalf("已迁移后不得再归档：%v", err)
+	}
+}
+
 // TestQueryAggregation 聚合：token 按模型、积分按账号，范围过滤生效。
 func TestQueryAggregation(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "ledger")
