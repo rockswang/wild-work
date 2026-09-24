@@ -20,7 +20,7 @@ cmd/genicon/                   # 图标生成（纯 Go）
 internal/
 ├── app/app.go                 # 业务编排：HTTP 管理 API + 登录流程 + 费率缓存 + 日志
 ├── app/session.go             # 管理面板鉴权：cookie 会话 + 管理员密码 + 登录限流
-├── server/handler.go          # OpenAI 兼容 HTTP handler：前缀路由 + 挑号 + 错误透传
+├── server/handler.go          # OpenAI 兼容 HTTP handler：前缀路由 + 挑号 + 错误透传（含 SingleAccount 豁免）
 ├── pool/pool.go               # 账号池：余额挑号 + 冷却/禁用状态机 + state.json 持久化
 ├── scheduler/scheduler.go     # 定时签到 + token 保活 + 冷却解冻
 ├── provider/provider.go       # Upstream 接口 + 共享类型（ModelInfo/ModelPricing/ResourceItem）
@@ -225,9 +225,11 @@ Windows 图标嵌入：`rsrc -ico cmd/wild-work/icon.ico -o cmd/wild-work/rsrc_w
 【请求】客户端 → /v1/chat/completions → server(鉴权) → pool.PickExcluding(余额最高)
       → upstream.ChatStream(PrepareBody) → 上游 SSE 流回
       → 错误按 Classify 分类驱动冷却状态机；≥400 直接透传原始响应
+      → Runtime.SingleAccount 渠道例外：任何错误均不冷却/不计数/不禁用，一律原文透传
 
-【签到】scheduler(分钟级定时) → token 校验/必要时刷新 → DailyCheckin → UserResource
-      → ReenableIfCredits 解冻 → RecordCheckin 落 state.json
+【签到】scheduler(分钟级定时) → token 校验/必要时刷新 → DailyCheckinReport(结构化状态)
+      → 窗口内重试（CheckinMinutes..CheckinRetryUntil），全号达 claimed/already 才标记该时段完成
+      → UserResource → ReenableIfCredits 解冻 → RecordCheckin 落 state.json
 
 【登录】面板发起 → login.Start(生成 state) → 浏览器窗口打开 → 轮询
       → 成功写 auths/ 文件 → pool 重载 → 异步签到 → 自动拉取费率

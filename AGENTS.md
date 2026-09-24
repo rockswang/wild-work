@@ -83,7 +83,7 @@ wild-work
 | 登录层 | 启用管理密码时先登录（HttpOnly cookie 会话）；设置弹层内置「退出登录」 |
 | 账号管理 | 双列卡片网格，账号名/UID/积分/签到状态，图标按钮操作（签到/刷新/停用/删除） |
 | 自动签到 | 签到时间（HH:MM 多组）+ 开机自启开关（左右布局） |
-| 渠道费率 | 七渠道模型定价表（按渠道分组，合并单元格），刷新按钮 |
+| 渠道费率 | 各渠道模型定价表（按渠道分组，合并单元格），刷新按钮 |
 
 管理 API（REST，均挂 `/api/*`；除 `/api/auth/*` 外均需有效面板会话——密码为空时不校验）：
 
@@ -101,13 +101,19 @@ POST /api/account/refresh_all
 POST /api/account/remove           # {uid}
 POST /api/account/disable          # {uid,disabled} 停用/启用
 POST /api/account/resource_detail  # {uid} → 积分明细
+POST /api/account/nickname          # {uid,nickname} 修改显示名
 POST /api/config/checkin_times     # {times:["09:00","21:30"]}
 POST /api/config/listen            # {host,port,admin_password?}（非环回时必须带密码）
 POST /api/config/admin_password    # {password}（空 = 关闭面板鉴权，仅环回监听允许）
 POST /api/config/api_key           # {key}
 POST /api/config/autostart         # {on:bool}
+POST /api/config/compat            # 模型路由（默认渠道 / 封顶 tokens / 映射表）
+POST /api/config/expiring_days     # {days} 临期阈值
+POST /api/config/proxies           # {proxies:{channel:url}} 单渠道上游代理
+POST /api/config/oczen_test        # {api_key} OpenCodeZen 凭证连通性测试
 GET  /api/fees                     # 渠道费率（本地缓存 + 按需刷新）
 POST /api/fees/refresh             # 异步刷新费率
+GET  /api/usage                    # 用量/积分流水聚合（R17）
 GET  /api/logs                     # 最近 300 行日志
 POST /api/quit                     # 退出程序
 ```
@@ -182,9 +188,15 @@ POST /api/quit                     # 退出程序
 21. **匿名渠道的虚拟账号不得进入任何「能把它弄没」的路径**：`reloadAccounts` 不纳入（`SyncToDir` 会剔除），
     启动时 `SetDisabled(uid,false)` 兜底自愈；`RemoveAccount`/`DisableAccount` 对 `provider.Oczen` 硬拒（后端拒 + 前端无入口）。
     其 `Auth.ExpiresAt` 必须为远期值（不得为 0），否则 `NeedsRefresh` 恒真 → 反复 `RefreshToken` + 冷却。
-22. **无账号渠道的错误分类只能依赖 429**：单账号且不可重登 ⇒ 任何 4xx 都不应惩罚账号（否则整渠道下线），
-    故 `oczen.Classify` 对其它 4xx 返回 `ErrPassthrough`（server 侧与 `ErrContentBlocked` 同分支：原文透传、不计错不冷却）。
-    **严禁**把 401/403 归为 `ErrSessionDead`（会 `pool.Disable` 永久禁用且无法人工恢复）。
+22. **单账号渠道（`Runtime.SingleAccount`）不得施加任何账号级惩罚**：唯一账号且不可重登 ⇒ 任何惩罚
+    （冷却/计数/禁用）都等于整条渠道下线。故 `Runtime.SingleAccount=true` 的渠道（当前 oczen）在 handler 里
+    **传输层错误与 `status>=400` 一律原文透传**，不走 `NoteError`/`Cooldown`/`Disable`。
+    - **429 也不冷却**（2026-09-24 修订，推翻早期「429 短冷却是唯一需要的背压」）：无号可轮换，
+      冷却后后续请求在挑号阶段被挡成 `503 no_healthy_account`，不如透传 429 让客户端按 `Retry-After` 退避。
+    - **传输层错误不累计 `errCount`**：否则 3 次网络抖动（默认 `ErrThreshold`）即冷却唯一账号。
+    - 启动时 `Pool.ClearPenalty(uid)` 自愈旧版遗留冷却（`SetDisabled` 只清禁用，不清冷却）。
+    - **严禁**把 401/403 归为 `ErrSessionDead`（会 `pool.Disable` 永久禁用且无法人工恢复）。
+    - `oczen.Classify` 仍做语义分类（供日志），但**不再用于决定惩罚**（惩罚判定前已短路）。
 23. **Qoder 双区签到只能走 campaigns，且状态必须结构化上报**：
     - **绝不调用 legacy `daily-check-in/claim`**：该端点已全局 DISABLED，却对未领取日恒返回 409，
       会被误判成「今日已领取」而跳过真实领取 → 假成功、零积分（上游 `99ab022` 同款结论，2026-09-21 抓包实测）。
@@ -232,7 +244,7 @@ GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o dist/wild-work-linux ./cmd/wil
 
 ```bash
 # Windows bash 下用 python 字节计数（strings 对 Go 二进制的长串不可靠）
-python -c "b=open('dist/wild-work.exe','rb').read(); print('new:',b.count(b'2.1.0'),'old:',b.count(b'2.0.1'))"
+python -c "b=open('dist/wild-work.exe','rb').read(); print('new:',b.count(b'2.5.3'),'old:',b.count(b'2.5.2'))"
 # 期望：new >= 1 且 old == 0。若旧版本号仍在，说明构建未生效。
 ```
 
@@ -250,11 +262,20 @@ git tag vX.Y.Z && git push origin vX.Y.Z
 
 ## 9. 文档索引
 
+入库文档（`docs/` 白名单制下反选入版本控制）：
+
 - [README.md](README.md) — 用户文档
 - [DEVELOPMENT.md](DEVELOPMENT.md) — 开发者文档（面向 AI Agent）
-- [HANDOFF.md](HANDOFF.md) — 交接文档（历史记录）
+- [AGENTS.md](AGENTS.md) — 本文件：决议项（R1–R21）、架构选型、不变量
 - [docs/三接口兼容改造备忘.md](docs/三接口兼容改造备忘.md) — 三接口（Chat/Responses/Anthropic）兼容层架构决策、实施记录、验证清单、已知限制
 - [docs/用量积分流水记账备忘.md](docs/用量积分流水记账备忘.md) — 双流水统计（token/积分）架构、差分算法、实测验证、已知限制（R17）
 
+以下备忘被 R16 / 不变量 22 / 不变量 23 等决议引用，但**尚未入库**（`.gitignore` 白名单未反选，仅本地可见）：
+`docs/opencodezen渠道接入备忘.md`、`docs/qwenwork渠道接入备忘.md`、`docs/qoderCN渠道接入备忘.md`、
+`docs/qoderCOM渠道抓包分析与接入计划.md`（部分可能已丢失，仅存在于历史会话中）。
+如需转为本仓可查，在 `.gitignore` 补 `!docs/<文件名>` 并在上方列表添链接。
+
 > **docs/ 采用白名单制**：`.gitignore` 中 `docs/*` 默认忽略全部文档，仅 `!docs/<文件名>` 显式反选的才入库。
 > 逆向分析类文档一律**只保留本地、不入库**。新增需要入库的文档时，追加一行 `!docs/<文件名>`。
+> 未入库的本地文档（`ref/`、`docs/` 其余文件、`HANDOFF.md`、`GO多平台发布备忘.md` 等）仅供本地参考，
+> 不要在本文件中作为可点击链接引用。
