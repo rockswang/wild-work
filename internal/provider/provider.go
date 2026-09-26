@@ -24,6 +24,7 @@ const (
 	QwenWork    Kind = "qwenwork" // 千问办公（gateway.qwenwork.cn + qwenwork.cn）
 	TraeCode    Kind = "traecode" // Trae 代码版：与 TraeWork 同一上游、共用账号，function=solo_agent
 	Oczen       Kind = "oczen"    // OpenCodeZen 匿名免费通道（opencode.ai/zen，无账号、凭证固定 public）
+	GLM         Kind = "glm"      // 智谱清言（chatglm.cn 网页版私有接口，凭据为 chatglm_refresh_token）
 )
 
 func (k Kind) String() string { return string(k) }
