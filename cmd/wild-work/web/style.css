@@ -90,6 +90,13 @@ body {
 .btn.primary.alt.qodercn:hover { background: #5b21b6; }
 .btn.primary.alt.qodercom { background: #b45309; border-color: #b45309; }
 .btn.primary.alt.qodercom:hover { background: #92400e; }
+/* 智谱清言：清言品牌蓝 */
+.btn.primary.alt.glm { background: #1d4ed8; border-color: #1d4ed8; }
+.btn.primary.alt.glm:hover { background: #1e40af; }
+/* 智谱清言登录弹层步骤列表 */
+.glm-steps { margin: 4px 0 8px; padding-left: 20px; font-size: 13px; line-height: 1.9; }
+.glm-steps code { background: #f0f2f5; padding: 1px 5px; border-radius: 4px; font-size: 12px; }
+.glm-steps a { color: var(--primary); }
 .btn.danger { background: var(--danger); border-color: var(--danger); color: #fff; }
 .btn.danger:hover { background: #b91c1c; }
 .btn.small { padding: 5px 10px; font-size: 13px; }
@@ -361,6 +368,8 @@ body {
 .btn.primary.alt.qwenwork:hover { background: #155e75; }
 .badge.qwenwork { background: #0e7490; }
 .fees .ch-header.qwenwork td { color: #0e7490; }
+.badge.glm { background: #1d4ed8; }
+.fees .ch-header.glm td { color: #1d4ed8; }
 
 /* oczen：OpenCodeZen 匿名通道（暗灰蓝，与其它紫/青系区分，弱化「固定账号」观感） */
 .badge.oczen { background: #475569; }
