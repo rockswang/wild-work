@@ -399,6 +399,99 @@ func LoadQwenWorkDir(dir string) ([]*Auth, error) {
 	return out, nil
 }
 
+// LoadGLMDir 扫描智谱清言凭证（glm-*.json）。
+//
+// 清言凭证的特殊之处：
+//   - 唯一有效凭据是 refresh_token（浏览器 Cookie 里的 chatglm_refresh_token），
+//     access_token 由它换得。用户手填时通常只给 refresh_token，故允许 accessToken 为空
+//     （auth.Parse 要求非空，这里用放宽版解析器）。
+//   - **上游 refresh 不返回 expires_in**（2026-09-26 实测），早期实现把 expiresAt
+//     落成了 0 → NeedsRefresh 恒为真 → 每次请求都刷 token。
+//     故这里调 AdoptJWTExpiry 用 access_token 的 JWT exp 原地自愈（仅内存）。
+//
+// 与 LoadQwenWorkDir 的同款处理（见 R21：expires_in 单位/缺失陷阱）。
+func LoadGLMDir(dir string) ([]*Auth, error) {
+	files, err := filepath.Glob(filepath.Join(dir, "glm-*.json"))
+	if err != nil {
+		return nil, err
+	}
+	var out []*Auth
+	for _, f := range files {
+		raw, err := os.ReadFile(f)
+		if err != nil {
+			continue
+		}
+		a, err := parseAllowMissingAccessToken(raw)
+		if err != nil {
+			continue
+		}
+		a.Kind, a.FilePath = "glm", f
+		// 自愈历史脏值：expiresAt=0（上游不返回 expires_in 所致）会让
+		// NeedsRefresh 恒为真 → 每次请求都刷 token。
+		a.AdoptJWTExpiry()
+		out = append(out, a)
+	}
+	return out, nil
+}
+
+// parseAllowMissingAccessToken 与 Parse 相同，但允许 accessToken 为空
+// （仅 glm 渠道使用：其凭据本质是 refresh_token）。
+func parseAllowMissingAccessToken(raw []byte) (*Auth, error) {
+	var probe map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &probe); err != nil {
+		return nil, fmt.Errorf("storage_parse_error: %w", err)
+	}
+	var nested struct {
+		Auth struct {
+			AccessToken  string `json:"accessToken"`
+			RefreshToken string `json:"refreshToken"`
+			ExpiresAt    int64  `json:"expiresAt"`
+			Domain       string `json:"domain"`
+		} `json:"auth"`
+		Account struct {
+			UID      string `json:"uid"`
+			Nickname string `json:"nickname"`
+		} `json:"account"`
+	}
+	var flat struct {
+		AccessToken  string `json:"accessToken"`
+		RefreshToken string `json:"refreshToken"`
+		ExpiresAt    int64  `json:"expiresAt"`
+		UID          string `json:"uid"`
+		Nickname     string `json:"nickname"`
+	}
+	var a Auth
+	if _, isNested := probe["auth"]; isNested {
+		if err := json.Unmarshal(raw, &nested); err != nil {
+			return nil, fmt.Errorf("storage_parse_error: %w", err)
+		}
+		a = Auth{
+			AccessToken:  nested.Auth.AccessToken,
+			RefreshToken: nested.Auth.RefreshToken,
+			ExpiresAt:    nested.Auth.ExpiresAt,
+			Domain:       nested.Auth.Domain,
+			UID:          nested.Account.UID,
+			Nickname:     nested.Account.Nickname,
+		}
+	} else {
+		if err := json.Unmarshal(raw, &flat); err != nil {
+			return nil, fmt.Errorf("storage_parse_error: %w", err)
+		}
+		a = Auth{
+			AccessToken:  flat.AccessToken,
+			RefreshToken: flat.RefreshToken,
+			ExpiresAt:    flat.ExpiresAt,
+			UID:          flat.UID,
+			Nickname:     flat.Nickname,
+		}
+	}
+	// glm 的凭据本体是 refresh_token：只要它非空即可用
+	if strings.TrimSpace(a.RefreshToken) == "" {
+		return nil, fmt.Errorf("parse_error: missing refreshToken")
+	}
+	return &a, nil
+}
+
 // AdoptJWTExpiry 用 access token 的 JWT exp 校正本地 expiresAt（仅当 JWT 更晚时）。
 // 用于修复历史上 expires_in 单位误判造成的偏短 expiresAt（见 LoadQwenWorkDir）。
 // 只在 exp 可解析且确实晚于当前值时才覆盖，避免把正常值改坏。
