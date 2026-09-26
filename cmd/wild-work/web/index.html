@@ -62,6 +62,7 @@
           <button class="btn primary alt wbai" id="btnAddWBAI" style="grid-column:1;grid-row:2">＋ WorkBuddyAI</button>
           <button class="btn primary alt qodercom" id="btnAddQoderCOM" style="grid-column:2;grid-row:2">＋ QoderCOM</button>
           <button class="btn primary alt qwenwork" id="btnAddQwen" style="grid-column:3;grid-row:2">＋ 千问办公</button>
+          <button class="btn primary alt glm" id="btnAddGLM" style="grid-column:1;grid-row:3">＋ 智谱清言</button>
         </div>
       </div>
     </div>
@@ -145,6 +146,52 @@
         <button class="btn small" id="btnCopyUrl">复制链接</button>
         <button class="btn small danger" id="btnCancelLogin">取消</button>
       </div>
+    </div>
+  </div>
+</div>
+
+<!-- 智谱清言登录弹层（自动捕获 Cookie；手工粘贴为兜底） -->
+<div class="overlay hidden" id="glmOverlay">
+  <div class="modal modal-wide">
+    <div class="modal-title">添加 智谱清言 账号</div>
+    <div class="modal-body settings-body">
+
+      <!-- 自动路径 -->
+      <div class="cfg-section" id="glmAuto">
+        <div class="cfg-heading">自动登录</div>
+        <ol class="glm-steps">
+          <li>已为你打开一个**独立的浏览器窗口**（不影响你日常浏览器的登录态）。</li>
+          <li>在那个窗口里正常登录智谱清言（扫码 / 手机号 / 微信均可）。</li>
+          <li>登录完成后**无需任何操作**，这里会自动捕获凭据并添加账号。</li>
+        </ol>
+        <div class="hint" id="glmStatus">正在启动浏览器…</div>
+        <div class="hint">每个账号使用独立的浏览器环境，所以可以连续添加多个清言账号，互不干扰。</div>
+      </div>
+
+      <!-- 手工兜底 -->
+      <div class="cfg-section">
+        <div class="cfg-heading">
+          <span class="btn small" id="btnGLMToggleManual" style="cursor:pointer">手工方式（自动失败时用）</span>
+        </div>
+        <div id="glmManual" class="hidden">
+          <ol class="glm-steps">
+            <li>在自己浏览器打开 <a href="https://chatglm.cn" target="_blank" rel="noopener noreferrer">chatglm.cn</a> 并登录。</li>
+            <li>按 <code>F12</code> → <code>Application</code> → <code>Cookies</code> → <code>https://chatglm.cn</code>。</li>
+            <li>复制 <code>chatglm_refresh_token</code> 的值，粘贴到下面。</li>
+          </ol>
+          <input id="glmTokenInput" class="input grow" spellcheck="false"
+                 placeholder="粘贴 chatglm_refresh_token 的值" autocomplete="off">
+          <div class="hint" style="margin-top:6px">
+            <button class="btn small primary" id="btnGLMSubmit">验证并添加</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="hint" id="glmErr" style="color:var(--danger)"></div>
+      <div class="hint">凭据只保存在本机 <code>auths/</code> 目录，不会外传。token 会随刷新自动轮换并回写。</div>
+    </div>
+    <div class="modal-actions">
+      <button class="btn small" id="btnGLMCancel">关闭</button>
     </div>
   </div>
 </div>
