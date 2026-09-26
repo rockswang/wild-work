@@ -23,6 +23,7 @@ import (
 	"wild-work/internal/config"
 	"wild-work/internal/ledger"
 	"wild-work/internal/login"
+	"wild-work/internal/login_glm"
 	loginqoder "wild-work/internal/login_qoder"
 	loginqodercn "wild-work/internal/login_qodercn"
 	loginqodercom "wild-work/internal/login_qodercom"
@@ -93,6 +94,11 @@ type App struct {
 	loginStateFP string
 	loginKind    provider.Kind
 	pricingFP    string
+
+	// 智谱清言自动登录会话（独立于通用 OAuth 登录流程：
+	// 它不轮询 state 文件，而是经 CDP 从浏览器 Cookie 捕获凭据）。
+	muGLMLogin sync.Mutex
+	glmLogin   *loginglm.AutoSession
 
 	// auth 管理面板会话（cookie）；详见 session.go
 	auth *authState
@@ -230,6 +236,7 @@ func (a *App) allStatuses() []pool.Status {
 var channelOrder = map[provider.Kind]int{
 	provider.Oczen: 0, provider.WorkBuddy: 1, provider.WorkBuddyAI: 2,
 	provider.QoderCN: 3, provider.QoderCOM: 4, provider.TraeWork: 5, provider.QwenWork: 6,
+	provider.GLM: 7,
 }
 
 // channelRank 渠道排序键：未知渠道排最后。
@@ -250,6 +257,7 @@ func sortChannelsByOrder[T any](items []T, kindOf func(T) provider.Kind) {
 // 无需用户手动触发，故也不提供手动签到入口；
 // 千问办公无签到活动且每日积分服务端被动发放，无需领取/保活。
 // QoderCN/QoderCOM 已实现 campaigns 签到，支持手动按钮（上游同一套机制）。
+// 智谱清言已实现 activity-api 每日签到，支持手动按钮。
 // OpenCodeZen 匿名通道无账号概念，既无签到也无积分。
 func noExplicitCheckin(k provider.Kind) bool {
 	return k == provider.WorkBuddyAI || k == provider.QwenWork || k == provider.Oczen
@@ -402,6 +410,10 @@ func (a *App) StartLoginFor(kind string) (string, error) {
 	case provider.Oczen:
 		// 匿名通道无账号可登（凭证固定为 public，启动时已注入虚拟账号）
 		return "", errors.New("OpenCodeZen 为匿名通道，无需也无法添加账号")
+	case provider.GLM:
+		// 智谱清言无编程式登录：凭据只能由用户从浏览器 Cookie 里取出后粘贴。
+		// 故这里不发起轮询流程，只返回登录页地址；用户粘贴后走 SubmitGLMToken。
+		return loginglm.LoginURL, nil
 	default:
 		return "", fmt.Errorf("unknown login provider %s", kind)
 	}
@@ -800,6 +812,79 @@ func (a *App) completeQoderCOMLogin(r loginqodercom.Result) {
 	})
 }
 
+// SubmitGLMToken 提交用户粘贴的智谱清言 refresh_token：验证 → 落盘 → 重载账号池。
+//
+// 这是智谱清言的**手工兜底**入口（自动路径见 StartGLMAutoLogin）。
+// 返回保存后的 uid 供面板定位新账号。
+func (a *App) SubmitGLMToken(refreshToken string) (string, error) {
+	r, err := loginglm.ValidateAndSave(a.cfg.AuthDir, refreshToken)
+	if err != nil {
+		return "", err
+	}
+	log.Printf("glm 账号已添加（手工）uid=%s nickname=%s", r.UID, r.Nickname)
+	a.reloadAccounts()
+	a.afterAccountAdded(provider.GLM)
+	return r.UID, nil
+}
+
+// StartGLMAutoLogin 发起智谱清言自动登录：拉起独立 profile 的浏览器，
+// 用户在真实浏览器里登录，后台经 CDP 自动捕获 Cookie。
+//
+// 返回后立即进入 pending；前端轮询 GetGLMAutoLoginStatus 获知结果。
+func (a *App) StartGLMAutoLogin() error {
+	a.muGLMLogin.Lock()
+	defer a.muGLMLogin.Unlock()
+	if a.glmLogin != nil {
+		if st, _ := a.glmLogin.Status(); st == "pending" {
+			return errors.New("已有智谱清言登录流程进行中，请先在浏览器完成登录或取消")
+		}
+	}
+	sess, err := loginglm.AutoLogin(a.cfg.AuthDir, func(r loginglm.Result) {
+		// 落盘成功后重载账号池（在后台 goroutine 里执行）
+		a.reloadAccounts()
+		a.afterAccountAdded(provider.GLM)
+		log.Printf("glm 自动登录完成，账号池已重载 uid=%s", r.UID)
+	})
+	if err != nil {
+		return err
+	}
+	a.glmLogin = sess
+	return nil
+}
+
+// GetGLMAutoLoginStatus 查询自动登录状态。
+// 返回 status（idle/pending/success/failed/cancelled）、错误信息与成功时的 uid。
+func (a *App) GetGLMAutoLoginStatus() map[string]any {
+	a.muGLMLogin.Lock()
+	sess := a.glmLogin
+	a.muGLMLogin.Unlock()
+	if sess == nil {
+		return map[string]any{"status": "idle"}
+	}
+	status, err := sess.Status()
+	out := map[string]any{"status": status}
+	if err != nil {
+		out["error"] = err.Error()
+	}
+	if r, ok := sess.Result(); ok {
+		out["uid"] = r.UID
+		out["nickname"] = r.Nickname
+	}
+	return out
+}
+
+// CancelGLMAutoLogin 取消自动登录并关闭浏览器。
+func (a *App) CancelGLMAutoLogin() error {
+	a.muGLMLogin.Lock()
+	sess := a.glmLogin
+	a.muGLMLogin.Unlock()
+	if sess == nil {
+		return errors.New("没有进行中的智谱清言登录")
+	}
+	sess.Cancel()
+	return nil
+}
+
 // completeQwenWorkLogin 登录成功：写 auth 文件、重载账号池。
 // 千问办公无签到活动（每日积分服务端被动发放），不做首次签到。
 func (a *App) completeQwenWorkLogin(r loginqwenwork.Result) {
@@ -917,6 +1002,14 @@ func (a *App) reloadAccounts() {
 		auths, err := auth.LoadWorkBuddyAiDir(a.cfg.AuthDir)
 		if err != nil {
 			log.Printf("reload workbuddyai accounts: %v", err)
+		} else {
+			rt.Pool.SyncToDir(auths)
+		}
+	}
+	if rt := a.runtime(provider.GLM); rt != nil && rt.Pool != nil {
+		auths, err := auth.LoadGLMDir(a.cfg.AuthDir)
+		if err != nil {
+			log.Printf("reload glm accounts: %v", err)
 		} else {
 			rt.Pool.SyncToDir(auths)
 		}
@@ -1630,16 +1723,16 @@ type State struct {
 	// AuthEnabled = 面板鉴权已生效（密码非空）；
 	// AuthSession = 当前浏览器 cookie 对应的口令指纹（已登录时非空且等于服务端口令指纹）。
 	// 前端靠 AuthSession 判断登录态：HttpOnly cookie 不可读，但指纹可回显。
-	AdminPassSet   bool   `json:"admin_pass_set"`
-	AuthEnabled    bool   `json:"auth_enabled"`
-	AuthSession    string `json:"auth_session"`
-	AuthRequired   bool   `json:"auth_required"` // 当前监听地址是否必须配置密码（非环回）
+	AdminPassSet bool   `json:"admin_pass_set"`
+	AuthEnabled  bool   `json:"auth_enabled"`
+	AuthSession  string `json:"auth_session"`
+	AuthRequired bool   `json:"auth_required"` // 当前监听地址是否必须配置密码（非环回）
 
-	LoginBusy      bool   `json:"login_busy"`
-	NextCheckin    string        `json:"next_checkin"`
-	Version        string        `json:"version"`
-	Autostart      bool          `json:"autostart"`
-	Running        bool          `json:"running"`
+	LoginBusy   bool   `json:"login_busy"`
+	NextCheckin string `json:"next_checkin"`
+	Version     string `json:"version"`
+	Autostart   bool   `json:"autostart"`
+	Running     bool   `json:"running"`
 
 	// LanIP 非环回出口 IP（如 192.168.x.x），供面板在监听 0.0.0.0 时提示局域网可用的 API 地址。
 	// 取不到（无网络/全部环回）时为空串。
@@ -1879,6 +1972,38 @@ func (a *App) HandleAPI(mux *http.ServeMux) {
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 	})
+	mux.HandleFunc("POST /api/login/glm_auto", func(w http.ResponseWriter, r *http.Request) {
+		if err := a.StartGLMAutoLogin(); err != nil {
+			apiError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+	})
+	mux.HandleFunc("GET /api/login/glm_auto_status", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, http.StatusOK, a.GetGLMAutoLoginStatus())
+	})
+	mux.HandleFunc("POST /api/login/glm_auto_cancel", func(w http.ResponseWriter, r *http.Request) {
+		if err := a.CancelGLMAutoLogin(); err != nil {
+			apiError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+	})
+	mux.HandleFunc("POST /api/login/glm_token", func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			RefreshToken string `json:"refresh_token"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			apiError(w, http.StatusBadRequest, "请求体解析失败")
+			return
+		}
+		uid, err := a.SubmitGLMToken(req.RefreshToken)
+		if err != nil {
+			apiError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "uid": uid})
+	})
 	mux.HandleFunc("POST /api/account/checkin", func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
 			UID string `json:"uid"`
@@ -1976,9 +2101,9 @@ func (a *App) HandleAPI(mux *http.ServeMux) {
 	})
 	mux.HandleFunc("POST /api/config/listen", func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
-			Host        string  `json:"host"`
-			Port        int     `json:"port"`
-			AdminPass   *string `json:"admin_password"` // 指针：区分「未携带」与「显式清空」
+			Host      string  `json:"host"`
+			Port      int     `json:"port"`
+			AdminPass *string `json:"admin_password"` // 指针：区分「未携带」与「显式清空」
 		}
 		_ = json.NewDecoder(r.Body).Decode(&req)
 		// 同一请求内先存密码再切监听：面板把「改成 0.0.0.0」与「填密码」合并保存，
