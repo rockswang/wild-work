@@ -96,9 +96,16 @@ func aesCBCEncrypt(plain, tempKey []byte) ([]byte, error) {
 	return out, nil
 }
 
-// AuthHeader 计算单次请求的 Authorization 头。
+// nowUnix 便于测试注入（签名时间戳与 Cosy-Date 头必须同源）。
+var nowUnix = func() int64 { return time.Now().Unix() }
+
+// AuthHeader 计算单次请求的 Authorization 头，并返回签名所用的时间戳。
 // 签名串：base64(header)\n cosyKey \n ts \n body \n path（path 去 /algo 前缀）。
-func (s *CosySession) AuthHeader(body, rawURL string) (string, error) {
+//
+// 返回的 date 必须原样用于 Cosy-Date 头：上游拿它重算签名。签名串里含整个 body，
+// 长会话（数 MB 上下文）时 md5 + 字符串拼接要耗掉毫秒级时间；若签名与头各自取一次
+// 时间，两次取值可能跨秒 → 上游回 101 Signature invalid（长会话里偶发）。
+func (s *CosySession) AuthHeader(body, rawURL string) (auth, date string, err error) {
 	header := map[string]string{
 		"version":     "v1",
 		"requestId":   uuid4(),
@@ -108,15 +115,15 @@ func (s *CosySession) AuthHeader(body, rawURL string) (string, error) {
 	}
 	headerB64 := base64.StdEncoding.EncodeToString(mustJSON(header))
 
-	u, err := url.Parse(rawURL)
-	if err != nil {
-		return "", err
+	u, perr := url.Parse(rawURL)
+	if perr != nil {
+		return "", "", perr
 	}
 	pathSig := strings.TrimPrefix(u.Path, "/algo")
-	date := fmt.Sprintf("%d", time.Now().Unix())
+	date = fmt.Sprintf("%d", nowUnix())
 	sigInput := headerB64 + "\n" + s.CosyKey + "\n" + date + "\n" + body + "\n" + pathSig
 	sum := md5.Sum([]byte(sigInput))
-	return "Bearer COSY." + headerB64 + "." + hex.EncodeToString(sum[:]), nil
+	return "Bearer COSY." + headerB64 + "." + hex.EncodeToString(sum[:]), date, nil
 }
 
 // ApplyHeadersWithUID 设置推理/模型请求的最小头集。
@@ -124,14 +131,14 @@ func (s *CosySession) AuthHeader(body, rawURL string) (string, error) {
 // 强校验的只有 Authorization / Cosy-Key / Cosy-User / Cosy-Date 四件套。
 // 少传头可规避未来版本漂移（见备忘 §2.4 头容差矩阵）。
 func (s *CosySession) ApplyHeadersWithUID(h map[string]string, body, rawURL, uid string) error {
-	auth, err := s.AuthHeader(body, rawURL)
+	auth, date, err := s.AuthHeader(body, rawURL)
 	if err != nil {
 		return err
 	}
 	h["Authorization"] = auth
 	h["Cosy-Key"] = s.CosyKey
 	h["Cosy-User"] = uid
-	h["Cosy-Date"] = fmt.Sprintf("%d", time.Now().Unix())
+	h["Cosy-Date"] = date
 	h["Content-Type"] = "application/json"
 	h["Accept"] = "text/event-stream"
 	return nil

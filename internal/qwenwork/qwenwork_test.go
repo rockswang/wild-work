@@ -50,7 +50,7 @@ func TestNewCosySession(t *testing.T) {
 // TestAuthHeaderFormat 验证 Authorization 三段结构与 path 归一化。
 func TestAuthHeaderFormat(t *testing.T) {
 	s, _ := NewCosySession("uid", "n", "", "tok")
-	auth, err := s.AuthHeader(`{"x":1}`, "https://gateway.qwenwork.cn/algo/api/v2/service/pro/sse/agent_chat_generation?FetchKeys=x")
+	auth, _, err := s.AuthHeader(`{"x":1}`, "https://gateway.qwenwork.cn/algo/api/v2/service/pro/sse/agent_chat_generation?FetchKeys=x")
 	if err != nil {
 		t.Fatal(err)
 	}
