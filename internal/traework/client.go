@@ -99,16 +99,28 @@ func (c *Client) agentBase() string { return c.AgentHost }
 func (c *Client) ugBase() string    { return c.UgHost }
 func (c *Client) oauthBase() string { return c.OAuthHost }
 
+// maxJSONBody doJSON 单次响应的读取上限。
+//
+// 上限的意义不是「够不够用」，而是给上游异常返回一个内存上界。目录接口
+// （get_detail_param）在 solo_agent 下实测 1.28MB，而旧上限 1MB 会把 JSON
+// 截成半截、解析失败后静默回退静态兜底表（面板只显示 16 个模型，issue #41）。
+const maxJSONBody = 8 << 20
+
 func (c *Client) doJSON(req *http.Request) (json.RawMessage, error) {
 	resp, err := c.HTTP.Do(req)
 	if err != nil {
 		return nil, err
 	}
 	defer resp.Body.Close()
-	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	// 多读 1 字节用于判定是否被截断：读满 maxJSONBody+1 说明上游响应超限，
+	// 此时显式报错——否则半截 JSON 会被 json.Unmarshal 误报成语法错误（issue #41）。
+	raw, _ := io.ReadAll(io.LimitReader(resp.Body, maxJSONBody+1))
 	if resp.StatusCode >= 400 {
 		kind := Classify(resp.StatusCode, string(raw))
 		return nil, &provider.Error{Kind: kind, Status: resp.StatusCode, Msg: truncate(string(raw), 200)}
+	}
+	if len(raw) > maxJSONBody {
+		return nil, fmt.Errorf("traework: response body exceeds %d bytes", maxJSONBody)
 	}
 	return raw, nil
 }
