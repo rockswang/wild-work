@@ -277,8 +277,8 @@ function renderTopbar() {
 }
 
 // 渠道显示名与 CSS 短类名（后端 group / 费率 channel 均为 provider.Kind）。
-const CH_LABEL = { workbuddy: "WorkBuddyCN", workbuddyai: "WorkBuddyAI", traework: "TraeWork", traecode: "TraeCode", qoder: "Qoder", qodercn: "QoderCN", qodercom: "QoderCOM", qwenwork: "千问办公", oczen: "OpenCodeZen" };
-const CH_CLASS = { workbuddy: "wb", workbuddyai: "wbai", traework: "trae", traecode: "traecode", qoder: "qoder", qodercn: "qodercn", qodercom: "qodercom", qwenwork: "qwenwork", oczen: "oczen" };
+const CH_LABEL = { workbuddy: "WorkBuddyCN", workbuddyai: "WorkBuddyAI", traework: "TraeWork", traecode: "TraeCode", qoder: "Qoder", qodercn: "QoderCN", qodercom: "QoderCOM", qwenwork: "千问办公", glm: "智谱清言", oczen: "OpenCodeZen" };
+const CH_CLASS = { workbuddy: "wb", workbuddyai: "wbai", traework: "trae", traecode: "traecode", qoder: "qoder", qodercn: "qodercn", qodercom: "qodercom", qwenwork: "qwenwork", glm: "glm", oczen: "oczen" };
 const chLabel = (k) => CH_LABEL[k] || "WorkBuddy";
 const chClass = (k) => CH_CLASS[k] || "wb";
 // 不支持显式签到（手动按钮）的渠道：
@@ -586,6 +586,7 @@ let pendingChannel = null;
 const NO_CHECKIN_LOGIN_HINT = {
   workbuddyai: "（无需手动签到，定时自动对话保活并领取日活奖励）",
   qwenwork: "（每日积分服务端 00:00 自动发放；若浏览器已登录千问办公则全自动完成，否则需扫码一次）",
+  glm: "（登录后请按下方指引复制 refresh_token 粘贴回来）",
 };
 function promptLogin(channel) {
   pendingChannel = channel;
@@ -654,6 +655,84 @@ function stopLoginPoll() {
   if (loginPoll) { clearInterval(loginPoll); loginPoll = null; }
 }
 
+// ---------- 智谱清言登录（自动捕获 Cookie，手工粘贴为兜底） ----------
+// 自动路径：wild-work 拉起独立 profile 的浏览器 → 用户正常登录 → CDP 捕获 Cookie。
+// 独立 profile 天然隔离，多账号逐个添加互不干扰（无需手动开无痕）。
+let glmPoll = null;
+
+function startGLMLogin() {
+  $("glmErr").textContent = "";
+  $("glmStatus").textContent = "正在启动浏览器…";
+  $("glmManual").classList.add("hidden");
+  $("glmAuto").classList.remove("hidden");
+  $("glmOverlay").classList.remove("hidden");
+  api("/api/login/glm_auto", {})
+    .then(() => {
+      $("glmStatus").textContent = "浏览器已打开，请在其中登录智谱清言…";
+      startGLMPoll();
+    })
+    .catch((e) => {
+      $("glmStatus").textContent = "";
+      $("glmErr").textContent = (e.message || "启动失败") + "（可展开下方手工方式）";
+      $("glmManual").classList.remove("hidden");
+    });
+}
+
+function startGLMPoll() {
+  stopGLMPoll();
+  glmPoll = setInterval(async () => {
+    try {
+      const st = await api("/api/login/glm_auto_status");
+      if (st.status === "success") {
+        stopGLMPoll();
+        $("glmStatus").textContent = `✅ 已添加账号：${st.nickname || st.uid}`;
+        toast("智谱清言账号已添加");
+        await loadState();
+        refreshFees();
+        setTimeout(() => $("glmOverlay").classList.add("hidden"), 1200);
+      } else if (st.status === "failed") {
+        stopGLMPoll();
+        $("glmStatus").textContent = "";
+        $("glmErr").textContent = (st.error || "登录失败") + "（可展开下方手工方式）";
+        $("glmManual").classList.remove("hidden");
+      } else if (st.status === "cancelled" || st.status === "idle") {
+        stopGLMPoll();
+      }
+    } catch (e) { /* 忽略瞬时错误 */ }
+  }, 2000);
+}
+
+function stopGLMPoll() {
+  if (glmPoll) { clearInterval(glmPoll); glmPoll = null; }
+}
+
+function cancelGLMLogin() {
+  stopGLMPoll();
+  api("/api/login/glm_auto_cancel", {}).catch(() => {});
+  $("glmOverlay").classList.add("hidden");
+}
+
+// 手工兜底：粘贴 refresh_token
+async function submitGLMToken() {
+  const token = ($("glmTokenInput").value || "").trim();
+  if (!token) { $("glmErr").textContent = "请粘贴 refresh_token"; return; }
+  const btn = $("btnGLMSubmit");
+  btn.disabled = true;
+  $("glmErr").textContent = "验证中…";
+  try {
+    await api("/api/login/glm_token", { refresh_token: token });
+    stopGLMPoll();
+    $("glmOverlay").classList.add("hidden");
+    toast("智谱清言账号已添加");
+    await loadState();
+    refreshFees();
+  } catch (e) {
+    $("glmErr").textContent = e.message || "验证失败";
+  } finally {
+    btn.disabled = false;
+  }
+}
+
 // ---------- 签到时间（设置弹层内编辑；单次变更立即保存） ----------
 function delTime(t) {
   const times = (state.checkin_times || []).filter((x) => x !== t);
@@ -686,8 +765,8 @@ async function toggleAutostart() {
 
 // ---------- 设置弹层（统一配置：监听/API-Key/签到/自启/模型路由/渠道代理） ----------
 // PROXY_CHANNELS 渠道上游代理列表（顺序与面板渠道序一致；旧 qoder 已下线不提供代理配置）。
-const PROXY_CHANNELS = ["oczen", "workbuddy", "workbuddyai", "qodercn", "qodercom", "traework", "qwenwork"];
-const PROXY_HINT = { workbuddy: "WorkBuddyCN", workbuddyai: "WorkBuddyAI", traework: "TraeWork", qodercn: "QoderCN", qodercom: "QoderCOM", qwenwork: "千问办公", oczen: "OpenCodeZen" };
+const PROXY_CHANNELS = ["oczen", "workbuddy", "workbuddyai", "qodercn", "qodercom", "traework", "qwenwork", "glm"];
+const PROXY_HINT = { workbuddy: "WorkBuddyCN", workbuddyai: "WorkBuddyAI", traework: "TraeWork", qodercn: "QoderCN", qodercom: "QoderCOM", qwenwork: "千问办公", glm: "智谱清言", oczen: "OpenCodeZen" };
 
 // renderProxyList 按当前 state.proxies 渲染每渠道一个输入行。
 function renderProxyList() {
@@ -941,6 +1020,7 @@ const CHANNEL_PRESETS = {
   qodercn:     { label: "→ qodercn",                 items: ["gpt-* = qodercn/glm-5.3"] },
   qodercom:    { label: "→ qodercom",                items: ["gpt-* = qodercom/glm-5.3"] },
   qwenwork:    { label: "→ qwenwork",                items: ["gpt-* = qwenwork/flash", "claude-* = qwenwork/pro"] },
+  glm:         { label: "→ glm (智谱清言)",           items: ["gpt-* = glm/chatglm", "claude-* = glm/chatglm-think"] },
   oczen:       { label: "→ oczen (匿名免费)",        items: ["claude-* = oczen/mimo-v2.6-flash-free", "gpt-* = oczen/big-pickle"] },
 };
 
@@ -1041,6 +1121,10 @@ function bind() {
   $("btnAddQoderCN").onclick = () => promptLogin("qodercn");
   $("btnAddQoderCOM").onclick = () => promptLogin("qodercom");
   $("btnAddQwen").onclick = () => promptLogin("qwenwork");
+  $("btnAddGLM").onclick = () => startGLMLogin();
+  $("btnGLMSubmit").onclick = submitGLMToken;
+  $("btnGLMCancel").onclick = cancelGLMLogin;
+  $("btnGLMToggleManual").onclick = () => $("glmManual").classList.toggle("hidden");
   $("btnCheckinAll").onclick = checkinAll;
   $("btnRefreshAll").onclick = refreshAll;
   $("btnAddTime").onclick = addTime;
@@ -1142,7 +1226,7 @@ function fmtTokensFull(n) {
 
 const CH_NAMES = {
   workbuddy: "WorkBuddyCN", workbuddyai: "WorkBuddyAI", traework: "TraeWork",
-  qoder: "Qoder", qodercn: "QoderCN", qodercom: "QoderCOM", qwenwork: "千问办公", oczen: "OpenCodeZen",
+  qoder: "Qoder", qodercn: "QoderCN", qodercom: "QoderCOM", qwenwork: "千问办公", glm: "智谱清言", oczen: "OpenCodeZen",
 };
 
 async function loadUsage() {
