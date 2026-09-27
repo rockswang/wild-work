@@ -203,12 +203,18 @@ func main() {
 	qcmUp.HTTP.Timeout = time.Duration(cfg.Upstream.TimeoutSeconds) * time.Second
 	ocUp := oczen.New()
 	glmUp := glm.New()
+	// ⚠️ 只改 HTTP（非流式）的 Timeout。
+	// **不要**给 glmUp.StreamHTTP 设 Timeout —— 流式请求一旦有整体超时，
+	// 长回答会在超时点被掐断且无终止帧（实测 2026-09-27 触发 5 次）。
+	// 两者共用同一 Transport，故代理只需套 HTTP 即可（见下方 applyProxies）。
 	glmUp.HTTP.Timeout = time.Duration(cfg.Upstream.TimeoutSeconds) * time.Second
 
 	// 单渠道上游代理：config.proxies 按 kind 套到各渠道 HTTP client 上（未配置 = 直连）。
-	// traework 的 StreamHTTP 与主 client 共用出厂 Transport，先切独立再套代理，
-	// 否则热更新代理时会把非流式 client 的 Transport 一起替换。
+	// traework / glm 的 StreamHTTP 与主 client 共用出厂 Transport，先切独立再套代理，
+	// 否则热更新代理时会把非流式 client 的 Transport 一起替换
+	// （且 SetTransportProxy 会新建 Transport，只套一个会导致另一个漏掉代理）。
 	trUp.StreamHTTP.Transport = trUp.HTTP.Transport
+	glmUp.StreamHTTP.Transport = glmUp.HTTP.Transport
 	applyProxies(cfg, map[string][]*http.Client{
 		provider.WorkBuddy.String():   {wbUp.HTTP, wbUp.BillingHTTP},
 		provider.WorkBuddyAI.String(): {wbaUp.HTTP},
@@ -218,7 +224,9 @@ func main() {
 		provider.QoderCOM.String():    {qcmUp.HTTP},
 		provider.QwenWork.String():    {qwUp.HTTP},
 		provider.Oczen.String():       {ocUp.HTTP},
-		provider.GLM.String():         {glmUp.HTTP},
+		// glm 两个 client 都要传：SetTransportProxy 会**新建** Transport，
+		// 只套 HTTP 会让 StreamHTTP 仍走直连（代理对流式不生效）。
+		provider.GLM.String(): {glmUp.HTTP, glmUp.StreamHTTP},
 	})
 	checkinMinutes, err := config.ParseClockTimes(cfg.Schedule.CheckinTimes)
 	if err != nil {
@@ -392,7 +400,8 @@ func main() {
 			provider.QoderCOM.String():    {qcmUp.HTTP},
 			provider.QwenWork.String():    {qwUp.HTTP},
 			provider.Oczen.String():       {ocUp.HTTP},
-			provider.GLM.String():         {glmUp.HTTP},
+			// glm 两个 client 都要传（同启动路径的理由：SetTransportProxy 新建 Transport）
+			provider.GLM.String(): {glmUp.HTTP, glmUp.StreamHTTP},
 		})
 	})
 	// 面板保存 oczen key 后热更新渠道凭证；启动时也应用一次配置中的初始 key
@@ -427,6 +436,10 @@ func main() {
 	go qcnSch.Run(sctx)
 	go qcmSch.Run(sctx)
 	go ocSch.Run(sctx)
+	// ⚠️ 新增渠道时必须在这里补 Run()。
+	// 漏了**不会报错**——只表现为「该渠道的自动签到/保活从不运行」，
+	// 而手工触发（面板按钮 / RunCheckinNow）仍然可用，极难发现。
+	go glmSch.Run(sctx)
 
 	// 积分自动刷新覆盖全部渠道：
 	// - workbuddyai / qoder 无签到活动，不自动刷就会一直显示旧值或 0；
