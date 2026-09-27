@@ -25,7 +25,25 @@ import (
 
 // Client 上游 HTTP 客户端。Base 可覆盖以便测试。
 type Client struct {
+	// HTTP 用于**非流式**请求（刷新 token / 用户信息 / 积分 / 签到）。
+	// 带 Client.Timeout —— 对这类"一问一答"的接口是合适的。
 	HTTP *http.Client
+
+	// StreamHTTP 用于**对话流**（SSE）。
+	//
+	// ⚠️ **刻意不设 Client.Timeout**。Go 的 `http.Client.Timeout` 覆盖
+	// 整个请求生命周期（含读 body），对流式响应意味着"长回答必被掐断"——
+	// 实测（2026-09-27）：GLM 长回答触发 `context deadline exceeded` 5 次，
+	// 且**没有终止帧**，客户端表现为"回答到一半停住"。
+	//
+	// 流式的正确超时是：
+	//   - ResponseHeaderTimeout（等响应头，防止上游不响应）
+	//   - 连接/读写超时由 Transport 层控制
+	// 只要上游在持续发数据，就不该被掐断。
+	//
+	// 与 traework 的 StreamHTTP 是同一模式（见 internal/traework/client.go）。
+	StreamHTTP *http.Client
+
 	Base string
 
 	// mu 保护 accessToken 缓存（多账号并发刷新）。
@@ -54,7 +72,9 @@ func New() *Client {
 		ResponseHeaderTimeout: requestTimeout,
 	}
 	return &Client{
-		HTTP:         &http.Client{Timeout: requestTimeout, Transport: tr},
+		HTTP: &http.Client{Timeout: requestTimeout, Transport: tr},
+		// 流式 client：**共用同一 Transport**（复用连接池），但不设 Client.Timeout。
+		StreamHTTP:   &http.Client{Transport: tr},
 		Base:         Base,
 		accessTokens: map[string]cachedToken{},
 	}
