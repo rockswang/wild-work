@@ -252,7 +252,15 @@ func (c *Client) ChatStream(a *auth.Auth, body []byte) (io.ReadCloser, int, []by
 	}
 	applySignedHeaders(httpReq, token, "text/event-stream")
 
-	resp, err := c.HTTP.Do(httpReq)
+	// ⚠️ 流式请求必须用 StreamHTTP（**无 Client.Timeout**）。
+	// 用带 Timeout 的 HTTP 会让长回答在超时点被强制掐断、且无终止帧
+	// （实测 2026-09-27：GLM 触发 `context deadline exceeded` 5 次）。
+	// 见 client.go 中 StreamHTTP 字段的说明。
+	hc := c.HTTP
+	if c.StreamHTTP != nil {
+		hc = c.StreamHTTP
+	}
+	resp, err := hc.Do(httpReq)
 	if err != nil {
 		return nil, 0, nil, err
 	}
