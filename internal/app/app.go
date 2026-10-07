@@ -1886,6 +1886,24 @@ func (a *App) SetProxies(proxies map[string]string, oczenKey string) error {
 	return nil
 }
 
+// probeMiddlewareService 探测中间层服务是否已启动：GET 基址的服务根
+// （scheme://host[:port]/，剥掉路径段——billion-context 的根即返回其状态 JSON）。
+// 任意 HTTP 响应（含 404/403）都证明监听者活着；连接拒绝/超时才视为未启动。
+// 3s 超时：本机中间层应为毫秒级，不值得为异常网络卡面板更久。
+func probeMiddlewareService(baseURL string) error {
+	u, err := url.Parse(baseURL)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") {
+		return fmt.Errorf("中间层基址无法解析: %s", baseURL)
+	}
+	root := u.Scheme + "://" + u.Host + "/"
+	resp, err := (&http.Client{Timeout: 3 * time.Second}).Get(root)
+	if err != nil {
+		return fmt.Errorf("未检测到中间层服务（%s）——请先安装并启动中间层再启用（billion-context 见项目主页 https://github.com/ranxianglei/billion-context）", root)
+	}
+	resp.Body.Close()
+	return nil
+}
+
 // SetMiddleware 保存通用上游中间层配置（config.middleware 段）并热更新。
 // 指针参数区分「未携带」与「显式写入」：nil = 保持现值（与 listen 的
 // admin_password 同一约定）；校验判据与 config.Load 共用（Normalize）。
@@ -1911,6 +1929,15 @@ func (a *App) SetMiddleware(enabled *bool, baseURL *string, channels *[]string) 
 	if err := mw.Normalize(); err != nil {
 		a.mu.Unlock()
 		return err
+	}
+	// 启用前探测中间层服务是否已启动：未启动不允许启用——防止「配了个
+	// 永远 502 的死地址」。探测持锁进行（面板单用户，失败路径最坏 3s），
+	// 保证「探测→提交」不与并发保存竞态；关闭（enabled=false）不探测。
+	if mw.Enabled {
+		if err := probeMiddlewareService(mw.BaseURL); err != nil {
+			a.mu.Unlock()
+			return err
+		}
 	}
 	a.cfg.Middleware = mw
 	err := config.Save(a.cfg, a.cfgPath)
