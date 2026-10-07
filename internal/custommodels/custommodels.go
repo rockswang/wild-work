@@ -1,14 +1,16 @@
 // Package custommodels 自定义模型代理的配置存储：两级结构（API 源 + 模型）。
 //
 // 语义：
-//   - 两级结构：Source（base_url + api_key，可被多个模型共享）+ Model（对外裸模型名
+//   - 两级结构：Source（base_url + api_key，可被多个模型共享）+ Model（对外模型名
 //     → 所属源，可选 upstream_id 改写转发时的 model 字段）；
 //   - 文件缺失 = 空表（首启）；解析失败仍返回可用空 Store 并附带 error——
 //     自定义模型配置绝不能阻断服务启动，损坏文件在下次保存时被正常覆盖、自动自愈；
-//   - 路由语义：/v1/chat/completions 的**裸模型名**命中启用中的模型（且所属源启用）时
-//     直接转发第三方（优先于渠道默认/兼容映射兜底）；带渠道前缀（kind/model）的
-//     请求永远走渠道，不受自定义模型影响。模型名不允许含 "/"——含前缀的名字
-//     到不了直转分支，存进去只会造成「配置了却永远不生效」的假象，故在入库时拒绝。
+//   - 路由语义：/v1/chat/completions 命中启用中的模型（且所属源启用）时直接转发
+//     第三方（优先于渠道默认/兼容映射兜底）。模型名两种合法形态：裸名（deepseek-chat）
+//     或「源名/模型」虚拟前缀（YD/GLM-5.3）——后者与渠道模型的「渠道/模型」命名观感
+//     一致，前缀即所属源名。渠道前缀（kind/model）的请求永远走渠道：自定义表里不可能
+//     存在渠道前缀名（入库校验拒绝真实渠道 Kind 作前缀），分发侧先查自定义表
+//     也不会截走渠道流量。
 package custommodels
 
 import (
@@ -21,6 +23,8 @@ import (
 	"sort"
 	"strings"
 	"sync"
+
+	"wild-work/internal/provider"
 )
 
 // Source 一个第三方 OpenAI 兼容 API 源。Name 即唯一标识（源间互相引用、
@@ -32,9 +36,10 @@ type Source struct {
 	Enabled bool   `json:"enabled"`  // false = 其下模型全部分流失效（仍保留配置）
 }
 
-// Model 一个对外自定义模型。Name 即客户端请求名（/v1/models 合并条目的 id）。
+// Model 一个对外自定义模型。Name 即客户端请求名（/v1/models 合并条目的 id），
+// 两种合法形态：裸名（deepseek-chat）或「源名/模型」（YD/GLM-5.3，前缀=所属源名）。
 type Model struct {
-	Name       string `json:"name"`                  // 对外裸模型名（唯一；非空、无空白、无 "/")
+	Name       string `json:"name"`                  // 对外模型名（唯一；非空、无空白；含 "/" 时须为「源名/模型」形态，见 validModelName）
 	Source     string `json:"source"`                // 所属 Source.Name（必填、须存在）
 	UpstreamID string `json:"upstream_id,omitempty"` // 发给第三方的 model 字段；空 = 用 Name
 	Enabled    bool   `json:"enabled"`               // false = 不分流（请求照旧走渠道路径）
@@ -222,11 +227,11 @@ func (s *Store) UpsertModel(m Model) error {
 	if err := validID(m.Name, "模型名称"); err != nil {
 		return err
 	}
-	if strings.Contains(m.Name, "/") {
-		return fmt.Errorf("模型名称 %q 不能含 \"/\"：带渠道前缀的请求永远走渠道，此类名称永远无法直转", m.Name)
-	}
 	if m.Source == "" {
 		return fmt.Errorf("模型 %q 必须选择 API 源", m.Name)
+	}
+	if err := validModelName(m.Name, m.Source); err != nil {
+		return err
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -269,6 +274,30 @@ func validID(id, what string) error {
 	}
 	if strings.ContainsAny(id, " \t\r\n") {
 		return fmt.Errorf("%s 不能含空白字符: %q", what, id)
+	}
+	return nil
+}
+
+// validModelName 模型名两种合法形态的「源名/模型」分支校验（裸名直接放行）：
+//   - 首个 "/" 前的段必须等于所属源名（前缀即源的虚拟渠道名，防止两名漂移），
+//     斜杠后非空；模型段允许再含 "/"（真实模型名自带斜杠，如 Kimi/Kimi-K3）；
+//   - 前缀不得为真实渠道 Kind——渠道请求永远走渠道的不变量由入库端保证：
+//     自定义表里不存在渠道前缀名（渠道路由按完整名匹配，YD/… 形态截不走
+//     kind/model 渠道流量），分发侧先查自定义表也不受影响。
+func validModelName(name, source string) error {
+	i := strings.Index(name, "/")
+	if i < 0 {
+		return nil // 裸名
+	}
+	prefix, rest := name[:i], name[i+1:]
+	if rest == "" {
+		return fmt.Errorf("模型名称 %q 的 \"/\" 仅允许「源名/模型」形态（斜杠后不能为空）", name)
+	}
+	if prefix != source {
+		return fmt.Errorf("模型名称 %q 的前缀必须等于所属 API 源名 %q", name, source)
+	}
+	if provider.IsKind(prefix) {
+		return fmt.Errorf("前缀 %q 是真实渠道名：渠道前缀的请求永远走渠道，自定义模型不得占用", prefix)
 	}
 	return nil
 }

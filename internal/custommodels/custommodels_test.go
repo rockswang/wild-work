@@ -103,7 +103,7 @@ func TestDeleteSourceReferencedRejected(t *testing.T) {
 	}
 }
 
-// TestUpsertValidation 入库校验：名称空白、模型名含 "/"、模型缺源、源缺 base_url、坏 URL。
+// TestUpsertValidation 入库校验：名称空白、模型名形态、模型缺源、源缺 base_url、坏 URL。
 func TestUpsertValidation(t *testing.T) {
 	s, _ := mustStore(t)
 	seedSource(t, s, "src", "https://example.com")
@@ -114,7 +114,7 @@ func TestUpsertValidation(t *testing.T) {
 		want  string // 错误消息须含的子串
 	}{
 		{"源名为空", func() error {
-			return s.UpsertSource(Source{Name: " ", BaseURL: "https://a.com"})
+			return s.UpsertSource(Source{Name: "", BaseURL: "https://a.com"})
 		}, "不能为空"},
 		{"源名含空白", func() error {
 			return s.UpsertSource(Source{Name: "a b", BaseURL: "https://a.com"})
@@ -125,9 +125,15 @@ func TestUpsertValidation(t *testing.T) {
 		{"源 base_url 非 http", func() error {
 			return s.UpsertSource(Source{Name: "x", BaseURL: "ftp://a.com"})
 		}, "http/https"},
-		{"模型名含斜杠", func() error {
+		{"模型名前缀不等于源名", func() error {
 			return s.UpsertModel(Model{Name: "a/b", Source: "src", Enabled: true})
-		}, `"/"`},
+		}, "前缀必须等于"},
+		{"模型名前缀为真实渠道", func() error {
+			return s.UpsertModel(Model{Name: "workbuddy/m", Source: "workbuddy", Enabled: true})
+		}, "真实渠道"},
+		{"模型名斜杠后为空", func() error {
+			return s.UpsertModel(Model{Name: "src/", Source: "src", Enabled: true})
+		}, "斜杠后"},
 		{"模型缺源", func() error {
 			return s.UpsertModel(Model{Name: "m", Source: "", Enabled: true})
 		}, "API 源"},
@@ -144,6 +150,44 @@ func TestUpsertValidation(t *testing.T) {
 	// 校验失败的条目不得入库
 	if _, mods := s.Snapshot(); len(mods) != 0 {
 		t.Fatalf("校验失败的模型不应入库，实际 %d 个", len(mods))
+	}
+}
+
+// TestSourcePrefixModelName 「源名/模型」形态：入库接受、Resolve 按全名命中、
+// /v1/models 按全名列出、持久化往返一致；裸名段不命中（全名才是路由键）。
+func TestSourcePrefixModelName(t *testing.T) {
+	s, dir := mustStore(t)
+	seedSource(t, s, "YD", "https://example.com/v1")
+	mustUpsertModel(t, s, Model{Name: "YD/GLM-5.3", Source: "YD", UpstreamID: "GLM-5.3", Enabled: true})
+	seedSource(t, s, "kimi", "https://example.org")
+	mustUpsertModel(t, s, Model{Name: "kimi/k3", Source: "kimi", Enabled: true})                                   // 无 upstream_id
+	mustUpsertModel(t, s, Model{Name: "YD/Kimi/Kimi-K3", Source: "YD", UpstreamID: "Kimi/Kimi-K3", Enabled: true}) // 模型段自带斜杠
+
+	tgt, ok := s.Resolve("YD/GLM-5.3")
+	if !ok || tgt.Model != "YD/GLM-5.3" || tgt.Upstream != "GLM-5.3" || tgt.Source != "YD" {
+		t.Fatalf("Resolve(YD/GLM-5.3) 异常: %+v ok=%v", tgt, ok)
+	}
+	tgt3, ok := s.Resolve("YD/Kimi/Kimi-K3")
+	if !ok || tgt3.Upstream != "Kimi/Kimi-K3" {
+		t.Fatalf("模型段带斜杠的名应按全名命中且 upstream_id 原样: %+v ok=%v", tgt3, ok)
+	}
+	if tgt2, ok := s.Resolve("kimi/k3"); !ok || tgt2.Upstream != "kimi/k3" {
+		t.Fatalf("无 upstream_id 的前缀名应原样转发: %+v ok=%v", tgt2, ok)
+	}
+	if _, ok := s.Resolve("GLM-5.3"); ok {
+		t.Fatal("裸名段不应命中：路由键是完整名 YD/GLM-5.3")
+	}
+	ids := s.EnabledIDs()
+	if len(ids) != 3 || ids[0] != "YD/GLM-5.3" || ids[1] != "YD/Kimi/Kimi-K3" || ids[2] != "kimi/k3" {
+		t.Fatalf("EnabledIDs 应按全名列出: %v", ids)
+	}
+	// 持久化往返：重载后仍按全名命中
+	s2, err := Load(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := s2.Resolve("YD/GLM-5.3"); !ok {
+		t.Fatal("重载后 YD/GLM-5.3 应仍命中")
 	}
 }
 

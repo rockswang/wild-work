@@ -133,6 +133,68 @@ func TestCustomModelBareNameProxied(t *testing.T) {
 	}
 }
 
+// TestCustomModelSourcePrefixProxied 「源名/模型」名命中 → 直转：与渠道模型的
+// 「渠道/模型」命名观感一致（前缀=所属源名）；upstream_id 改写照常生效。
+func TestCustomModelSourcePrefixProxied(t *testing.T) {
+	tp := &fakeThirdParty{respBody: `{"ok":true}`}
+	srv := httptest.NewServer(tp)
+	defer srv.Close()
+
+	store := newCustomTestStore(t, t.TempDir(), "YD", srv.URL, "YD/GLM-5.3", "GLM-5.3")
+	h := NewHandler(Config{Custom: store})
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
+		strings.NewReader(`{"model":"YD/GLM-5.3","messages":[],"stream":false}`)))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("「源名/模型」名应直转 200，实际 %d: %s", rec.Code, rec.Body.String())
+	}
+	path, _, reqBody := tp.lastReq()
+	if path == "" {
+		t.Fatal("第三方未被调用")
+	}
+	var sent map[string]any
+	if err := json.Unmarshal(reqBody, &sent); err != nil {
+		t.Fatal(err)
+	}
+	if sent["model"] != "GLM-5.3" {
+		t.Fatalf("upstream_id 应改写为 GLM-5.3，实际 %v", sent["model"])
+	}
+	if n := tp.count(); n != 1 {
+		t.Fatalf("应恰好 1 次上游调用，实际 %d", n)
+	}
+}
+
+// TestChannelPrefixStillWinsWithPrefixEntries 自定义表存在「源名/模型」条目时，
+// 渠道前缀请求仍走渠道——入库校验保证渠道 Kind 不可能成为自定义前缀。
+func TestChannelPrefixStillWinsWithPrefixEntries(t *testing.T) {
+	up := &rotatingUpstream{}
+	p := pool.New(t.TempDir() + "/state.json")
+	p.Add(&auth.Auth{Kind: "workbuddy", AccessToken: "at", ExpiresAt: 4102444800, UID: "wb-1"})
+
+	tp := &fakeThirdParty{respBody: `{}`}
+	srv := httptest.NewServer(tp)
+	defer srv.Close()
+
+	store := newCustomTestStore(t, t.TempDir(), "YD", srv.URL, "YD/m", "")
+	h := NewHandler(Config{
+		Runtimes: map[provider.Kind]*Runtime{
+			provider.WorkBuddy: {Kind: provider.WorkBuddy, Pool: p, Upstream: up, StaticModels: []provider.ModelInfo{{ID: "m"}}},
+		},
+		Custom: store,
+	})
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
+		strings.NewReader(`{"model":"workbuddy/m","messages":[],"stream":false}`)))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("渠道请求应成功，实际 %d: %s", rec.Code, rec.Body.String())
+	}
+	if n := tp.count(); n != 0 {
+		t.Fatalf("渠道前缀请求不得被自定义模型劫持，第三方被调 %d 次", n)
+	}
+}
+
 // TestChannelPrefixNotHijackedByCustom 渠道前缀永远走渠道：自定义模型与渠道模型
 // 同名（裸名 "m" vs "workbuddy/m"），前缀请求必须进渠道、不碰第三方。
 func TestChannelPrefixNotHijackedByCustom(t *testing.T) {

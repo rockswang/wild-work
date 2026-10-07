@@ -456,10 +456,12 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		writeOpenAIError(w, http.StatusBadRequest, "invalid_request", "invalid JSON body: "+err.Error())
 		return
 	}
-	// 自定义模型直转：**裸模型名**命中启用中的自定义模型 → 直接转发第三方
-	// （优先于渠道默认/兼容映射兜底）。带渠道前缀（kind/model）的请求永远走
-	// 渠道，不受影响；未命中照旧走下面的渠道路径，零行为变化。
-	if h.custom != nil && !strings.Contains(peek.Model, "/") {
+	// 自定义模型直转：命中启用中的自定义模型 → 直接转发第三方（优先于渠道路径）。
+	// 模型名支持裸名与「源名/模型」虚拟前缀两种形态（后者与渠道模型的命名观感一致，
+	// 前缀=所属源名）。渠道前缀（kind/model）的请求永远走渠道——自定义表里不可能
+	// 存在渠道前缀名（入库校验拒绝真实渠道 Kind 作前缀），故这里对含 "/" 的名称
+	// 也先查一次自定义表，渠道流量不受影响；未命中照旧走下面的渠道路径。
+	if h.custom != nil {
 		if tgt, ok := h.custom.Resolve(peek.Model); ok {
 			h.serveCustom(w, r, body, peek.Stream, tgt)
 			return

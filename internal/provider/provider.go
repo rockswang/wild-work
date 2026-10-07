@@ -31,11 +31,28 @@ const (
 	Raccoon Kind = "raccoon"
 	// Loomy 讯飞 Loomy（loomyad.xunfei.cn）：凭据由面板从本机官方客户端导入，
 	// session 约 14 天且上游无 refresh 端点，到期需重新导入。
-	Loomy Kind = "loomy"
+	Loomy    Kind = "loomy"
 	TraeCode Kind = "traecode" // Trae 代码版：与 TraeWork 同一上游、共用账号，function=solo_agent
 	Oczen    Kind = "oczen"    // OpenCodeZen 匿名免费通道（opencode.ai/zen，无账号、凭证固定 public）
 	GLM      Kind = "glm"      // 智谱清言（chatglm.cn 网页版私有接口，凭据为 chatglm_refresh_token）
 )
+
+// AllKinds 全部渠道 Kind 枚举（新增渠道时同步维护；自定义模型名的保留前缀判定用）。
+var AllKinds = []Kind{
+	WorkBuddy, WorkBuddyAI, TraeWork, Qoder, QoderCN, QoderCOM, QwenWork,
+	MonkeyCode, Raccoon, Loomy, TraeCode, Oczen, GLM,
+}
+
+// IsKind 判定 s 是否为某个真实渠道的 Kind 字面值。
+// 「渠道/模型」前缀保留给渠道（kind/model 路由语义），自定义模型名不得占用。
+func IsKind(s string) bool {
+	for _, k := range AllKinds {
+		if string(k) == s {
+			return true
+		}
+	}
+	return false
+}
 
 func (k Kind) String() string { return string(k) }
 
