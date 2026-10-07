@@ -1904,10 +1904,10 @@ func probeMiddlewareService(baseURL string) error {
 	return nil
 }
 
-// SetMiddleware 保存通用上游中间层配置（config.middleware 段）并热更新。
+// SetMiddleware 保存通用上游中间层配置（config.middleware 段，全局开关）并热更新。
 // 指针参数区分「未携带」与「显式写入」：nil = 保持现值（与 listen 的
 // admin_password 同一约定）；校验判据与 config.Load 共用（Normalize）。
-func (a *App) SetMiddleware(enabled *bool, baseURL *string, channels *[]string) error {
+func (a *App) SetMiddleware(enabled *bool, baseURL *string) error {
 	a.mu.Lock()
 	mw := a.cfg.Middleware
 	if enabled != nil {
@@ -1915,16 +1915,6 @@ func (a *App) SetMiddleware(enabled *bool, baseURL *string, channels *[]string) 
 	}
 	if baseURL != nil {
 		mw.BaseURL = strings.TrimSpace(*baseURL)
-	}
-	if channels != nil {
-		clean := make([]string, 0, len(*channels))
-		for _, ch := range *channels {
-			if ch = strings.TrimSpace(ch); ch != "" {
-				clean = append(clean, ch)
-			}
-		}
-		sort.Strings(clean)
-		mw.Channels = clean
 	}
 	if err := mw.Normalize(); err != nil {
 		a.mu.Unlock()
@@ -1949,7 +1939,7 @@ func (a *App) SetMiddleware(enabled *bool, baseURL *string, channels *[]string) 
 		a.middlewareSyncer(mw)
 	}
 	if mw.Enabled {
-		log.Printf("上游中间层已更新：enabled=on base_url=%q channels=%s", mw.BaseURL, strings.Join(mw.Channels, ", "))
+		log.Printf("上游中间层已更新：enabled=on base_url=%q（全部渠道经中间层）", mw.BaseURL)
 	} else {
 		log.Printf("上游中间层已关闭（全部直连）")
 	}
@@ -2065,11 +2055,10 @@ type State struct {
 	// Proxies 单渠道上游代理（只读，保存走 POST /api/config/proxies）。
 	Proxies map[string]string `json:"proxies"`
 
-	// Middleware 通用上游中间层（只读，保存走 POST /api/config/middleware）。
+	// Middleware 通用上游中间层（只读，保存走 POST /api/config/middleware；全局开关）。
 	Middleware struct {
-		Enabled  bool     `json:"enabled"`
-		BaseURL  string   `json:"base_url"`
-		Channels []string `json:"channels"`
+		Enabled bool   `json:"enabled"`
+		BaseURL string `json:"base_url"`
 	} `json:"middleware"`
 
 	// OczenAPIKey OpenCodeZen 自定义 API key（只读脱敏回显：sk-xxx…尾4位；保存走同端点）。
@@ -2123,10 +2112,6 @@ func (a *App) GetState() State {
 	// 中间层段只读回显（保存走 POST /api/config/middleware）
 	st.Middleware.Enabled = a.cfg.Middleware.Enabled
 	st.Middleware.BaseURL = a.cfg.Middleware.BaseURL
-	st.Middleware.Channels = a.cfg.Middleware.Channels
-	if st.Middleware.Channels == nil {
-		st.Middleware.Channels = []string{} // 前端免判 null
-	}
 	// oczen key 脱敏回显：仅露首 5 + 尾 4（空则原样空串）
 	st.OczenAPIKey = maskKey(a.cfg.OczenAPIKey)
 	st.Accounts = a.accountViews()
@@ -2532,12 +2517,11 @@ func (a *App) HandleAPI(mux *http.ServeMux) {
 	// 指针语义同 listen.admin_password：未携带 = 保持现值。
 	mux.HandleFunc("POST /api/config/middleware", func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
-			Enabled  *bool     `json:"enabled"`
-			BaseURL  *string   `json:"base_url"`
-			Channels *[]string `json:"channels"`
+			Enabled *bool   `json:"enabled"`
+			BaseURL *string `json:"base_url"`
 		}
 		_ = json.NewDecoder(r.Body).Decode(&req)
-		if err := a.SetMiddleware(req.Enabled, req.BaseURL, req.Channels); err != nil {
+		if err := a.SetMiddleware(req.Enabled, req.BaseURL); err != nil {
 			apiError(w, http.StatusBadRequest, err.Error())
 			return
 		}

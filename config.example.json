@@ -34,7 +34,6 @@
   },
   "middleware": {
     "enabled": false,
-    "base_url": "",
-    "channels": []
+    "base_url": ""
   }
 }

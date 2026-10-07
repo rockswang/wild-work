@@ -5,6 +5,7 @@ package main
 
 import (
 	"net/http"
+	"strings"
 
 	"wild-work/internal/config"
 	"wild-work/internal/middleware"
@@ -24,15 +25,15 @@ func applyUpstreamChain(cfg *config.Config, targets map[string][]*http.Client) {
 	applyMiddleware(cfg, targets)
 }
 
-// applyMiddleware 按 config.middleware 给适用渠道的每个 HTTP client 套中间层
-// 包装器（R35：HTTP / StreamHTTP / BillingHTTP? 必须一起套——只套非流式会让
-// 流式漏掉中间层）。未开启或渠道不在适用列表 = 不动（保持 applyProxies 铺好的
-// 直连底座）。
+// applyMiddleware 给**全部渠道**的每个 HTTP client 套中间层包装器（R35：
+// HTTP / StreamHTTP / BillingHTTP? 必须一起套——只套非流式会让流式漏掉中间层）。
+// 全局开关、不做渠道挑选（中间层对所有上游一视同仁）；未开启 = 不动
+// （保持 applyProxies 铺好的直连底座）。
 func applyMiddleware(cfg *config.Config, targets map[string][]*http.Client) {
-	for kind, clients := range targets {
-		if !cfg.Middleware.AppliesTo(kind) {
-			continue
-		}
+	if !cfg.Middleware.Enabled || strings.TrimSpace(cfg.Middleware.BaseURL) == "" {
+		return
+	}
+	for _, clients := range targets {
 		for _, c := range clients {
 			if c == nil {
 				continue

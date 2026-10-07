@@ -19,33 +19,26 @@ func newBareClient() *http.Client {
 	return &http.Client{Transport: &http.Transport{ResponseHeaderTimeout: 120 * time.Second}}
 }
 
-// TestApplyUpstreamChainMiddleware 锁定装配语义：
-//  1. R35：适用渠道的 HTTP + StreamHTTP 全套上（只套非流式会让流式漏掉中间层）；
-//  2. 非适用渠道零改写；
-//  3. 热更新切换（关闭后完整链路重铺 → Transport 复位为裸底座）；
-//  4. 代理与中间层可叠加：包装器之下是带 Proxy 的底座。
+// TestApplyUpstreamChainMiddleware 锁定装配语义（全局开关，不做渠道挑选）：
+//  1. R35：**全部渠道**的 HTTP + StreamHTTP + BillingHTTP? 全套上（只套非流式会让流式漏掉中间层）；
+//  2. 热更新切换（关闭后完整链路重铺 → Transport 复位为裸底座）；
+//  3. 代理与中间层可叠加：包装器之下是带 Proxy 的底座。
 func TestApplyUpstreamChainMiddleware(t *testing.T) {
-	httpC, streamC, billingC, otherC := newBareClient(), newBareClient(), newBareClient(), newBareClient()
+	wbHTTP, wbStream, wbBilling := newBareClient(), newBareClient(), newBareClient()
+	twC := newBareClient()
 	targets := map[string][]*http.Client{
-		"workbuddy": {httpC, billingC, streamC}, // BillingHTTP? 同套（R35）
-		"traework":  {otherC},
+		"workbuddy": {wbHTTP, wbBilling, wbStream}, // BillingHTTP? 同套（R35）
+		"traework":  {twC},
 	}
 
-	// 启用：仅 workbuddy 适用（含三个 client），traework 不适用
+	// 启用：全部渠道的所有 client 一并套上（全局开关）
 	cfg := config.Default()
-	cfg.Middleware = config.Middleware{
-		Enabled:  true,
-		BaseURL:  "http://127.0.0.1:8787/bili",
-		Channels: []string{"workbuddy"},
-	}
+	cfg.Middleware = config.Middleware{Enabled: true, BaseURL: "http://127.0.0.1:8787"}
 	applyUpstreamChain(cfg, targets)
-	for name, c := range map[string]*http.Client{"HTTP": httpC, "BillingHTTP": billingC, "StreamHTTP": streamC} {
+	for name, c := range map[string]*http.Client{"workbuddy.HTTP": wbHTTP, "workbuddy.BillingHTTP": wbBilling, "workbuddy.StreamHTTP": wbStream, "traework.HTTP": twC} {
 		if !isWrapped(c.Transport) {
-			t.Fatalf("workbuddy 的 %s client 未被套上中间层（R35：流式/计费一并全套）", name)
+			t.Fatalf("%s 未被套上中间层（全局开关：全部渠道全套，R35）", name)
 		}
-	}
-	if isWrapped(otherC.Transport) {
-		t.Fatal("非适用渠道（traework）不得改写（零行为变化）")
 	}
 
 	// 叠加代理：包装器之下应是带 Proxy 的裸底座（中间层永远在代理之上）
@@ -53,24 +46,24 @@ func TestApplyUpstreamChainMiddleware(t *testing.T) {
 	proxyCfg.Proxies = map[string]string{"workbuddy": "socks5://127.0.0.1:1080"}
 	proxyCfg.Middleware = cfg.Middleware
 	applyUpstreamChain(proxyCfg, targets)
-	inner, ok := middleware.Unwrap(httpC.Transport).(*http.Transport)
+	inner, ok := middleware.Unwrap(wbHTTP.Transport).(*http.Transport)
 	if !ok || inner.Proxy == nil {
-		t.Fatalf("代理+中间层叠加后，包装器之下应是带 Proxy 的底座（inner=%T）", middleware.Unwrap(httpC.Transport))
+		t.Fatalf("代理+中间层叠加后，包装器之下应是带 Proxy 的底座（inner=%T）", middleware.Unwrap(wbHTTP.Transport))
 	}
 
 	// 热更新关闭：完整链路重铺后 Transport 复位为裸底座（不残留包装）
 	offCfg := config.Default() // middleware 缺省关闭
 	offCfg.Proxies = proxyCfg.Proxies
 	applyUpstreamChain(offCfg, targets)
-	for name, c := range map[string]*http.Client{"HTTP": httpC, "StreamHTTP": streamC} {
+	for name, c := range map[string]*http.Client{"workbuddy.HTTP": wbHTTP, "workbuddy.StreamHTTP": wbStream, "traework.HTTP": twC} {
 		if isWrapped(c.Transport) {
-			t.Fatalf("关闭中间层后 %s client 的 Transport 应复位为裸底座", name)
+			t.Fatalf("关闭中间层后 %s 的 Transport 应复位为裸底座", name)
 		}
 	}
 	// 底座超时参数在多轮重铺后仍保留（120s 不被中间层包装吞掉）
-	tr, ok := httpC.Transport.(*http.Transport)
+	tr, ok := wbHTTP.Transport.(*http.Transport)
 	if !ok || tr.ResponseHeaderTimeout != 120*time.Second {
-		t.Fatalf("重铺后底座应保留原 ResponseHeaderTimeout=120s（got %T %+v）", httpC.Transport, httpC.Transport)
+		t.Fatalf("重铺后底座应保留原 ResponseHeaderTimeout=120s（got %T %+v）", wbHTTP.Transport, wbHTTP.Transport)
 	}
 }
 
@@ -79,7 +72,7 @@ func TestApplyUpstreamChainMiddleware(t *testing.T) {
 // 不剥壳会把 oczen 的 120s 静默降级成默认 60s。
 func TestSetTransportProxyInheritsTimeoutThroughWrapper(t *testing.T) {
 	c := &http.Client{
-		Transport: middleware.Wrap("http://127.0.0.1:8787/bili",
+		Transport: middleware.Wrap("http://127.0.0.1:8787",
 			&http.Transport{ResponseHeaderTimeout: 120 * time.Second}),
 	}
 	SetTransportProxy(c, nil) // 热更新：直连重铺

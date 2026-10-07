@@ -3,18 +3,17 @@ package config
 import (
 	"os"
 	"path/filepath"
-	"reflect"
 	"testing"
 )
 
-// TestMiddlewareDefaultOff 默认（零值）关闭 = 零行为变化：任何渠道都不适用。
+// TestMiddlewareDefaultOff 默认（零值）关闭 = 零行为变化（全部渠道直连）。
 func TestMiddlewareDefaultOff(t *testing.T) {
 	c := Default()
 	if c.Middleware.Enabled {
 		t.Error("默认应关闭中间层")
 	}
-	if c.Middleware.AppliesTo("workbuddy") || c.Middleware.AppliesTo("traework") {
-		t.Error("关闭状态下任何渠道都不得适用")
+	if c.Middleware.BaseURL != "" {
+		t.Errorf("默认 base_url 应为空, got %q", c.Middleware.BaseURL)
 	}
 	// 旧配置无 middleware 段：Load 后保持关闭（向后兼容，零行为变化）
 	dir := t.TempDir()
@@ -24,46 +23,20 @@ func TestMiddlewareDefaultOff(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c2.Middleware.Enabled || c2.Middleware.BaseURL != "" || len(c2.Middleware.Channels) != 0 {
+	if c2.Middleware.Enabled || c2.Middleware.BaseURL != "" {
 		t.Errorf("旧配置加载后 middleware 应为零值, got %+v", c2.Middleware)
 	}
 }
 
-// TestMiddlewareAppliesTo 启用后仅列表内渠道生效。
-func TestMiddlewareAppliesTo(t *testing.T) {
-	m := Middleware{Enabled: true, BaseURL: "http://127.0.0.1:8787/bili", Channels: []string{"workbuddy", "traework"}}
-	if !m.AppliesTo("workbuddy") || !m.AppliesTo("traework") {
-		t.Error("列表内渠道应适用")
-	}
-	if m.AppliesTo("qoder") || m.AppliesTo("") {
-		t.Error("列表外渠道不得适用")
-	}
-	// 开关关闭或基址为空：即便在列表内也不适用
-	off := m
-	off.Enabled = false
-	if off.AppliesTo("workbuddy") {
-		t.Error("关闭状态下不得适用")
-	}
-	noBase := m
-	noBase.BaseURL = "  "
-	if noBase.AppliesTo("workbuddy") {
-		t.Error("基址为空（纯空白）不得适用")
-	}
-}
-
-// TestMiddlewareNormalize 校验判据：清洗 channels、开启必须带 http/https 基址。
+// TestMiddlewareNormalize 校验判据：开启必须带 http/https 基址，基址去空白。
 func TestMiddlewareNormalize(t *testing.T) {
-	// 清洗：空白渠道剔除、排序；基址去空白
-	m := Middleware{Enabled: true, BaseURL: " http://127.0.0.1:8787/bili/ ",
-		Channels: []string{"traework", " workbuddy ", "", "  "}}
+	// 清洗：基址去首尾空白（尾部斜杠留给中间层归一）
+	m := Middleware{Enabled: true, BaseURL: " http://127.0.0.1:8787/ "}
 	if err := m.Normalize(); err != nil {
 		t.Fatalf("合法配置应通过: %v", err)
 	}
-	if m.BaseURL != "http://127.0.0.1:8787/bili/" {
-		t.Errorf("base_url 应仅去首尾空白（尾部斜杠留给中间层归一）, got %q", m.BaseURL)
-	}
-	if !reflect.DeepEqual(m.Channels, []string{"traework", "workbuddy"}) {
-		t.Errorf("channels 应去空白项并排序, got %v", m.Channels)
+	if m.BaseURL != "http://127.0.0.1:8787/" {
+		t.Errorf("base_url 应仅去首尾空白, got %q", m.BaseURL)
 	}
 	// 关闭状态：任何 base_url（含空）都合法
 	if err := (&Middleware{}).Normalize(); err != nil {
@@ -92,7 +65,7 @@ func TestMiddlewareLoadSaveRoundtrip(t *testing.T) {
 	dir := t.TempDir()
 	fp := filepath.Join(dir, "c.json")
 	c := Default()
-	c.Middleware = Middleware{Enabled: true, BaseURL: "http://127.0.0.1:8787/bili", Channels: []string{"workbuddy", " traework "}}
+	c.Middleware = Middleware{Enabled: true, BaseURL: "http://127.0.0.1:8787"}
 	if err := Save(c, fp); err != nil {
 		t.Fatal(err)
 	}
@@ -100,11 +73,8 @@ func TestMiddlewareLoadSaveRoundtrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !c2.Middleware.Enabled || c2.Middleware.BaseURL != "http://127.0.0.1:8787/bili" {
+	if !c2.Middleware.Enabled || c2.Middleware.BaseURL != "http://127.0.0.1:8787" {
 		t.Errorf("往返后 middleware 异常: %+v", c2.Middleware)
-	}
-	if !reflect.DeepEqual(c2.Middleware.Channels, []string{"traework", "workbuddy"}) {
-		t.Errorf("往返后 channels 应已清洗排序: %v", c2.Middleware.Channels)
 	}
 
 	// 非法 middleware 段：Load 必须报错（启动层 fatal 兜底）
@@ -112,13 +82,13 @@ func TestMiddlewareLoadSaveRoundtrip(t *testing.T) {
 	if _, err := Load(fp); err == nil {
 		t.Error("Load 对非法 middleware 段应报错")
 	}
-	// 合法段直接手写也能读
+	// 合法段直接手写也能读；旧版遗留的 channels 键被自然忽略（全局开关无渠道维度）
 	os.WriteFile(fp, []byte(`{"middleware":{"enabled":true,"base_url":"http://127.0.0.1:8787","channels":["glm"]}}`), 0o600)
 	c3, err := Load(fp)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !c3.Middleware.AppliesTo("glm") || c3.Middleware.AppliesTo("qoder") {
+	if !c3.Middleware.Enabled || c3.Middleware.BaseURL != "http://127.0.0.1:8787" {
 		t.Errorf("手写段生效异常: %+v", c3.Middleware)
 	}
 }

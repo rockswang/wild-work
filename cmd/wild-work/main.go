@@ -289,7 +289,7 @@ func main() {
 		provider.GLM.String(): {glmUp.HTTP, glmUp.StreamHTTP},
 	}
 	// 铺设出站链路：先按 config.proxies 重建代理底座，再按 config.middleware
-	// 给适用渠道套中间层包装（见 cmd/wild-work/middleware.go）。
+	// 给全部渠道套中间层包装（全局开关，见 cmd/wild-work/middleware.go）。
 	applyUpstreamChain(cfg, upstreamClients)
 	checkinMinutes, err := config.ParseClockTimes(cfg.Schedule.CheckinTimes)
 	if err != nil {

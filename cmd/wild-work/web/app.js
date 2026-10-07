@@ -1102,9 +1102,9 @@ function syncListenRisk() {
   $("adminPassReq").classList.toggle("hidden", !needPass);
 }
 
-// MW_BILI_DEFAULT billion-context（bili）中间层的标准本机地址（其默认端口 + 专属路径段）。
+// MW_BILI_DEFAULT billion-context（bili）中间层的默认本机地址（其默认端口）。
 // 仅作 UI 预填使用，非硬编码服务端默认——用户装在其它地址可手改。
-const MW_BILI_DEFAULT = "http://127.0.0.1:8787/bili";
+const MW_BILI_DEFAULT = "http://127.0.0.1:8787";
 
 function openSettings() {
   // 监听
@@ -1143,11 +1143,10 @@ function openSettings() {
   renderProxyList();
   $("oczenKeyInput").value = state.oczen_api_key || ""; // 回显脱敏值；未改动则原样回传，后端按脱敏值识别为「未变」
   $("oczenKeyInput").dataset.touched = "";
-  // 上游中间层（预设 + 开关 + 基址 + 适用渠道）
+  // 上游中间层（全局开关：预设 + 开关 + 基址；无渠道挑选）
   const mw = state.middleware || {};
   $("chkMwEnabled").checked = !!mw.enabled;
   $("mwBaseInput").value = mw.base_url || "";
-  $("mwChannelsInput").value = (mw.channels || []).join(", ");
   // 类型推导：基址恰为 bili 标准地址 → bili；其它已配置地址 → 自定义；未配置 → 保持未选择（不设默认，避免误导未安装用户）
   const mwBaseNow = (mw.base_url || "").trim();
   $("mwPreset").value = mwBaseNow === MW_BILI_DEFAULT ? "bili" : (mwBaseNow ? "custom" : "");
@@ -1244,12 +1243,11 @@ async function saveSettings() {
     await api("/api/config/proxies", body);
   } catch (e) { toast(e.message); return; }
 
-  // 3) 上游中间层（开关 + 基址 + 适用渠道；开启但缺基址由后端校验报错）
+  // 3) 上游中间层（全局开关 + 基址；开启但缺基址由后端校验报错，启用前探测服务是否已启动）
   const mwEnabled = $("chkMwEnabled").checked;
   const mwBase = $("mwBaseInput").value.trim();
-  const mwChannels = $("mwChannelsInput").value.split(",").map((s) => s.trim()).filter(Boolean);
   try {
-    await api("/api/config/middleware", { enabled: mwEnabled, base_url: mwBase, channels: mwChannels });
+    await api("/api/config/middleware", { enabled: mwEnabled, base_url: mwBase });
   } catch (e) { $("mwErr").textContent = e.message; toast(e.message); return; }
 
   // 4) 模型映射：优先读编辑器；编辑器从未展开过则用原值（保证「只改监听/渠道不碰映射」）

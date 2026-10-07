@@ -103,48 +103,22 @@ func ParseListen(s string) (Listen, error) {
 
 // Middleware 通用上游中间层（URL 前缀式）配置段。
 //
-// 语义：enabled 开启且渠道在 channels 适用列表时，该渠道的出站请求（HTTP +
-// StreamHTTP + BillingHTTP?，R35）被改写为「base_url + 原完整 URL」由中间层
-// 转发（机制见 internal/middleware）。缺省 = 关闭 = 零行为变化。
-// 只做渠道级粒度（模型级留待有真实用例再议）。
+// 语义：enabled 开启时，**全部渠道**的出站请求（HTTP + StreamHTTP + BillingHTTP?，
+// R35）被改写为「base_url + 原完整 URL」由中间层转发（机制见 internal/middleware）。
+// 全局开关、不做渠道级挑选——中间层（如上下文压缩）对所有上游一视同仁；
+// 缺省 = 关闭 = 零行为变化。
 type Middleware struct {
-	// Enabled 总开关（false = 全部直连，零行为变化）。
+	// Enabled 全局总开关（false = 全部直连，零行为变化）。
 	Enabled bool `json:"enabled"`
-	// BaseURL 中间层基址，可带路径段（如 http://127.0.0.1:8787/bili，
-	// 与生产环境 biliswitch 的拼接形态一致）。
+	// BaseURL 中间层基址，可带路径段（billion-context 默认 http://127.0.0.1:8787）。
 	BaseURL string `json:"base_url"`
-	// Channels 适用渠道（provider.Kind 字符串），如 ["workbuddy","traework"]；
-	// 未列出的渠道照常直连。
-	Channels []string `json:"channels"`
-}
-
-// AppliesTo 判断渠道 kind 是否套中间层：开关开启 + 基址非空 + kind 在适用列表。
-func (m Middleware) AppliesTo(kind string) bool {
-	if !m.Enabled || strings.TrimSpace(m.BaseURL) == "" {
-		return false
-	}
-	for _, ch := range m.Channels {
-		if ch == kind {
-			return true
-		}
-	}
-	return false
 }
 
 // Normalize 清洗并校验 middleware 段（Load 与面板保存共用同一判据）：
-// base_url 去空白；channels 去空白项并排序（落盘形态稳定）；
-// 开启时 base_url 必填且必须是 http/https 地址——「开启但没配地址」静默不生效
-// 会误导用户，按配置错误处理（对齐 proxies 的校验哲学）。
+// base_url 去空白；开启时必填且必须是 http/https 地址——「开启但没配地址」
+// 静默不生效会误导用户，按配置错误处理（对齐 proxies 的校验哲学）。
 func (m *Middleware) Normalize() error {
 	m.BaseURL = strings.TrimSpace(m.BaseURL)
-	channels := make([]string, 0, len(m.Channels))
-	for _, ch := range m.Channels {
-		if ch = strings.TrimSpace(ch); ch != "" {
-			channels = append(channels, ch)
-		}
-	}
-	sort.Strings(channels)
-	m.Channels = channels
 	if !m.Enabled {
 		return nil
 	}
@@ -249,7 +223,7 @@ func Default() *Config {
 	c.Proxies = map[string]string{}
 	// middleware 缺省关闭（零行为变化）；显式空 channels 保证落盘形态与
 	// config.example.json 一致（不变量 7）。
-	c.Middleware = Middleware{Enabled: false, BaseURL: "", Channels: []string{}}
+	c.Middleware = Middleware{Enabled: false, BaseURL: ""}
 	return c
 }
 
