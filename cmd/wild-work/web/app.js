@@ -1148,9 +1148,9 @@ function openSettings() {
   $("chkMwEnabled").checked = !!mw.enabled;
   $("mwBaseInput").value = mw.base_url || "";
   $("mwChannelsInput").value = (mw.channels || []).join(", ");
-  // 预设推导：基址为空（未配置，默认按 billion-context）或恰为 bili 标准地址 → bili 预设；其余 → 自定义
+  // 类型推导：基址恰为 bili 标准地址 → bili；其它已配置地址 → 自定义；未配置 → 保持未选择（不设默认，避免误导未安装用户）
   const mwBaseNow = (mw.base_url || "").trim();
-  $("mwPreset").value = (!mwBaseNow || mwBaseNow === MW_BILI_DEFAULT) ? "bili" : "custom";
+  $("mwPreset").value = mwBaseNow === MW_BILI_DEFAULT ? "bili" : (mwBaseNow ? "custom" : "");
   $("mwErr").textContent = "";
   // 自动签到 + 开机自启 + 临期阈值
   $("chkAutostart").checked = !!state.autostart;

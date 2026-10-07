@@ -361,15 +361,16 @@
         <div class="hint" style="margin:0 0 8px">
           在本工具与上游渠道之间插入一个第三方中间层，典型用途是<b>上下文压缩</b>：
           请求先交给中间层处理（例如把超长上下文压缩后再转发，节省积分），再由它转发给上游。
-          推荐 <a href="https://github.com/ranxianglei/billion-context" target="_blank" rel="noopener" title="项目主页：安装说明与使用文档">billion-context ↗</a>——前往项目主页按其说明<b>自行安装并启动</b>（本工具不包含、也不管理它），
-          其标准地址 <code>http://127.0.0.1:8787/bili</code> 会在下方自动填好；其它任意中间层选「自定义」填基址。
+          需要上下文压缩时，可选择 <a href="https://github.com/ranxianglei/billion-context" target="_blank" rel="noopener" title="项目主页：安装说明与使用文档">billion-context ↗</a>——前往项目主页按其说明<b>自行安装并启动</b>（本工具不包含、也不管理它），
+          再在「中间层类型」里选中它即可自动填入其标准地址；其它任意中间层选「自定义」填基址。
           账号、计费与统计口径不变。
         </div>
         <div class="row">
           <label class="switch"><input type="checkbox" id="chkMwEnabled"><span class="slider"></span></label>
           <label class="lbl" for="chkMwEnabled" title="总开关：关闭 = 全部渠道直连上游，零行为变化">启用中间层</label>
-          <select id="mwPreset" class="input" title="中间层类型：billion-context 是推荐的上下文压缩中间层，选中即自动填入其标准地址；其它任意中间层选「自定义」填基址">
-            <option value="bili">billion-context（默认）</option>
+          <select id="mwPreset" class="input" title="不设默认：显式选择 billion-context 才自动填入其标准地址（须先自行安装启动它）；任意其它中间层选「自定义」填基址">
+            <option value="">选择中间层类型…</option>
+            <option value="bili">billion-context（上下文压缩）</option>
             <option value="custom">自定义中间层</option>
           </select>
         </div>
