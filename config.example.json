@@ -31,5 +31,10 @@
     }
   },
   "proxies": {
+  },
+  "middleware": {
+    "enabled": false,
+    "base_url": "",
+    "channels": []
   }
 }

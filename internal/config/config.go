@@ -101,14 +101,76 @@ func ParseListen(s string) (Listen, error) {
 	return Listen{Host: host, Port: port}, nil
 }
 
+// Middleware 通用上游中间层（URL 前缀式）配置段。
+//
+// 语义：enabled 开启且渠道在 channels 适用列表时，该渠道的出站请求（HTTP +
+// StreamHTTP + BillingHTTP?，R35）被改写为「base_url + 原完整 URL」由中间层
+// 转发（机制见 internal/middleware）。缺省 = 关闭 = 零行为变化。
+// 只做渠道级粒度（模型级留待有真实用例再议）。
+type Middleware struct {
+	// Enabled 总开关（false = 全部直连，零行为变化）。
+	Enabled bool `json:"enabled"`
+	// BaseURL 中间层基址，可带路径段（如 http://127.0.0.1:8787/bili，
+	// 与生产环境 biliswitch 的拼接形态一致）。
+	BaseURL string `json:"base_url"`
+	// Channels 适用渠道（provider.Kind 字符串），如 ["workbuddy","traework"]；
+	// 未列出的渠道照常直连。
+	Channels []string `json:"channels"`
+}
+
+// AppliesTo 判断渠道 kind 是否套中间层：开关开启 + 基址非空 + kind 在适用列表。
+func (m Middleware) AppliesTo(kind string) bool {
+	if !m.Enabled || strings.TrimSpace(m.BaseURL) == "" {
+		return false
+	}
+	for _, ch := range m.Channels {
+		if ch == kind {
+			return true
+		}
+	}
+	return false
+}
+
+// Normalize 清洗并校验 middleware 段（Load 与面板保存共用同一判据）：
+// base_url 去空白；channels 去空白项并排序（落盘形态稳定）；
+// 开启时 base_url 必填且必须是 http/https 地址——「开启但没配地址」静默不生效
+// 会误导用户，按配置错误处理（对齐 proxies 的校验哲学）。
+func (m *Middleware) Normalize() error {
+	m.BaseURL = strings.TrimSpace(m.BaseURL)
+	channels := make([]string, 0, len(m.Channels))
+	for _, ch := range m.Channels {
+		if ch = strings.TrimSpace(ch); ch != "" {
+			channels = append(channels, ch)
+		}
+	}
+	sort.Strings(channels)
+	m.Channels = channels
+	if !m.Enabled {
+		return nil
+	}
+	if m.BaseURL == "" {
+		return fmt.Errorf("middleware.enabled: 开启中间层必须配置 base_url")
+	}
+	u, err := url.Parse(m.BaseURL)
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		return fmt.Errorf("middleware.base_url: 无效地址 %q（应为 http://host:port 或 https://host:port/路径段）", m.BaseURL)
+	}
+	switch u.Scheme {
+	case "http", "https":
+	default:
+		return fmt.Errorf("middleware.base_url: 不支持的协议 %q（仅 http/https）", u.Scheme)
+	}
+	return nil
+}
+
 // Config 顶层配置。
 type Config struct {
 	Listen    Listen `json:"listen"`
-	APIKey    string `json:"api_key"`    // 空 = 不鉴权
+	APIKey    string `json:"api_key"`        // 空 = 不鉴权
 	AdminPass string `json:"admin_password"` // 空 = 管理面板不鉴权（仅允许监听环回地址时为空）
-	AuthDir   string `json:"auth_dir"`   // ./auths
-	StateFile string `json:"state_file"` // ./data/state.json
-	Region    string `json:"region"`     // 只收 "cn"
+	AuthDir   string `json:"auth_dir"`       // ./auths
+	StateFile string `json:"state_file"`     // ./data/state.json
+	Region    string `json:"region"`         // 只收 "cn"
 
 	Cooldown struct {
 		HardCredit  string `json:"hard_credit"`   // "12h"
@@ -147,6 +209,11 @@ type Config struct {
 	// 空串或未列出的渠道直连。主要用途：给 oczen 等有区域限制的渠道走代理。
 	Proxies map[string]string `json:"proxies,omitempty"`
 
+	// Middleware 通用上游中间层（URL 前缀式）：把任意第三方中间层（如上下文
+	// 压缩代理）插到指定渠道的上游链路。零值 = 关闭 = 零行为变化。
+	// 计费/统计口径不变：中间层只改出站路径，请求仍按渠道账号池记账。
+	Middleware Middleware `json:"middleware"`
+
 	// OczenAPIKey OpenCodeZen 渠道自定义 API key（sk-...）；空 = 匿名凭证（public）。
 	// 自定义 key 有独立配额（不受匿名通道共享限流），且可调用付费模型（需账户余额）。
 	OczenAPIKey string `json:"oczen_api_key,omitempty"`
@@ -180,6 +247,9 @@ func Default() *Config {
 	c.Compat.DefaultChannel = "workbuddy"
 	c.Compat.MaxTokensCap = 32000
 	c.Proxies = map[string]string{}
+	// middleware 缺省关闭（零行为变化）；显式空 channels 保证落盘形态与
+	// config.example.json 一致（不变量 7）。
+	c.Middleware = Middleware{Enabled: false, BaseURL: "", Channels: []string{}}
 	return c
 }
 
@@ -376,6 +446,10 @@ func (c *Config) normalize() error {
 	c.Region = strings.ToLower(c.Region)
 	if c.Region != "cn" && c.Region != "global" {
 		return fmt.Errorf("region must be cn or global, got %q", c.Region)
+	}
+	// 中间层段校验（启用时 base_url 必填且为 http/https）。
+	if err := c.Middleware.Normalize(); err != nil {
+		return err
 	}
 	// 兼容旧版 checkin_hours；新版本统一规范化为 HH:MM。
 	if len(c.Schedule.CheckinTimes) == 0 {

@@ -1139,6 +1139,12 @@ function openSettings() {
   renderProxyList();
   $("oczenKeyInput").value = state.oczen_api_key || ""; // 回显脱敏值；未改动则原样回传，后端按脱敏值识别为「未变」
   $("oczenKeyInput").dataset.touched = "";
+  // 上游中间层（开关 + 基址 + 适用渠道）
+  const mw = state.middleware || {};
+  $("chkMwEnabled").checked = !!mw.enabled;
+  $("mwBaseInput").value = mw.base_url || "";
+  $("mwChannelsInput").value = (mw.channels || []).join(", ");
+  $("mwErr").textContent = "";
   // 自动签到 + 开机自启 + 临期阈值
   $("chkAutostart").checked = !!state.autostart;
   $("selExpiring").value = String(state.expiring_days || 1);
@@ -1231,7 +1237,15 @@ async function saveSettings() {
     await api("/api/config/proxies", body);
   } catch (e) { toast(e.message); return; }
 
-  // 3) 模型映射：优先读编辑器；编辑器从未展开过则用原值（保证「只改监听/渠道不碰映射」）
+  // 3) 上游中间层（开关 + 基址 + 适用渠道；开启但缺基址由后端校验报错）
+  const mwEnabled = $("chkMwEnabled").checked;
+  const mwBase = $("mwBaseInput").value.trim();
+  const mwChannels = $("mwChannelsInput").value.split(",").map((s) => s.trim()).filter(Boolean);
+  try {
+    await api("/api/config/middleware", { enabled: mwEnabled, base_url: mwBase, channels: mwChannels });
+  } catch (e) { $("mwErr").textContent = e.message; toast(e.message); return; }
+
+  // 4) 模型映射：优先读编辑器；编辑器从未展开过则用原值（保证「只改监听/渠道不碰映射」）
   let modelMap = state.compat?.model_map || {};
   if (!$("mapEditor").classList.contains("hidden")) {
     const [parsed, err] = parseMapText($("mapText").value);
@@ -1244,7 +1258,7 @@ async function saveSettings() {
     await api("/api/config/compat", { default_channel: defaultChannel, max_tokens_cap: maxTokensCap, model_map: modelMap });
   } catch (e) { toast(e.message); return; }
 
-  // 4) 临期阈值（1/2/3 天，独立端点即时生效）
+  // 5) 临期阈值（1/2/3 天，独立端点即时生效）
   const expDays = parseInt($("selExpiring").value, 10) || 1;
   if (expDays !== (state.expiring_days || 1)) {
     try {
@@ -1252,12 +1266,12 @@ async function saveSettings() {
     } catch (e) { toast(e.message); return; }
   }
 
-  // 5) API-Key（最后保存：改 Key 可能影响当前会话的后续请求）
+  // 6) API-Key（最后保存：改 Key 可能影响当前会话的后续请求）
   try {
     await api("/api/config/api_key", { key: $("keyInput").value.trim() });
   } catch (e) { toast(e.message); return; }
 
-  // 6) 密码已在第 1 步生效（会话已换新），无需再强制重登
+  // 7) 密码已在第 1 步生效（会话已换新），无需再强制重登
   toast(adminPass ? "设置已保存，管理密码已生效" : "设置已保存");
   closeSettings();
   loadState();

@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"wild-work/internal/config"
+	"wild-work/internal/middleware"
 )
 
 // proxyFor 返回渠道 kind 对应的代理 URL（未配置返回 nil = 直连）。
@@ -52,8 +53,10 @@ func SetTransportProxy(client *http.Client, proxyURL *url.URL) {
 	}
 	// 继承原 Transport 的 ResponseHeaderTimeout（未知给默认 60s），
 	// oczen 的出厂值是 120s，不能在这里被降级。
+	// 热更新链路里 Transport 可能已被中间层包装：先剥掉再断言类型，
+	// 否则断言失败会把 oczen 的 120s 静默降级成默认值。
 	rhTimeout := 60 * time.Second
-	if tr, ok := client.Transport.(*http.Transport); ok && tr != nil && tr.ResponseHeaderTimeout > 0 {
+	if tr, ok := middleware.Unwrap(client.Transport).(*http.Transport); ok && tr != nil && tr.ResponseHeaderTimeout > 0 {
 		rhTimeout = tr.ResponseHeaderTimeout
 	}
 	tr := baseTransport(rhTimeout)
@@ -70,6 +73,7 @@ func applyProxies(cfg *config.Config, targets map[string][]*http.Client) {
 		}
 	}
 }
+
 // applyProxyToKind 把 cfg 中渠道 kind 的代理套到一组 HTTP client 上（client 可含 nil 项）。
 // traework 的 StreamHTTP 与主 client 共用出厂 Transport，因此必须先切共享再传入，
 // 此处对每个 client 独立套代理；代理配置无效时返回错误（面板路径不致命仅回显）。

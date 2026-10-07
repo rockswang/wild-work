@@ -258,19 +258,24 @@ func main() {
 	// ⚠️ 只改 HTTP（非流式）的 Timeout。
 	// **不要**给 glmUp.StreamHTTP 设 Timeout —— 流式请求一旦有整体超时，
 	// 长回答会在超时点被掐断且无终止帧（实测 2026-09-27 触发 5 次）。
-	// 两者共用同一 Transport，故代理只需套 HTTP 即可（见下方 applyProxies）。
+	// 两者出厂共用同一 Transport（下方先切独立再统一套代理/中间层，见 applyUpstreamChain）。
 	glmUp.HTTP.Timeout = time.Duration(cfg.Upstream.TimeoutSeconds) * time.Second
 
-	// 单渠道上游代理：config.proxies 按 kind 套到各渠道 HTTP client 上（未配置 = 直连）。
-	// traework / glm 的 StreamHTTP 与主 client 共用出厂 Transport，先切独立再套代理，
-	// 否则热更新代理时会把非流式 client 的 Transport 一起替换
-	// （且 SetTransportProxy 会新建 Transport，只套一个会导致另一个漏掉代理）。
+	// traework / glm 的 StreamHTTP 与主 client 共用出厂 Transport，先切独立再套
+	// 代理/中间层，避免共享底座在热更新时被半替换（SetTransportProxy 新建 Transport，
+	// 只套一个会让流式漏掉代理，见 R35 与下方 upstreamClients）。
 	trUp.StreamHTTP.Transport = trUp.HTTP.Transport
 	glmUp.StreamHTTP.Transport = glmUp.HTTP.Transport
-	applyProxies(cfg, map[string][]*http.Client{
+	// 单渠道上游代理与通用中间层共用的装配目标表：kind → 该渠道全部 HTTP client。
+	// R35：HTTP / BillingHTTP? / StreamHTTP 必须一起传——SetTransportProxy 与
+	// 中间层包装都会整体替换 Transport，只套一个会让另一个（通常流式）漏掉。
+	// 启动（下方 applyUpstreamChain）与两处热更新（SetProxySyncer /
+	// SetMiddlewareSyncer）共用同一张表，杜绝两处清单漂移。
+	upstreamClients := map[string][]*http.Client{
 		provider.WorkBuddy.String():   {wbUp.HTTP, wbUp.BillingHTTP, wbUp.StreamHTTP},
 		provider.WorkBuddyAI.String(): {wbaUp.HTTP, wbaUp.StreamHTTP},
 		provider.TraeWork.String():    {trUp.HTTP, trUp.StreamHTTP},
+		provider.TraeCode.String():    {trCodeUp.HTTP, trCodeUp.StreamHTTP},
 		provider.Qoder.String():       {qdUp.HTTP, qdUp.StreamHTTP},
 		provider.QoderCN.String():     {qcnUp.HTTP, qcnUp.StreamHTTP},
 		provider.QoderCOM.String():    {qcmUp.HTTP, qcmUp.StreamHTTP},
@@ -280,9 +285,12 @@ func main() {
 		provider.Loomy.String():       {lmUp.HTTP, lmUp.StreamHTTP},
 		provider.Oczen.String():       {ocUp.HTTP, ocUp.StreamHTTP},
 		// glm 两个 client 都要传（SetTransportProxy 会**新建** Transport，
-		// 只套 HTTP 会让 StreamHTTP 仍走直连（代理对流式不生效）。
+		// 只套 HTTP 会让 StreamHTTP 仍走直连（代理/中间层对流式不生效）。
 		provider.GLM.String(): {glmUp.HTTP, glmUp.StreamHTTP},
-	})
+	}
+	// 铺设出站链路：先按 config.proxies 重建代理底座，再按 config.middleware
+	// 给适用渠道套中间层包装（见 cmd/wild-work/middleware.go）。
+	applyUpstreamChain(cfg, upstreamClients)
 	checkinMinutes, err := config.ParseClockTimes(cfg.Schedule.CheckinTimes)
 	if err != nil {
 		fatal("解析签到时间失败：%v", err)
@@ -468,22 +476,20 @@ func main() {
 	appInst.SetCompatSyncer(func(defaultChannel string, maxTokensCap int, modelMap map[string]string) {
 		compat.SetCompat(defaultChannel, maxTokensCap, modelMap, channels)
 	})
-	// 面板保存代理配置时热更新各渠道 HTTP client（重建 Transport，无需重启）
+	// 面板保存代理配置时热更新各渠道 HTTP client（重建 Transport，无需重启）。
+	// 必须走完整链路（applyUpstreamChain）：只重铺代理会把已开启的中间层包装
+	// 静默弄丢（SetTransportProxy 每轮新建 Transport）。
 	appInst.SetProxySyncer(func(proxies map[string]string) {
 		next := *cfg
 		next.Proxies = proxies
-		applyProxies(&next, map[string][]*http.Client{
-			provider.WorkBuddy.String():   {wbUp.HTTP, wbUp.BillingHTTP, wbUp.StreamHTTP},
-			provider.WorkBuddyAI.String(): {wbaUp.HTTP, wbaUp.StreamHTTP},
-			provider.TraeWork.String():    {trUp.HTTP, trUp.StreamHTTP},
-			provider.Qoder.String():       {qdUp.HTTP, qdUp.StreamHTTP},
-			provider.QoderCN.String():     {qcnUp.HTTP, qcnUp.StreamHTTP},
-			provider.QoderCOM.String():    {qcmUp.HTTP, qcmUp.StreamHTTP},
-			provider.QwenWork.String():    {qwUp.HTTP, qwUp.StreamHTTP},
-			provider.Oczen.String():       {ocUp.HTTP, ocUp.StreamHTTP},
-			// glm 两个 client 都要传（同启动路径的理由：SetTransportProxy 新建 Transport）
-			provider.GLM.String(): {glmUp.HTTP, glmUp.StreamHTTP},
-		})
+		applyUpstreamChain(&next, upstreamClients)
+	})
+	// 面板保存中间层配置时热更新：完整重铺出站链路（代理底座 + 中间层包装）。
+	// 同理不能只套中间层：不重建底座就无法「关闭中间层」（旧包装残留）。
+	appInst.SetMiddlewareSyncer(func(mw config.Middleware) {
+		next := *cfg
+		next.Middleware = mw
+		applyUpstreamChain(&next, upstreamClients)
 	})
 	// 面板保存 oczen key 后热更新渠道凭证；启动时也应用一次配置中的初始 key
 	appInst.SetOczenSyncer(ocUp.SetAPIKey)

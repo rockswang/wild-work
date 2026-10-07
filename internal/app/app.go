@@ -122,6 +122,10 @@ type App struct {
 	// 由 main.go 注入；nil 时仅写配置不热更。
 	proxySyncer func(proxies map[string]string)
 
+	// middlewareSyncer 面板保存 middleware 后重铺各渠道出站链路（热更新中间层）。
+	// 由 main.go 注入；nil 时仅写配置不热更（下次启动生效）。
+	middlewareSyncer func(mw config.Middleware)
+
 	// oczenSyncer 面板保存 oczen key 后写入渠道 client（热更新凭证）。
 	// 由 main.go 注入；nil 时仅写配置不热更。
 	oczenSyncer func(key string)
@@ -1788,6 +1792,9 @@ func (a *App) SetCompatSyncer(fn func(defaultChannel string, maxTokensCap int, m
 // SetProxySyncer 注入代理热更新回调（由 main.go 注入：重新套各渠道 HTTP client）。
 func (a *App) SetProxySyncer(fn func(proxies map[string]string)) { a.proxySyncer = fn }
 
+// SetMiddlewareSyncer 注入中间层热更新回调（由 main.go 注入：重铺各渠道出站链路）。
+func (a *App) SetMiddlewareSyncer(fn func(mw config.Middleware)) { a.middlewareSyncer = fn }
+
 // SetOczenSyncer 注入 oczen key 热更新回调（由 main.go 注入：写入渠道 client）。
 func (a *App) SetOczenSyncer(fn func(key string)) { a.oczenSyncer = fn }
 
@@ -1875,6 +1882,49 @@ func (a *App) SetProxies(proxies map[string]string, oczenKey string) error {
 		}
 		sort.Strings(ks)
 		log.Printf("上游代理已更新：%s", strings.Join(ks, ", "))
+	}
+	return nil
+}
+
+// SetMiddleware 保存通用上游中间层配置（config.middleware 段）并热更新。
+// 指针参数区分「未携带」与「显式写入」：nil = 保持现值（与 listen 的
+// admin_password 同一约定）；校验判据与 config.Load 共用（Normalize）。
+func (a *App) SetMiddleware(enabled *bool, baseURL *string, channels *[]string) error {
+	a.mu.Lock()
+	mw := a.cfg.Middleware
+	if enabled != nil {
+		mw.Enabled = *enabled
+	}
+	if baseURL != nil {
+		mw.BaseURL = strings.TrimSpace(*baseURL)
+	}
+	if channels != nil {
+		clean := make([]string, 0, len(*channels))
+		for _, ch := range *channels {
+			if ch = strings.TrimSpace(ch); ch != "" {
+				clean = append(clean, ch)
+			}
+		}
+		sort.Strings(clean)
+		mw.Channels = clean
+	}
+	if err := mw.Normalize(); err != nil {
+		a.mu.Unlock()
+		return err
+	}
+	a.cfg.Middleware = mw
+	err := config.Save(a.cfg, a.cfgPath)
+	a.mu.Unlock()
+	if err != nil {
+		return err
+	}
+	if a.middlewareSyncer != nil {
+		a.middlewareSyncer(mw)
+	}
+	if mw.Enabled {
+		log.Printf("上游中间层已更新：enabled=on base_url=%q channels=%s", mw.BaseURL, strings.Join(mw.Channels, ", "))
+	} else {
+		log.Printf("上游中间层已关闭（全部直连）")
 	}
 	return nil
 }
@@ -1988,6 +2038,13 @@ type State struct {
 	// Proxies 单渠道上游代理（只读，保存走 POST /api/config/proxies）。
 	Proxies map[string]string `json:"proxies"`
 
+	// Middleware 通用上游中间层（只读，保存走 POST /api/config/middleware）。
+	Middleware struct {
+		Enabled  bool     `json:"enabled"`
+		BaseURL  string   `json:"base_url"`
+		Channels []string `json:"channels"`
+	} `json:"middleware"`
+
 	// OczenAPIKey OpenCodeZen 自定义 API key（只读脱敏回显：sk-xxx…尾4位；保存走同端点）。
 	OczenAPIKey string `json:"oczen_api_key"`
 }
@@ -2035,6 +2092,13 @@ func (a *App) GetState() State {
 	st.Proxies = map[string]string{}
 	for k, v := range a.cfg.Proxies {
 		st.Proxies[k] = v
+	}
+	// 中间层段只读回显（保存走 POST /api/config/middleware）
+	st.Middleware.Enabled = a.cfg.Middleware.Enabled
+	st.Middleware.BaseURL = a.cfg.Middleware.BaseURL
+	st.Middleware.Channels = a.cfg.Middleware.Channels
+	if st.Middleware.Channels == nil {
+		st.Middleware.Channels = []string{} // 前端免判 null
 	}
 	// oczen key 脱敏回显：仅露首 5 + 尾 4（空则原样空串）
 	st.OczenAPIKey = maskKey(a.cfg.OczenAPIKey)
@@ -2432,6 +2496,21 @@ func (a *App) HandleAPI(mux *http.ServeMux) {
 			key = *req.OczenAPIKey
 		}
 		if err := a.SetProxies(req.Proxies, key); err != nil {
+			apiError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+	})
+	// 通用上游中间层（URL 前缀式）：{enabled?, base_url?, channels?}——
+	// 指针语义同 listen.admin_password：未携带 = 保持现值。
+	mux.HandleFunc("POST /api/config/middleware", func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Enabled  *bool     `json:"enabled"`
+			BaseURL  *string   `json:"base_url"`
+			Channels *[]string `json:"channels"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		if err := a.SetMiddleware(req.Enabled, req.BaseURL, req.Channels); err != nil {
 			apiError(w, http.StatusBadRequest, err.Error())
 			return
 		}

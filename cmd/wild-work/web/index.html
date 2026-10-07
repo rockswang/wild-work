@@ -355,6 +355,25 @@
         <div class="hint" id="proxyErr" style="color:var(--danger)"></div>
       </div>
 
+      <!-- 通用上游中间层（URL 前缀式） -->
+      <div class="cfg-section">
+        <div class="cfg-heading">上游中间层</div>
+        <div class="hint" style="margin:0 0 8px">把第三方中间层（如上下文压缩代理）插到指定渠道的上游链路：出站请求改写为「基址 + 原完整 URL」由中间层转发。账号、计费与统计口径不变。</div>
+        <div class="row">
+          <label class="lbl wide" title="总开关：关闭 = 全部渠道直连，零行为变化">启用中间层</label>
+          <label class="switch"><input type="checkbox" id="chkMwEnabled"><span class="slider"></span></label>
+        </div>
+        <div class="row" style="margin-top:8px">
+          <label class="lbl wide">基址 base_url</label>
+          <input id="mwBaseInput" class="input grow" spellcheck="false" placeholder="如 http://127.0.0.1:8787/bili（可带路径段；开启时必填）">
+        </div>
+        <div class="row" style="margin-top:8px">
+          <label class="lbl wide" title="逗号分隔的渠道名（模型前缀），如 workbuddy, traework">适用渠道</label>
+          <input id="mwChannelsInput" class="input grow" spellcheck="false" placeholder="逗号分隔，如 workbuddy, traework（留空 = 不适用任何渠道）">
+        </div>
+        <div class="hint" id="mwErr" style="color:var(--danger)"></div>
+      </div>
+
     </div>
     <div class="modal-actions">
       <button class="btn small" id="btnSettingsCancel">取消</button>
