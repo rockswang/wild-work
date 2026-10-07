@@ -110,7 +110,8 @@ func ParseListen(s string) (Listen, error) {
 type Middleware struct {
 	// Enabled 全局总开关（false = 全部直连，零行为变化）。
 	Enabled bool `json:"enabled"`
-	// BaseURL 中间层基址，可带路径段（billion-context 默认 http://127.0.0.1:8787）。
+	// BaseURL 中间层基址，可带路径段（billion-context 标准接入形态 http://127.0.0.1:8787/bili
+	// ——URL 前缀式转发，裸根 8787 是其 Web UI，不转发）。
 	BaseURL string `json:"base_url"`
 }
 

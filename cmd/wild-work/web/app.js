@@ -1102,9 +1102,11 @@ function syncListenRisk() {
   $("adminPassReq").classList.toggle("hidden", !needPass);
 }
 
-// MW_BILI_DEFAULT billion-context（bili）中间层的默认本机地址（其默认端口）。
-// 仅作 UI 预填使用，非硬编码服务端默认——用户装在其它地址可手改。
-const MW_BILI_DEFAULT = "http://127.0.0.1:8787";
+// MW_BILI_DEFAULT billion-context（bili）中间层的标准接入地址（URL 前缀形态：
+// 官方 README「Option 3 — URL change」，上游完整 URL 嵌在 /bili/ 之后的路径里；
+// 裸根 8787 是其 Web UI/状态页，不转发请求）。仅作 UI 预填使用，非硬编码服务端
+// 默认——用户装在其它地址可手改。
+const MW_BILI_DEFAULT = "http://127.0.0.1:8787/bili";
 
 function openSettings() {
   // 监听
