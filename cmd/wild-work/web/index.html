@@ -41,6 +41,7 @@
       <button class="mtab active" data-mtab="accounts">账号管理</button>
       <button class="mtab" data-mtab="usage">用量与流水 <span class="ver" id="usageSince"></span></button>
       <button class="mtab" data-mtab="stats">运行统计</button>
+      <button class="mtab" data-mtab="custom">自定义模型</button>
     </div>
 
     <!-- ===== Tab: 账号管理 ===== -->
@@ -138,6 +139,25 @@
       <div class="st-sec-head"><span>运行日志</span><span class="st-sec-info">app.log 最近 200 行 · 15s 刷新</span></div>
       <div class="st-logbox" id="stApplog"><div class="st-empty">加载中…</div></div>
     </div>
+    </div>
+
+    <!-- ===== Tab: 自定义模型（第三方 OpenAI 兼容源直转） ===== -->
+    <div class="mtab-body hidden" id="mtabCustom">
+    <div class="panel-head">
+      <h2>自定义模型</h2>
+      <div class="pa-group">
+        <button class="btn small" id="btnAddCmSource">＋ API 源</button>
+        <button class="btn small primary" id="btnAddCmModel">＋ 模型</button>
+      </div>
+    </div>
+    <div class="hint" style="margin:0 0 10px">
+      配置第三方 OpenAI 兼容 API 源，客户端用<b>裸模型名</b>请求时直转第三方（不经渠道账号池）；
+      带渠道前缀的请求（如 <code>workbuddy/xx</code>）永远走渠道，不受影响。保存即生效。
+    </div>
+    <div class="cfg-heading">API 源</div>
+    <div id="cmSourceList"></div>
+    <div class="cfg-heading" style="margin-top:16px">模型</div>
+    <div id="cmModelList"></div>
     </div>
   </section>
 
@@ -374,6 +394,72 @@
     <div class="modal-actions">
       <button class="btn small" id="btnRenameCancel">取消</button>
       <button class="btn small primary" id="btnRenameSave">保存</button>
+    </div>
+  </div>
+</div>
+
+<!-- 自定义模型：API 源编辑弹层 -->
+<div class="overlay hidden" id="cmSourceOverlay">
+  <div class="modal">
+    <div class="modal-title" id="cmSourceTitle">添加 API 源</div>
+    <div class="modal-body">
+      <div class="row">
+        <label class="lbl wide">名称</label>
+        <input id="cmSrcName" class="input grow" spellcheck="false" placeholder="唯一名称，如 deepseek（创建后不可改）">
+      </div>
+      <div class="row">
+        <label class="lbl wide">Base URL</label>
+        <input id="cmSrcURL" class="input grow" spellcheck="false" placeholder="https://api.deepseek.com 或 https://api.deepseek.com/v1">
+      </div>
+      <div class="row">
+        <label class="lbl wide">API Key</label>
+        <input id="cmSrcKey" class="input grow" spellcheck="false" autocomplete="off" placeholder="第三方 API Key（转发时作 Bearer）">
+      </div>
+      <div class="row" style="align-items:center">
+        <label class="lbl wide">启用</label>
+        <label class="switch"><input type="checkbox" id="cmSrcEnabled" checked><span class="slider"></span></label>
+        <span class="hint" style="margin-left:8px">停用后其下模型全部分流失效（配置保留）</span>
+      </div>
+      <div class="hint" id="cmSourceErr" style="color:var(--danger)"></div>
+    </div>
+    <div class="modal-actions">
+      <button class="btn small" id="btnCmSourceCancel">取消</button>
+      <button class="btn small primary" id="btnCmSourceSave">保存</button>
+    </div>
+  </div>
+</div>
+
+<!-- 自定义模型：模型编辑弹层 -->
+<div class="overlay hidden" id="cmModelOverlay">
+  <div class="modal">
+    <div class="modal-title" id="cmModelTitle">添加模型</div>
+    <div class="modal-body">
+      <div class="row">
+        <label class="lbl wide">模型名</label>
+        <input id="cmModName" class="input grow" spellcheck="false" placeholder="客户端请求的裸名，如 deepseek-chat（创建后不可改）">
+      </div>
+      <div class="row">
+        <label class="lbl wide">API 源</label>
+        <select id="cmModSource" class="select"></select>
+      </div>
+      <div class="row">
+        <label class="lbl wide" title="非空时转发请求的 model 字段改写为它；留空 = 用模型名原样">上游 ID</label>
+        <input id="cmModUpstream" class="input grow" spellcheck="false" placeholder="可选；转发时 model 字段改写为它">
+      </div>
+      <div class="row">
+        <label class="lbl wide">备注</label>
+        <input id="cmModNote" class="input grow" spellcheck="false" placeholder="可选">
+      </div>
+      <div class="row" style="align-items:center">
+        <label class="lbl wide">启用</label>
+        <label class="switch"><input type="checkbox" id="cmModEnabled" checked><span class="slider"></span></label>
+        <span class="hint" style="margin-left:8px">停用后请求照旧走渠道原路径</span>
+      </div>
+      <div class="hint" id="cmModelError" style="color:var(--danger)"></div>
+    </div>
+    <div class="modal-actions">
+      <button class="btn small" id="btnCmModelCancel">取消</button>
+      <button class="btn small primary" id="btnCmModelSave">保存</button>
     </div>
   </div>
 </div>

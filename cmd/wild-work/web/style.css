@@ -896,3 +896,11 @@ body {
   #mtabStats .st-ex-row { grid-template-columns: 24px 88px 120px 76px 68px 1fr; font-size: 11px; }
   #mtabStats .st-ab-row { grid-template-columns: 24px 64px 88px 110px 1fr 76px 64px; font-size: 11px; }
 }
+
+/* ---------- 自定义模型面板（第四个主 tab） ---------- */
+/* 名称/Key 等标识列用等宽字体，与费率表/流水口径一致 */
+#mtabCustom .cm-mono { font-family: ui-monospace, Consolas, monospace; font-size: 12.5px; }
+/* Base URL / 备注列允许折行，长地址不撑爆表格 */
+#mtabCustom .cm-wrap { max-width: 240px; word-break: break-all; }
+/* 操作列两个图标按钮排一行、右侧对齐 */
+#mtabCustom td .icon-op { vertical-align: middle; }
