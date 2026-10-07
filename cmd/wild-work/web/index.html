@@ -361,7 +361,9 @@
         <div class="hint" style="margin:0 0 8px">
           在本工具与上游渠道之间插入一个第三方中间层，典型用途是<b>上下文压缩</b>：
           请求先交给中间层处理（例如把超长上下文压缩后再转发，节省积分），再由它转发给上游。
-          中间层服务需<b>自行安装并启动</b>（本工具不包含、也不管理它）；账号、计费与统计口径不变。
+          推荐 <a href="https://github.com/ranxianglei/billion-context" target="_blank" rel="noopener" title="项目主页：安装说明与使用文档">billion-context ↗</a>——前往项目主页按其说明<b>自行安装并启动</b>（本工具不包含、也不管理它），
+          其标准地址 <code>http://127.0.0.1:8787/bili</code> 会在下方自动填好；其它任意中间层选「自定义」填基址。
+          账号、计费与统计口径不变。
         </div>
         <div class="row">
           <label class="switch"><input type="checkbox" id="chkMwEnabled"><span class="slider"></span></label>
