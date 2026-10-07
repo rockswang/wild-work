@@ -1102,6 +1102,10 @@ function syncListenRisk() {
   $("adminPassReq").classList.toggle("hidden", !needPass);
 }
 
+// MW_BILI_DEFAULT billion-context（bili）中间层的标准本机地址（其默认端口 + 专属路径段）。
+// 仅作 UI 预填使用，非硬编码服务端默认——用户装在其它地址可手改。
+const MW_BILI_DEFAULT = "http://127.0.0.1:8787/bili";
+
 function openSettings() {
   // 监听
   $("inPort").value = state.listen_port;
@@ -1139,11 +1143,14 @@ function openSettings() {
   renderProxyList();
   $("oczenKeyInput").value = state.oczen_api_key || ""; // 回显脱敏值；未改动则原样回传，后端按脱敏值识别为「未变」
   $("oczenKeyInput").dataset.touched = "";
-  // 上游中间层（开关 + 基址 + 适用渠道）
+  // 上游中间层（预设 + 开关 + 基址 + 适用渠道）
   const mw = state.middleware || {};
   $("chkMwEnabled").checked = !!mw.enabled;
   $("mwBaseInput").value = mw.base_url || "";
   $("mwChannelsInput").value = (mw.channels || []).join(", ");
+  // 预设推导：基址为空（未配置，默认按 billion-context）或恰为 bili 标准地址 → bili 预设；其余 → 自定义
+  const mwBaseNow = (mw.base_url || "").trim();
+  $("mwPreset").value = (!mwBaseNow || mwBaseNow === MW_BILI_DEFAULT) ? "bili" : "custom";
   $("mwErr").textContent = "";
   // 自动签到 + 开机自启 + 临期阈值
   $("chkAutostart").checked = !!state.autostart;
@@ -1462,6 +1469,17 @@ function bind() {
   };
   // 顶栏齿轮进入统一设置（点击地址/Key 文本仍为复制）
   $("btnSettings").onclick = openSettings;
+
+  // 上游中间层预设：选 billion-context 即自动填其标准地址（可手改）；自定义保持现值由用户自填
+  $("mwPreset").onchange = () => {
+    if ($("mwPreset").value === "bili") $("mwBaseInput").value = MW_BILI_DEFAULT;
+  };
+  // 开启中间层而基址还空着：按当前预设补默认地址，省一次手填（bili 预设才补）
+  $("chkMwEnabled").onchange = () => {
+    if ($("chkMwEnabled").checked && !$("mwBaseInput").value.trim() && $("mwPreset").value === "bili") {
+      $("mwBaseInput").value = MW_BILI_DEFAULT;
+    }
+  };
 
   // 统一设置弹层
   $("btnSettingsSave").onclick = saveSettings;
