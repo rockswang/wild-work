@@ -211,3 +211,76 @@ func TestMiddlewareEnableBlockedWhenServiceDown(t *testing.T) {
 		t.Fatalf("关闭不应被探测拦下，实际 %d: %s", w.Code, w.Body.String())
 	}
 }
+
+// ptrBool/ptrStr 构造指针入参（SetMiddleware 的「未携带=nil」语义用）。
+func ptrBool(b bool) *bool    { return &b }
+func ptrStr(s string) *string { return &s }
+
+// mwLive 从 GET /api/middleware/status 解出实时状态。
+func mwLive(t *testing.T, mux *http.ServeMux) MiddlewareLiveStatus {
+	t.Helper()
+	var st MiddlewareLiveStatus
+	if err := json.Unmarshal(doReq(mux, "GET", "/api/middleware/status", "", nil).Body.Bytes(), &st); err != nil {
+		t.Fatal(err)
+	}
+	return st
+}
+
+// TestMiddlewareLiveStatus GET /api/middleware/status：未启用只回 enabled=false（不探测）；
+// 启用后在线时回 online/version/web_ui（billion-context 在 <根>/__bili/status 自报版本）；
+// 无版本约定的服务 version 留空；死地址 online=false；关闭后复位。
+func TestMiddlewareLiveStatus(t *testing.T) {
+	a := newPanelApp(t, "127.0.0.1", "")
+	mux := panelMux(a)
+
+	// 1) 未启用：仅 enabled=false，不探测不填 web_ui
+	if st := mwLive(t, mux); st.Enabled || st.Online || st.WebUI != "" || st.Version != "" {
+		t.Fatalf("未启用应只回 enabled=false, got %+v", st)
+	}
+
+	// 2) bili 同款服务：根回状态 JSON + __bili/status 自报版本
+	mwSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/__bili/status" {
+			_, _ = w.Write([]byte(`{"version":"0.1.186"}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer mwSrv.Close()
+	if err := a.SetMiddleware(ptrBool(true), ptrStr(mwSrv.URL+"/bili")); err != nil {
+		t.Fatal(err)
+	}
+	st := mwLive(t, mux)
+	if !st.Enabled || !st.Online || st.Version != "0.1.186" || st.WebUI != mwSrv.URL+"/" {
+		t.Fatalf("在线态应回版本与面板入口, got %+v", st)
+	}
+
+	// 3) 无版本约定的中间层（__bili/status 404）：version 留空但 online=true
+	plain := httptest.NewServer(http.NotFoundHandler())
+	defer plain.Close()
+	if err := a.SetMiddleware(nil, ptrStr(plain.URL)); err != nil {
+		t.Fatal(err)
+	}
+	if st = mwLive(t, mux); !st.Online || st.Version != "" || st.WebUI != plain.URL+"/" {
+		t.Fatalf("无版本约定应 version 留空, got %+v", st)
+	}
+
+	// 4) 死地址（直改配置绕过启用前探测，模拟「服务中途挂掉」）：online=false
+	dead := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	deadURL := dead.URL
+	dead.Close()
+	a.mu.Lock()
+	a.cfg.Middleware = config.Middleware{Enabled: true, BaseURL: deadURL}
+	a.mu.Unlock()
+	if st = mwLive(t, mux); st.Online || st.Version != "" || st.WebUI == "" {
+		t.Fatalf("死地址应 online=false, got %+v", st)
+	}
+
+	// 5) 关闭复位：enabled=false，其余零值
+	if err := a.SetMiddleware(ptrBool(false), nil); err != nil {
+		t.Fatal(err)
+	}
+	if st = mwLive(t, mux); st.Enabled || st.Online {
+		t.Fatalf("关闭后应只回 enabled=false, got %+v", st)
+	}
+}

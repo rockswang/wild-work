@@ -41,6 +41,11 @@
       <button class="mtab active" data-mtab="accounts">账号管理</button>
       <button class="mtab" data-mtab="usage">用量与流水 <span class="ver" id="usageSince"></span></button>
       <button class="mtab" data-mtab="stats">运行统计</button>
+      <!-- 中间层状态条：启用且基址为 billion-context 标准地址时显示（tab 行最右） -->
+      <div class="mtab-mw hidden" id="mwStatusBar" title="全部渠道的出站请求正在经上下文压缩插件转发">
+        <span id="mwStatusText"></span>
+        <button type="button" class="btn small" id="mwPanelBtn" title="打开中间层控制面板（billion-context：会话、缓存命中率、配置编辑器）">bili 面板 ↗</button>
+      </div>
     </div>
 
     <!-- ===== Tab: 账号管理 ===== -->

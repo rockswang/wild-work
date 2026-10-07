@@ -530,6 +530,11 @@ body {
 .mtab { border: 0; background: transparent; padding: 10px 18px; font-size: 15px; font-weight: 600; cursor: pointer; color: var(--muted); border-bottom: 2px solid transparent; margin-bottom: -1px; }
 .mtab.active { color: var(--primary); border-bottom-color: var(--primary); }
 .mtab .ver { font-size: 11px; color: var(--muted); font-weight: 400; margin-left: 4px; }
+/* 中间层状态条（tab 行最右；启用且选中 billion-context 时由 JS 摘掉 hidden） */
+.mtab-mw { margin-left: auto; align-self: center; display: flex; align-items: center; gap: 8px; padding: 0 2px; font-size: 12px; }
+.mtab-mw .mw-ok { color: var(--ok); font-weight: 600; }
+.mtab-mw .mw-err { color: var(--danger); font-weight: 600; }
+.mtab-mw .btn.small { padding: 4px 10px; font-size: 12px; }
 
 .pager { display: flex; align-items: center; gap: 12px; margin: 10px 0 4px; justify-content: center; }
 .pager .pg-info { font-size: 12px; color: var(--muted); min-width: 48px; text-align: center; }

@@ -1886,22 +1886,79 @@ func (a *App) SetProxies(proxies map[string]string, oczenKey string) error {
 	return nil
 }
 
+// middlewareRoot 解析中间层基址的服务根（scheme://host[:port]/，剥掉路径段）。
+func middlewareRoot(baseURL string) (string, error) {
+	u, err := url.Parse(baseURL)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") {
+		return "", fmt.Errorf("中间层基址无法解析: %s", baseURL)
+	}
+	return u.Scheme + "://" + u.Host + "/", nil
+}
+
 // probeMiddlewareService 探测中间层服务是否已启动：GET 基址的服务根
 // （scheme://host[:port]/，剥掉路径段——billion-context 的根即返回其状态 JSON）。
 // 任意 HTTP 响应（含 404/403）都证明监听者活着；连接拒绝/超时才视为未启动。
 // 3s 超时：本机中间层应为毫秒级，不值得为异常网络卡面板更久。
 func probeMiddlewareService(baseURL string) error {
-	u, err := url.Parse(baseURL)
-	if err != nil || (u.Scheme != "http" && u.Scheme != "https") {
-		return fmt.Errorf("中间层基址无法解析: %s", baseURL)
+	root, err := middlewareRoot(baseURL)
+	if err != nil {
+		return err
 	}
-	root := u.Scheme + "://" + u.Host + "/"
 	resp, err := (&http.Client{Timeout: 3 * time.Second}).Get(root)
 	if err != nil {
 		return fmt.Errorf("未检测到中间层服务（%s）——请先安装并启动中间层再启用（billion-context 见项目主页 https://github.com/ranxianglei/billion-context）", root)
 	}
 	resp.Body.Close()
 	return nil
+}
+
+// MiddlewareLiveStatus 中间层实时状态（GET /api/middleware/status，面板状态条用）。
+type MiddlewareLiveStatus struct {
+	Enabled bool   `json:"enabled"`
+	Online  bool   `json:"online"`
+	Version string `json:"version"` // 服务自报版本（无版本约定的中间层留空）
+	WebUI   string `json:"web_ui"`  // 服务根地址（控制面板入口；billion-context 的根即其 Web UI）
+}
+
+// MiddlewareLiveStatus 探测中间层实时状态：探测在锁外进行（最坏 ~6s，面板单次
+// 拉取可接受）。在线时再尝试读版本——billion-context 约定在 <根>/__bili/status
+// 暴露 {"version":…}；其它中间层无此约定则 version 留空（面板仍显示在线状态）。
+func (a *App) MiddlewareLiveStatus() MiddlewareLiveStatus {
+	a.mu.Lock()
+	mw := a.cfg.Middleware
+	a.mu.Unlock()
+	st := MiddlewareLiveStatus{Enabled: mw.Enabled}
+	if !mw.Enabled {
+		return st
+	}
+	root, err := middlewareRoot(mw.BaseURL)
+	if err != nil {
+		return st
+	}
+	st.WebUI = root
+	if probeMiddlewareService(mw.BaseURL) != nil {
+		return st
+	}
+	st.Online = true
+	st.Version = fetchMiddlewareVersion(root)
+	return st
+}
+
+// fetchMiddlewareVersion 读取中间层自报的版本号（3s 超时，失败一律留空——
+// 版本只是展示便利，不是任何行为的判据）。
+func fetchMiddlewareVersion(root string) string {
+	resp, err := (&http.Client{Timeout: 3 * time.Second}).Get(root + "__bili/status")
+	if err != nil {
+		return ""
+	}
+	defer resp.Body.Close()
+	var st struct {
+		Version string `json:"version"`
+	}
+	if json.NewDecoder(resp.Body).Decode(&st) != nil {
+		return ""
+	}
+	return st.Version
 }
 
 // SetMiddleware 保存通用上游中间层配置（config.middleware 段，全局开关）并热更新。
@@ -2526,6 +2583,10 @@ func (a *App) HandleAPI(mux *http.ServeMux) {
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+	})
+	// 中间层实时状态（主面板 tab 行最右的状态条拉取；探测/读版本在方法内完成）。
+	mux.HandleFunc("GET /api/middleware/status", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, http.StatusOK, a.MiddlewareLiveStatus())
 	})
 	mux.HandleFunc("POST /api/config/oczen_test", func(w http.ResponseWriter, r *http.Request) {
 		var req struct {

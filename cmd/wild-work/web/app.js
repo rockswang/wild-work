@@ -102,6 +102,27 @@ async function loadState() {
   render();
 }
 
+// refreshMwStatus 主面板 tab 行最右的中间层状态条：启用且基址为 billion-context
+// 标准地址时显示「版本 · 在线」（离线变红），附「bili 面板 ↗」跳转其 Web UI。
+async function refreshMwStatus() {
+  const bar = $("mwStatusBar");
+  try {
+    const st = await api("/api/middleware/status");
+    const base = (state.middleware?.base_url || "").trim();
+    if (!st.enabled || base !== MW_BILI_DEFAULT) { bar.classList.add("hidden"); return; }
+    bar.classList.remove("hidden");
+    const txt = $("mwStatusText");
+    if (st.online) {
+      txt.textContent = "billion-context" + (st.version ? " v" + st.version : "") + " · 在线";
+      txt.className = "mw-ok";
+    } else {
+      txt.textContent = "billion-context 未在线";
+      txt.className = "mw-err";
+    }
+    $("mwPanelBtn").onclick = () => window.open(st.web_ui || "http://127.0.0.1:8787", "_blank", "noopener");
+  } catch { bar.classList.add("hidden"); } // 探测接口异常（如离线被守卫拦下）一律隐藏
+}
+
 async function loadFees() {
   try {
     const fees = await api("/api/fees");
@@ -1282,6 +1303,7 @@ async function saveSettings() {
   toast(adminPass ? "设置已保存，管理密码已生效" : "设置已保存");
   closeSettings();
   loadState();
+  refreshMwStatus(); // 中间层开/关或换基址后，主面板状态条随之亮/灭
 }
 
 // clearAdminPassword 「清除」按钮：关闭面板鉴权（仅环回监听允许，后端会校验）。
@@ -1531,6 +1553,7 @@ function bind() {
     authSession = st.auth_session || "";
   } catch (e) { /* 探针失败走下面的常规加载（如代理拦截） */ }  loadUsage(); // 页面加载即拉取（首次渲染自动刷新，不依赖手动点击）
   await loadState(); // 状态瞬间返回
+  refreshMwStatus(); // 中间层状态条（启用且选中 billion-context 时显示）
   await loadFees();  // 费率表用缓存/静态兜底，秒开
   // 运行统计：统计/请求日志 30s、运行日志 15s 常驻轮询
   // （不依赖当前 tab——里程碑 toast 要在任何 tab 下及时弹出；tab 切入时另有即时拉取）
