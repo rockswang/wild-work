@@ -8,13 +8,12 @@ import (
 	"testing"
 )
 
-// TestRewriteFormAgainstBiliswitch 锁定拼接形态：与生产环境 biliswitch.Wrap
-// （prefix = TrimRight(TrimSpace(base), "/") + "/bili/"；wrapped = prefix + 原完整URL）
-// 完全同构——差异只在专属路径段 "/bili" 由 base_url 自带，本包只补分隔符 "/"。
-func TestRewriteFormAgainstBiliswitch(t *testing.T) {
-	// biliswitch.Wrap("http://127.0.0.1:8787", "https://api.trae.cn/v1/chat?x=1")
-	// = "http://127.0.0.1:8787/bili/https://api.trae.cn/v1/chat?x=1"
-	// 本包等价写法：base_url 直接带 "/bili" 路径段。
+// TestRewriteForm 锁定拼接形态：prefix = TrimRight(TrimSpace(base), "/") + "/"；
+// wrapped = prefix + 原完整 URL（含 query 原样不转义）。中间层专属路径段
+// （如 billion-context 的 "/bili"）由 base_url 自带，机制不内置路径约定。
+func TestRewriteForm(t *testing.T) {
+	// 例：base_url 带 "/bili" 路径段时，出站 URL =
+	// "http://127.0.0.1:8787/bili/https://api.trae.cn/v1/chat?x=1"
 	const target = "https://api.trae.cn/v1/chat/completions?x=1&y=%20z"
 	cases := []struct {
 		name string
@@ -89,7 +88,7 @@ func TestRoundTripRewritesAndPassesResponse(t *testing.T) {
 		t.Errorf("query 应原样保留, got %q", gotQuery)
 	}
 	if gotHost != mws.URL[len("http://"):] {
-		t.Errorf("Host 头应跟随中间层基址（同 biliswitch 字符串拼接语义）, got %q, want %q", gotHost, mws.URL[len("http://"):])
+		t.Errorf("Host 头应跟随中间层基址, got %q, want %q", gotHost, mws.URL[len("http://"):])
 	}
 	if resp.Header.Get("X-Mw-Marker") != "via-middleware" {
 		t.Error("响应头应原样透传")

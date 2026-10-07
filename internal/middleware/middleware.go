@@ -6,13 +6,12 @@
 // 响应；适用渠道与开关由 config.middleware 控制（渠道级粒度），装配见
 // cmd/wild-work/middleware.go。
 //
-// 拼接形态与生产环境 biliswitch.Wrap（bili 开关，wildwork-plus 仓库）完全一致：
+// 拼接形态（简单字符串拼接，中间层按「前缀路由 + 原样转发」实现即可）：
 //
-//	biliswitch:  TrimRight(TrimSpace(biliBase), "/") + "/bili/" + 原完整URL
-//	本包:        TrimRight(TrimSpace(baseURL), "/") + "/" + 原完整URL
+//	归一基址（去空白与尾部斜杠）+ "/" + 原完整 URL（含 query，原样不转义）
 //
-// 差异仅在中间层专属路径段（bili 的 "/bili"）——通用场景由 base_url 自带
-// （如 http://127.0.0.1:8787/bili），本包只负责归一与分隔符。
+// 中间层专属的路径段（如 billion-context 的 "/bili"）由 base_url 自带——
+// 通用机制不内置任何具体中间层的路径约定。
 //
 // 计费/统计口径：中间层只改出站路径，账号、计费、统计口径全部不变——
 // 请求仍按渠道账号池记账（token 用量由上游返回、照常入流水与运行统计）。
@@ -26,7 +25,6 @@ import (
 )
 
 // prefix 归一中间层基址（去空白与尾部斜杠）并拼上前缀分隔符 "/"。
-// 形态对齐 biliswitch.prefix（TrimRight(TrimSpace(base), "/") + "/bili/"）。
 func prefix(base string) string {
 	return strings.TrimRight(strings.TrimSpace(base), "/") + "/"
 }
@@ -37,7 +35,6 @@ func Prefixed(base, target string) bool {
 }
 
 // Rewrite 把目标 URL 包上中间层前缀，返回「中间层基址 + 原完整 URL」。
-// 拼接形态与 biliswitch.Wrap 一致：前缀 + 原完整 URL 原样拼接（含 query）。
 // target 为空或已含前缀时原样返回（幂等，防双重包裹）。
 func Rewrite(base, target string) string {
 	if target == "" || Prefixed(base, target) {
@@ -95,7 +92,7 @@ func (m *roundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
 		return nil, fmt.Errorf("上游中间层改写 URL 失败: %w", err)
 	}
 	clone.URL = u
-	// Host 头跟随新 URL（中间层基址）——与 biliswitch 字符串拼接形态的语义一致；
+	// Host 头跟随新 URL（中间层基址）——中间层按拼接形态收到的是发给它自己的请求；
 	// 真实上游地址已完整嵌在路径里，由中间层自行解析转发。
 	clone.Host = ""
 	// RequestURI 是服务端入站概念，出站请求必须为空（Clone 会原样带上）。
