@@ -391,3 +391,216 @@ func TestModelsMergeCustomEntries(t *testing.T) {
 		t.Fatal("停用源下的模型不得列出")
 	}
 }
+
+// findModelStat 在 Snapshot 的模型消耗表里找指定模型行。
+func findModelStat(t *testing.T, st *statsEngine.Stats, model string) *statsEngine.ModelStat {
+	t.Helper()
+	models := st.Snapshot(time.Now()).Models
+	for i := range models {
+		if models[i].Model == model {
+			return &models[i]
+		}
+	}
+	return nil
+}
+
+// TestCustomNonStreamUsageRecorded 非流式：响应带 usage → 进模型消耗表
+// （tokens = prompt+completion），请求日志行记 completion tokens；credit 恒 0。
+func TestCustomNonStreamUsageRecorded(t *testing.T) {
+	tp := &fakeThirdParty{respBody: `{"id":"cmpl-1","choices":[],"usage":{"prompt_tokens":5,"completion_tokens":16}}`}
+	srv := httptest.NewServer(tp)
+	defer srv.Close()
+
+	st, err := statsEngine.New(t.TempDir(), t.Logf)
+	if err != nil {
+		t.Fatalf("stats.New: %v", err)
+	}
+	store := newCustomTestStore(t, t.TempDir(), "ds", srv.URL, "ds-chat", "")
+	h := NewHandler(Config{Custom: store, Stats: st})
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
+		strings.NewReader(`{"model":"ds-chat","messages":[],"stream":false}`)))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("直转应 200，实际 %d: %s", rec.Code, rec.Body.String())
+	}
+	if rec.Body.String() != tp.respBody {
+		t.Fatalf("usage 解析不得改动响应透传:\n got  %s\n want %s", rec.Body.String(), tp.respBody)
+	}
+	hit := findModelStat(t, st, "ds-chat")
+	if hit == nil {
+		t.Fatal("usage 应计入模型消耗表（ds-chat）")
+	}
+	if hit.Reqs != 1 || hit.Tokens != 21 {
+		t.Fatalf("模型消耗应为 1 次 / 21 tokens，实际 %d / %d", hit.Reqs, hit.Tokens)
+	}
+	if hit.Credit != 0 {
+		t.Fatalf("自定义模型 credit 应恒 0，实际 %v", hit.Credit)
+	}
+	rows := st.Logs(5)
+	if len(rows) == 0 || rows[0].Tok != 16 {
+		t.Fatalf("请求日志行应记 completion tokens=16，实际 %+v", rows)
+	}
+}
+
+// TestCustomStreamUsageRecorded 流式：SSE 尾帧带 usage → 同样进模型消耗表。
+func TestCustomStreamUsageRecorded(t *testing.T) {
+	sse := "data: {\"choices\":[{\"delta\":{\"content\":\"你\"}}]}\n\n" +
+		"data: {\"choices\":[{\"delta\":{\"content\":\"好\"}}]}\n\n" +
+		"data: {\"choices\":[],\"usage\":{\"prompt_tokens\":3,\"completion_tokens\":7}}\n\n" +
+		"data: [DONE]\n\n"
+	tp := &fakeThirdParty{ct: "text/event-stream", respBody: sse}
+	srv := httptest.NewServer(tp)
+	defer srv.Close()
+
+	st, err := statsEngine.New(t.TempDir(), t.Logf)
+	if err != nil {
+		t.Fatalf("stats.New: %v", err)
+	}
+	store := newCustomTestStore(t, t.TempDir(), "ds", srv.URL, "ds-chat", "")
+	h := NewHandler(Config{Custom: store, Stats: st})
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
+		strings.NewReader(`{"model":"ds-chat","messages":[],"stream":true}`)))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("流式直转应 200，实际 %d", rec.Code)
+	}
+	if rec.Body.String() != sse {
+		t.Fatalf("SSE 应逐字节透传:\n got  %q\n want %q", rec.Body.String(), sse)
+	}
+	hit := findModelStat(t, st, "ds-chat")
+	if hit == nil {
+		t.Fatal("流式尾帧 usage 应计入模型消耗表（ds-chat）")
+	}
+	if hit.Reqs != 1 || hit.Tokens != 10 {
+		t.Fatalf("模型消耗应为 1 次 / 10 tokens，实际 %d / %d", hit.Reqs, hit.Tokens)
+	}
+	rows := st.Logs(5)
+	if len(rows) == 0 || rows[0].Tok != 7 {
+		t.Fatalf("请求日志行应记 completion tokens=7，实际 %+v", rows)
+	}
+}
+
+// TestCustomUsageAnthropicAliases 第三方回 Anthropic 字段名（input_tokens/
+// output_tokens）也能记账——与渠道路径 usageTokens 的别名兼容口径一致。
+func TestCustomUsageAnthropicAliases(t *testing.T) {
+	tp := &fakeThirdParty{respBody: `{"choices":[],"usage":{"input_tokens":4,"output_tokens":6}}`}
+	srv := httptest.NewServer(tp)
+	defer srv.Close()
+
+	st, err := statsEngine.New(t.TempDir(), t.Logf)
+	if err != nil {
+		t.Fatalf("stats.New: %v", err)
+	}
+	store := newCustomTestStore(t, t.TempDir(), "ds", srv.URL, "ds-chat", "")
+	h := NewHandler(Config{Custom: store, Stats: st})
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
+		strings.NewReader(`{"model":"ds-chat","messages":[],"stream":false}`)))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("直转应 200，实际 %d", rec.Code)
+	}
+	hit := findModelStat(t, st, "ds-chat")
+	if hit == nil || hit.Tokens != 10 {
+		t.Fatalf("Anthropic 字段名 usage 应记 10 tokens，实际 %+v", hit)
+	}
+}
+
+// TestCustomNoUsageNotCounted 无 usage 响应：只计请求数（请求日志），
+// 不进模型消耗表——与渠道路径「usage 缺失记 0 token 仅计请求数」口径一致。
+func TestCustomNoUsageNotCounted(t *testing.T) {
+	tp := &fakeThirdParty{respBody: `{"choices":[]}`}
+	srv := httptest.NewServer(tp)
+	defer srv.Close()
+
+	st, err := statsEngine.New(t.TempDir(), t.Logf)
+	if err != nil {
+		t.Fatalf("stats.New: %v", err)
+	}
+	store := newCustomTestStore(t, t.TempDir(), "ds", srv.URL, "ds-chat", "")
+	h := NewHandler(Config{Custom: store, Stats: st})
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
+		strings.NewReader(`{"model":"ds-chat","messages":[],"stream":false}`)))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("直转应 200，实际 %d", rec.Code)
+	}
+	if hit := findModelStat(t, st, "ds-chat"); hit != nil {
+		t.Fatalf("无 usage 不得进模型消耗表，实际 %+v", hit)
+	}
+	if rows := st.Logs(5); len(rows) == 0 {
+		t.Fatal("无 usage 也应记请求日志行（只计请求数）")
+	}
+}
+
+// TestCustomOversizeBodyPassthrough 非流式响应超体积护栏：降级纯透传，
+// 响应逐字节完整下发，不做 usage 解析（不记账不报错）。
+func TestCustomOversizeBodyPassthrough(t *testing.T) {
+	respBody := `{"choices":[{"message":{"content":"这段响应体比注入后的护栏大，必须完整透传且不做 usage 解析"}}],"usage":{"prompt_tokens":5,"completion_tokens":16}}`
+	tp := &fakeThirdParty{respBody: respBody}
+	srv := httptest.NewServer(tp)
+	defer srv.Close()
+
+	st, err := statsEngine.New(t.TempDir(), t.Logf)
+	if err != nil {
+		t.Fatalf("stats.New: %v", err)
+	}
+	store := newCustomTestStore(t, t.TempDir(), "ds", srv.URL, "ds-chat", "")
+	h := NewHandler(Config{Custom: store, Stats: st})
+
+	old := customUsageBodyCap
+	customUsageBodyCap = 8 // 8 字节：任何真实响应都超限
+	defer func() { customUsageBodyCap = old }()
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
+		strings.NewReader(`{"model":"ds-chat","messages":[],"stream":false}`)))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("直转应 200，实际 %d", rec.Code)
+	}
+	if rec.Body.String() != respBody {
+		t.Fatalf("超限响应必须逐字节透传:\n got  %s\n want %s", rec.Body.String(), respBody)
+	}
+	if hit := findModelStat(t, st, "ds-chat"); hit != nil {
+		t.Fatalf("超限降级不得解析 usage，实际 %+v", hit)
+	}
+}
+
+// TestSSEUsageScanFragments 扫描器单元：任意 Read 切分（字节级碎片喂入）
+// 都能切行捕获 usage；后帧覆盖前帧；超限行弃扫。
+func TestSSEUsageScanFragments(t *testing.T) {
+	s := &sseUsageScan{}
+	src := "event: message\n" +
+		"data: {\"choices\":[{\"delta\":{}}]}\n" +
+		"data: {\"usage\":{\"prompt_tokens\":2,\"completion_tokens\":9}}\n" +
+		"data: [DONE]\n\n"
+	for i := 0; i < len(src); i++ {
+		s.feed([]byte{src[i]})
+	}
+	if s.usage == nil {
+		t.Fatal("碎片喂入应捕获 usage 帧")
+	}
+	if pt, ct, _ := usageTokens(s.usage); pt != 2 || ct != 9 {
+		t.Fatalf("usage 应为 2/9，实际 %d/%d", pt, ct)
+	}
+	// 后帧覆盖前帧（OpenAI include_usage 即尾帧语义）
+	s.feed([]byte("data: {\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":5}}\n\n"))
+	if pt, ct, _ := usageTokens(s.usage); pt != 1 || ct != 5 {
+		t.Fatalf("后帧 usage 应覆盖前帧，实际 %d/%d", pt, ct)
+	}
+
+	// 超限行弃扫：转发不受影响，只是放弃记账
+	s2 := &sseUsageScan{}
+	big := make([]byte, customUsageScanLineCap+10)
+	for i := range big {
+		big[i] = 'x'
+	}
+	copy(big, []byte("data: "))
+	s2.feed(big)
+	if !s2.drop || s2.usage != nil {
+		t.Fatalf("超限行应弃扫: drop=%v usage=%v", s2.drop, s2.usage)
+	}
+}
