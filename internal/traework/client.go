@@ -17,11 +17,12 @@ import (
 var sessionDeadMarkers = []string{"login", "token 失效", "token invalid", "session", "unauthorized", "401"}
 
 // Classify 按 HTTP 状态码 + body 判定错误类别。
+// 状态码优先于 body 硬余额标记：429/401 的响应体也会携带业务码 1005
+// （上游报错格式不受本端控制），先判 1005 会把限流/登录失效误判成硬余额、
+// 触发 12h 硬冷却，且 401 会绕过自愈重登——对齐 qodercn/qodercom/qwenwork
+// 的「状态码 → hard 标记」判定顺序。
 func Classify(status int, body string) provider.ErrKind {
 	lower := strings.ToLower(body)
-	if strings.Contains(body, `"code":1005`) || (strings.Contains(body, "1005") && strings.Contains(lower, "plan")) {
-		return provider.ErrHardCredit
-	}
 	if status == http.StatusUnauthorized {
 		for _, m := range sessionDeadMarkers {
 			if strings.Contains(lower, strings.ToLower(m)) {
@@ -32,6 +33,9 @@ func Classify(status int, body string) provider.ErrKind {
 	}
 	if status == http.StatusTooManyRequests {
 		return provider.ErrSoftRate
+	}
+	if strings.Contains(body, `"code":1005`) || (strings.Contains(body, "1005") && strings.Contains(lower, "plan")) {
+		return provider.ErrHardCredit
 	}
 	if status == http.StatusNotFound {
 		return provider.ErrNotFound

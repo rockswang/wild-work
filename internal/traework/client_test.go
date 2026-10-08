@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"wild-work/internal/auth"
+	"wild-work/internal/provider"
 )
 
 func TestDailyCheckinClaimsWhenNotCheckedIn(t *testing.T) {
@@ -271,5 +272,33 @@ func TestFetchModelPricingRejectsOversizedResponse(t *testing.T) {
 	}
 	if strings.Contains(err.Error(), "pricing parse") {
 		t.Fatalf("不应退化成 JSON 解析错误：%v", err)
+	}
+}
+
+// TestClassifyOrder 状态码必须优先于 body 里的 1005 硬余额标记：
+// 429/401 的响应体也会携带业务码 1005，误判成 ErrHardCredit 会触发 12h
+// 硬冷却，且 401 场景会绕过 ErrSessionDead 自愈重登（0012）。
+func TestClassifyOrder(t *testing.T) {
+	cases := []struct {
+		name string
+		stat int
+		body string
+		want provider.ErrKind
+	}{
+		{"429 带 1005 仍判限流", http.StatusTooManyRequests, `{"code":1005,"msg":"too many requests"}`, provider.ErrSoftRate},
+		{"401 带 1005 仍判登录失效", http.StatusUnauthorized, `{"code":1005,"msg":"token 失效"}`, provider.ErrSessionDead},
+		{"402 直判硬余额", http.StatusPaymentRequired, `{"code":1005}`, provider.ErrHardCredit},
+		{"200 body 带 1005 判硬余额", http.StatusOK, `{"code":1005,"msg":"积分不足"}`, provider.ErrHardCredit},
+		{"200 plan+1005 判硬余额", http.StatusOK, `your plan limit 1005 reached`, provider.ErrHardCredit},
+		{"429 无 1005 判限流", http.StatusTooManyRequests, `rate limited`, provider.ErrSoftRate},
+		{"404 判未找到", http.StatusNotFound, `no route`, provider.ErrNotFound},
+		{"500 判服务端错误", http.StatusInternalServerError, `oops`, provider.ErrServer},
+		{"400 判客户端错误", http.StatusBadRequest, `bad request`, provider.ErrClient},
+		{"200 干净 body 无错误", http.StatusOK, `{"ok":true}`, provider.ErrNone},
+	}
+	for _, c := range cases {
+		if got := Classify(c.stat, c.body); got != c.want {
+			t.Errorf("%s: Classify(%d,%q) = %v, want %v", c.name, c.stat, c.body, got, c.want)
+		}
 	}
 }
