@@ -85,8 +85,40 @@ func TestSetTransportProxyInheritsTimeoutThroughWrapper(t *testing.T) {
 	}
 }
 
+// TestApplyCustomMiddleware 自定义直转中间层（全局开关 = 全部出站）：
+// 启用 = 流式/非流式双 client 全套上；热更新关闭 = 剥壳复位（Unwrap 幂等）；
+// client 自身的 Timeout 不被包装触碰。
+func TestApplyCustomMiddleware(t *testing.T) {
+	streamC := &http.Client{}                       // 出厂同款（Transport nil = DefaultTransport）
+	jsonC := &http.Client{Timeout: 5 * time.Minute} // 非流式总超时兜底（对齐 server 包出厂值）
+
+	on := config.Default()
+	on.Middleware = config.Middleware{Enabled: true, BaseURL: "http://127.0.0.1:8787/bili"}
+	applyCustomMiddleware(on, streamC, jsonC)
+	for name, c := range map[string]*http.Client{"流式": streamC, "非流式": jsonC} {
+		if !isWrapped(c.Transport) {
+			t.Fatalf("%s client 未被套上中间层（全部出端口径）", name)
+		}
+	}
+
+	// 热更新关闭：剥壳复位（出厂 nil 经包装-剥壳后为 DefaultTransport，语义等价）
+	off := config.Default() // middleware 缺省关闭
+	applyCustomMiddleware(off, streamC, jsonC)
+	for name, c := range map[string]*http.Client{"流式": streamC, "非流式": jsonC} {
+		if isWrapped(c.Transport) {
+			t.Fatalf("关闭后 %s client 应剥壳复位", name)
+		}
+	}
+	if jsonC.Timeout != 5*time.Minute {
+		t.Fatalf("包装不得触碰 client 自身 Timeout（got %v）", jsonC.Timeout)
+	}
+	// nil client 跳过不 panic
+	applyCustomMiddleware(on, nil)
+}
+
 // TestMiddlewareWiringIsComplete 锁定「声明了却没接线」类回归（R34 家族）：
-// main.go 的两处装配点都必须走 applyUpstreamChain，且中间层热更新回调已注入。
+// main.go 的两处装配点都必须走 applyUpstreamChain，且中间层热更新回调已注入；
+// 自定义直转的启动装配 + 两处热更新同步（applyCustomMiddleware）一并锁定。
 func TestMiddlewareWiringIsComplete(t *testing.T) {
 	src, err := os.ReadFile("main.go")
 	if err != nil {
@@ -105,5 +137,12 @@ func TestMiddlewareWiringIsComplete(t *testing.T) {
 	// 中间层热更新回调必须注入 App（漏注入 = 面板保存只落盘不生效）
 	if !strings.Contains(code, "appInst.SetMiddlewareSyncer(func(mw config.Middleware)") {
 		t.Fatal("main.go 未注入 SetMiddlewareSyncer —— 面板保存中间层后只写配置不热更")
+	}
+	// 自定义直转同口径：启动装配一处 + 两处热更新同步（漏改 = 面板开关对直转不生效）
+	if !strings.Contains(code, "applyCustomMiddleware(cfg, inner.CustomClients()...)") {
+		t.Fatal("main.go 启动装配未给自定义直转 client 套中间层（全局开关 = 全部出站）")
+	}
+	if n := strings.Count(code, "applyCustomMiddleware(&next, inner.CustomClients()...)"); n != 2 {
+		t.Fatalf("自定义直转的热更新应有且仅有两处同步（代理保存/中间层保存），实际 %d 处", n)
 	}
 }

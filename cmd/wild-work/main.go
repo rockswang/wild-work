@@ -465,6 +465,10 @@ func main() {
 		WebUI:        sub,
 		AttachAPI:    appInst.HandleAPI,
 	})
+	// 自定义模型直转同样走中间层（全局开关 = 全部出站）：渠道出站已在上方
+	// applyUpstreamChain 铺好，这里给直转双 client（流式/非流式）补同一开关；
+	// 两处热更新（代理保存/中间层保存）同拍重铺，见下方 syncer。
+	applyCustomMiddleware(cfg, inner.CustomClients()...)
 
 	// 两层结构：外层兼容层只接管三个新端点，其余（含 /v1/chat/completions、Web UI、
 	// 管理 API）原样落到内层 handler，旧客户端的调用栈完全不变。
@@ -494,6 +498,7 @@ func main() {
 		next := *cfg
 		next.Proxies = proxies
 		applyUpstreamChain(&next, upstreamClients)
+		applyCustomMiddleware(&next, inner.CustomClients()...)
 	})
 	// 面板保存中间层配置时热更新：完整重铺出站链路（代理底座 + 中间层包装）。
 	// 同理不能只套中间层：不重建底座就无法「关闭中间层」（旧包装残留）。
@@ -501,6 +506,7 @@ func main() {
 		next := *cfg
 		next.Middleware = mw
 		applyUpstreamChain(&next, upstreamClients)
+		applyCustomMiddleware(&next, inner.CustomClients()...)
 	})
 	// 面板保存 oczen key 后热更新渠道凭证；启动时也应用一次配置中的初始 key
 	appInst.SetOczenSyncer(ocUp.SetAPIKey)

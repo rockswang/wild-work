@@ -44,3 +44,22 @@ func applyMiddleware(cfg *config.Config, targets map[string][]*http.Client) {
 		}
 	}
 }
+
+// applyCustomMiddleware 给自定义模型直转的 HTTP client 套/剥中间层包装器。
+// 全局开关 = **全部出站**：渠道与自定义直转一视同仁。自定义 client 不进共享
+// targets 表——代理配置是渠道语义（每渠道一个上游），自定义源各自直连
+// 第三方、不参与渠道代理；仅共享中间层开关与热更新口径（两 syncer 均调用，
+// 与 applyUpstreamChain 同拍）。未开启 = 剥壳直连（Unwrap 幂等，裸底座原样；
+// Wrap 对 nil Transport 内部回退 DefaultTransport，包装-剥壳循环语义等价）。
+func applyCustomMiddleware(cfg *config.Config, clients ...*http.Client) {
+	for _, c := range clients {
+		if c == nil {
+			continue
+		}
+		if cfg.Middleware.Enabled && strings.TrimSpace(cfg.Middleware.BaseURL) != "" {
+			c.Transport = middleware.Wrap(cfg.Middleware.BaseURL, c.Transport)
+		} else {
+			c.Transport = middleware.Unwrap(c.Transport)
+		}
+	}
+}
