@@ -55,6 +55,12 @@ func (h *Handler) initCustomClients() {
 	h.customJSON = &http.Client{Timeout: customNonStreamTimeout}
 }
 
+// CustomClients 返回自定义模型直转的两个 HTTP client（流式 / 非流式）。
+// 供 cmd 装配层给自定义出站统一套传输链包装（与渠道出站共用同一开关与热更新口径）。
+func (h *Handler) CustomClients() []*http.Client {
+	return []*http.Client{h.customStream, h.customJSON}
+}
+
 // serveCustom 直转第三方 OpenAI 兼容源。
 // body 已缓冲（重试需可重读）；stream 取自客户端请求的 stream 字段。
 // 运行统计插桩与渠道路径同款（statWriter + AddRequestRow + usage 记账），

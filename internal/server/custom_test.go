@@ -133,6 +133,19 @@ func TestCustomModelBareNameProxied(t *testing.T) {
 	}
 }
 
+// TestCustomClientsAccessor 装配层（cmd）经此访问器给自定义直转套传输链：
+// NewHandler 后双 client（流式/非流式）必须已就绪且非 nil。
+func TestCustomClientsAccessor(t *testing.T) {
+	h := NewHandler(Config{})
+	cs := h.CustomClients()
+	if len(cs) != 2 || cs[0] == nil || cs[1] == nil {
+		t.Fatalf("CustomClients 应返回两个非 nil client（流式/非流式），实际 %v", cs)
+	}
+	if cs[1].Timeout == 0 {
+		t.Fatal("非流式 client 应带总超时兜底（出厂值被清空）")
+	}
+}
+
 // TestCustomModelSourcePrefixProxied 「源名/模型」名命中 → 直转：与渠道模型的
 // 「渠道/模型」命名观感一致（前缀=所属源名）；upstream_id 改写照常生效。
 func TestCustomModelSourcePrefixProxied(t *testing.T) {
