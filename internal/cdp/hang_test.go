@@ -78,8 +78,10 @@ func TestWriteDoesNotHangClose(t *testing.T) {
 	select {
 	case <-done:
 		t.Log("✅ 写操作在对端不读时正常返回（有超时保护）")
-	case <-time.After(12 * time.Second):
-		t.Fatal("❌ 写操作挂死超过 12s：对端不读时无超时保护")
+	// 断言窗口必须大于 writeTimeout（15s）：写操作在对端不读时于写超时处返回，
+	// 窗口小于它会让本测试把「有保护」误判为「挂死」。
+	case <-time.After(20 * time.Second):
+		t.Fatal("❌ 写操作挂死超过 20s：对端不读时无超时保护")
 	}
 
 	// Close 也必须在有限时间内返回
