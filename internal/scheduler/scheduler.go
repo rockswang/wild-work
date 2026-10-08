@@ -554,6 +554,21 @@ func (s *Scheduler) checkinOne(uid string) CheckinResult {
 func (s *Scheduler) dailyCheckin(a *auth.Auth, r *CheckinResult) (structured bool, err error) {
 	rep, ok := s.cfg.Upstream.(provider.CheckinReporter)
 	if !ok {
+		// 回执自带发放额的渠道（workbuddy，issue #67）：走 Grant 变体执行签到并拿权威发放额，
+		// 直接记 earn——这是唯一执行路径，不会重复请求（勿在此之后再调 DailyCheckin）。
+		if g, isG := s.cfg.Upstream.(provider.CheckinGranter); isG {
+			granted, gerr := g.DailyCheckinGrant(a)
+			if gerr == nil && granted > 0 && s.cfg.Ledger != nil {
+				note := "签到奖励"
+				if s.cfg.ActivitiesOnly {
+					note = "活跃保活奖励"
+				}
+				if s.cfg.Ledger.RecordCheckinEarn(s.name(), a.UID, granted, r.Remain, note) {
+					log.Printf("checkin earn recorded platform=%s uid=%s amount=%d (来自签到回执)", s.name(), a.UID, granted)
+				}
+			}
+			return false, gerr
+		}
 		return false, s.cfg.Upstream.DailyCheckin(a)
 	}
 	report, err := rep.DailyCheckinReport(a)

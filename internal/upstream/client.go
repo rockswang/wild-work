@@ -152,7 +152,7 @@ func New() *Client {
 		HTTP:            &http.Client{Timeout: 120 * time.Second, Transport: tr},
 		BillingHTTP:     &http.Client{Timeout: 30 * time.Second, Transport: tr},
 		StreamHTTP:      &http.Client{Transport: tr}, // 共用 Transport，不设 Timeout
-		IdleTimeout:     idle.DefaultTimeout,          // 流中空闲监控兜底（见 internal/idle）
+		IdleTimeout:     idle.DefaultTimeout,         // 流中空闲监控兜底（见 internal/idle）
 		ChatBaseCN:      "https://copilot.tencent.com",
 		BillingBaseCN:   "https://www.codebuddy.cn",
 		ChatBaseGlobal:  "https://www.workbuddy.ai",
@@ -557,20 +557,46 @@ func (c *Client) getUserResource(a *auth.Auth) (*userResourceResp, error) {
 
 // DailyCheckin 执行每日签到。已签到（业务 code 非 0）也返回错误，调用方按 msg 区分。
 func (c *Client) DailyCheckin(a *auth.Auth) error {
+	_, err := c.DailyCheckinGrant(a)
+	return err
+}
+
+// dailyCheckinGrant 执行签到并解析上游回执的发放额：credit/today_credit 字段
+// （权威值，见 ref/Buddy2api 同款实现）。供 provider.CheckinGranter 能力接口
+// （issue #67：签到包落在明日到期 key 上且提前 r=0 建档，差分在「发放即消耗」
+// 场景会把当日 earn 抵消为 0；回执值不依赖差分）。解析失败/未回填返回 0，
+// 调用方降级回快照差分口径，不影响签到主流程。
+func (c *Client) DailyCheckinGrant(a *auth.Auth) (granted int64, err error) {
 	log.Printf("workbuddy checkin start uid=%s", a.UID)
 	url := c.billingBase(a) + "/v2/billing/meter/daily-checkin"
 	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader([]byte("{}")))
 	if err != nil {
-		return err
+		return 0, err
 	}
 	BillingHeaders(req, a)
-	_, err = c.doJSONBilling(req)
+	data, err := c.doJSONBilling(req)
 	if err != nil {
 		log.Printf("workbuddy checkin failed uid=%s err=%v", a.UID, err)
-		return err
+		return 0, err
 	}
-	log.Printf("workbuddy checkin success uid=%s", a.UID)
-	return nil
+	// 容忍响应形状差异：credit 字段可能在 data 层或带 today_credit 别名；
+	// JSON 数字可能带小数（Buddy2api 实测 float）。失败吞掉——记账是锦上添花。
+	var env struct {
+		Credit         json.Number `json:"credit"`
+		TodayCredit    json.Number `json:"today_credit"`
+		TodayCheckedIn bool        `json:"today_checked_in"`
+	}
+	if json.Unmarshal(data, &env) == nil {
+		v := env.Credit
+		if v == "" {
+			v = env.TodayCredit
+		}
+		if f, perr := v.Float64(); perr == nil && f > 0 {
+			granted = int64(f) // 积分是整数口径，小数部分是上游表示误差
+		}
+	}
+	log.Printf("workbuddy checkin success uid=%s granted=%d", a.UID, granted)
+	return granted, nil
 }
 
 // Classify 实现 provider.Upstream。
