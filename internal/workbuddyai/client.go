@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"wild-work/internal/auth"
+	"wild-work/internal/idle"
 	"wild-work/internal/provider"
 )
 
@@ -26,6 +27,9 @@ type Client struct {
 	// 流式请求不得设 Client.Timeout——它覆盖整个响应体读取，长回答会在超时点被
 	// 掐断且无终止帧（issue #42 实测：tool_call 写到一半被断）。
 	StreamHTTP *http.Client
+	// IdleTimeout 聊天 SSE 流中空闲超时（StreamHTTP 无总时长上限，靠本字段兜底
+	// 「上游中途卡死」）。<=0 表示禁用（测试用）。
+	IdleTimeout time.Duration
 	Base       string // 默认 https://www.workbuddy.ai
 }
 
@@ -45,9 +49,10 @@ func NewWithTimeout(timeout time.Duration) *Client {
 		ResponseHeaderTimeout: 60 * time.Second,
 	}
 	return &Client{
-		HTTP:       &http.Client{Timeout: timeout, Transport: tr},
-		StreamHTTP: &http.Client{Transport: tr}, // 共用 Transport（连接池复用），不设 Timeout
-		Base:       WBAIHost,
+		HTTP:        &http.Client{Timeout: timeout, Transport: tr},
+		StreamHTTP:  &http.Client{Transport: tr}, // 共用 Transport（连接池复用），不设 Timeout
+		IdleTimeout: idle.DefaultTimeout,          // 流中空闲监控兜底（见 internal/idle）
+		Base:        WBAIHost,
 	}
 }
 
@@ -277,23 +282,27 @@ func (c *Client) chatStreamOnce(a *auth.Auth, prepared []byte) (rc io.ReadCloser
 		return nil, 0, nil, err
 	}
 	chatHeaders(req, a)
+	req, cancel := idle.WithCancel(req)
 	hc := c.HTTP
 	if c.StreamHTTP != nil {
 		hc = c.StreamHTTP
 	}
 	resp, err := hc.Do(req)
 	if err != nil {
+		cancel()
 		log.Printf("workbuddyai chat_stream uid=%s: transport error: %v", a.UID, err)
 		return nil, 0, nil, err
 	}
 	if resp.StatusCode >= 400 {
+		cancel()
 		raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 		resp.Body.Close()
 		log.Printf("workbuddyai chat_stream uid=%s: upstream %d %s body=%s",
 			a.UID, resp.StatusCode, Classify(resp.StatusCode, string(raw)), truncate(string(raw), 200))
 		return nil, resp.StatusCode, raw, nil
 	}
-	return resp.Body, resp.StatusCode, nil, nil
+	// 成功分支：cancel 所有权交给 idle.Monitor（其 Close 会 cancel；静默超时也会 cancel）。
+	return idle.Monitor(resp.Body, c.IdleTimeout, cancel), resp.StatusCode, nil, nil
 }
 
 // FetchModels 拉取国际版模型目录。

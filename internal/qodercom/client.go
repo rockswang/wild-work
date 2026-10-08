@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"wild-work/internal/auth"
+	"wild-work/internal/idle"
 	"wild-work/internal/provider"
 )
 
@@ -32,6 +33,9 @@ type Client struct {
 	// StreamHTTP 用于对话流（SSE）：不设整体 Timeout，避免长回答在超时点被掐断
 	// 且无终止帧（R35 / issue #42）。
 	StreamHTTP *http.Client
+	// IdleTimeout 聊天 SSE 流中空闲超时（StreamHTTP 无总时长上限，靠本字段兜底
+	// 「上游中途卡死」）。<=0 表示禁用（测试用）。
+	IdleTimeout time.Duration
 
 	// modelMap 客户端名（display_name 规范化）→ 上游 model key；
 	// cache 为最近一次成功拉取的完整模型表（无静态兜底，仅此缓存）。
@@ -58,13 +62,14 @@ func NewWithTimeout(timeout time.Duration) *Client {
 		TLSNextProto:        map[string]func(string, *tls.Conn) http.RoundTripper{}, // 强制 HTTP/1.1
 	}
 	return &Client{
-		HTTP:       &http.Client{Timeout: timeout, Transport: tr},
-		StreamHTTP: &http.Client{Transport: tr}, // 共用 Transport，不设 Timeout
-		Base:       OpenAPIBase,
-		Gateway:    GatewayBase,
-		ModelsBase: ModelsBase,
-		modelMap:   map[string]string{},
-		userTypes:  map[string]string{},
+		HTTP:        &http.Client{Timeout: timeout, Transport: tr},
+		StreamHTTP:  &http.Client{Transport: tr}, // 共用 Transport，不设 Timeout
+		IdleTimeout: idle.DefaultTimeout,          // 流中空闲监控兜底（见 internal/idle）
+		Base:        OpenAPIBase,
+		Gateway:     GatewayBase,
+		ModelsBase:  ModelsBase,
+		modelMap:    map[string]string{},
+		userTypes:   map[string]string{},
 	}
 }
 
@@ -325,19 +330,23 @@ func (c *Client) ChatStream(a *auth.Auth, body []byte) (rc io.ReadCloser, status
 	if err := sess.ApplyHeaders(req, encoded, url, a.UID, "text/event-stream", true, modelKey); err != nil {
 		return nil, 0, nil, fmt.Errorf("cosy headers: %w", err)
 	}
+	req, cancel := idle.WithCancel(req)
 	resp, err := c.streamHTTP().Do(req)
 	if err != nil {
+		cancel()
 		log.Printf("qodercom chat_stream uid=%s model=%s: transport error: %v", a.UID, modelKey, err)
 		return nil, 0, nil, err
 	}
 	if resp.StatusCode >= 400 {
+		cancel()
 		raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 		resp.Body.Close()
 		log.Printf("qodercom chat_stream uid=%s model=%s: upstream %d body=%s",
 			a.UID, modelKey, resp.StatusCode, truncate(string(raw), 200))
 		return nil, resp.StatusCode, raw, nil
 	}
-	return resp.Body, resp.StatusCode, nil, nil
+	// 成功分支：cancel 所有权交给 idle.Monitor（其 Close 会 cancel；静默超时也会 cancel）。
+	return idle.Monitor(resp.Body, c.IdleTimeout, cancel), resp.StatusCode, nil, nil
 }
 
 // modelEntry 按 key 找缓存中的模型条目（构造 model_config 全字段用）；找不到返回 nil（auto 兜底）。

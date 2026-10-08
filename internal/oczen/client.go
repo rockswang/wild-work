@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"wild-work/internal/auth"
+	"wild-work/internal/idle"
 	"wild-work/internal/provider"
 	"wild-work/internal/upstream"
 )
@@ -33,6 +34,9 @@ type Client struct {
 	// StreamHTTP 用于对话流（SSE）：不设整体 Timeout，避免长回答在超时点被掐断
 	// 且无终止帧（R35 / issue #42）。
 	StreamHTTP *http.Client
+	// IdleTimeout 聊天 SSE 流中空闲超时（StreamHTTP 无总时长上限，靠本字段兜底
+	// 「上游中途卡死」）。<=0 表示禁用（测试用）。
+	IdleTimeout time.Duration
 	Base       string
 
 	// mu 保护 apikey 的并发读写（面板热更新与请求路径并发）。
@@ -55,7 +59,8 @@ func New() *Client {
 		ResponseHeaderTimeout: 120 * time.Second,
 	}
 	return &Client{HTTP: &http.Client{Timeout: requestTimeout, Transport: tr}, Base: DefaultBase,
-		StreamHTTP: &http.Client{Transport: tr}, // 共用 Transport，不设 Timeout
+		StreamHTTP:  &http.Client{Transport: tr}, // 共用 Transport，不设 Timeout
+		IdleTimeout: idle.DefaultTimeout,          // 流中空闲监控兜底（见 internal/idle）
 	}
 }
 
@@ -278,20 +283,24 @@ func (c *Client) ChatStream(_ *auth.Auth, body []byte) (io.ReadCloser, int, []by
 		return nil, 0, nil, err
 	}
 	c.headered(req, session)
+	req, cancel := idle.WithCancel(req)
 	hc := c.HTTP
 	if c.StreamHTTP != nil {
 		hc = c.StreamHTTP
 	}
 	resp, err := hc.Do(req)
 	if err != nil {
+		cancel()
 		return nil, 0, nil, err
 	}
 	if resp.StatusCode >= 400 {
+		cancel()
 		defer resp.Body.Close()
 		raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 		return nil, resp.StatusCode, raw, nil
 	}
-	return resp.Body, resp.StatusCode, nil, nil
+	// 成功分支：cancel 所有权交给 idle.Monitor（其 Close 会 cancel；静默超时也会 cancel）。
+	return idle.Monitor(resp.Body, c.IdleTimeout, cancel), resp.StatusCode, nil, nil
 }
 
 // TestKey 用 big-pickle 模型发一次最小对话验证凭证可用性。

@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"wild-work/internal/auth"
+	"wild-work/internal/idle"
 	"wild-work/internal/provider"
 )
 
@@ -43,6 +44,10 @@ type Client struct {
 	//
 	// 与 traework 的 StreamHTTP 是同一模式（见 internal/traework/client.go）。
 	StreamHTTP *http.Client
+
+	// IdleTimeout 聊天 SSE 流中空闲超时（StreamHTTP 无总时长上限，靠本字段兜底
+	// 「上游中途卡死」）。<=0 表示禁用（测试用）。
+	IdleTimeout time.Duration
 
 	Base string
 
@@ -75,6 +80,7 @@ func New() *Client {
 		HTTP: &http.Client{Timeout: requestTimeout, Transport: tr},
 		// 流式 client：**共用同一 Transport**（复用连接池），但不设 Client.Timeout。
 		StreamHTTP:   &http.Client{Transport: tr},
+		IdleTimeout:  idle.DefaultTimeout, // 流中空闲监控兜底（见 internal/idle）
 		Base:         Base,
 		accessTokens: map[string]cachedToken{},
 	}

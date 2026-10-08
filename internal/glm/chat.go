@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"wild-work/internal/auth"
+	"wild-work/internal/idle"
 )
 
 // assistantIDRe 清言 assistant_id 形状：24 位以上小写 hex（官方智能体 ID）。
@@ -260,11 +261,14 @@ func (c *Client) ChatStream(a *auth.Auth, body []byte) (io.ReadCloser, int, []by
 	if c.StreamHTTP != nil {
 		hc = c.StreamHTTP
 	}
+	httpReq, cancel := idle.WithCancel(httpReq)
 	resp, err := hc.Do(httpReq)
 	if err != nil {
+		cancel()
 		return nil, 0, nil, err
 	}
 	if resp.StatusCode >= 400 {
+		cancel()
 		raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 		resp.Body.Close()
 		return nil, resp.StatusCode, raw, nil
@@ -272,6 +276,7 @@ func (c *Client) ChatStream(a *auth.Auth, body []byte) (io.ReadCloser, int, []by
 	// 上游可能以 HTTP 200 返回 JSON 错误（非 SSE）
 	ct := resp.Header.Get("Content-Type")
 	if !strings.Contains(ct, "text/event-stream") {
+		cancel()
 		raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 		resp.Body.Close()
 		// 尝试解出业务错误
@@ -281,7 +286,8 @@ func (c *Client) ChatStream(a *auth.Auth, body []byte) (io.ReadCloser, int, []by
 		}
 		return nil, http.StatusBadGateway, raw, nil
 	}
-	return resp.Body, resp.StatusCode, nil, nil
+	// 成功分支：cancel 所有权交给 idle.Monitor（其 Close 会 cancel；静默超时也会 cancel）。
+	return idle.Monitor(resp.Body, c.IdleTimeout, cancel), resp.StatusCode, nil, nil
 }
 
 // DeleteConversation 删除上游会话，避免在本人的清言对话列表里留痕。

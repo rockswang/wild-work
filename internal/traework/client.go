@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"wild-work/internal/auth"
+	"wild-work/internal/idle"
 	"wild-work/internal/provider"
 )
 
@@ -61,6 +62,9 @@ type Client struct {
 	PricingHost       string
 	ClientID          string
 	CheckinRetryDelay time.Duration // 9074 限流后的重试等待；生产默认 8s
+	// IdleTimeout 聊天 SSE 流中空闲超时（StreamHTTP 无总时长上限，靠本字段兜底
+	// 「上游中途卡死」）。<=0 表示禁用（测试用）。
+	IdleTimeout time.Duration
 
 	// Function 对话/模型列表接口的 function 值（solo_work_lite / solo_agent）。
 	Function string
@@ -74,7 +78,7 @@ type Client struct {
 
 func New() *Client {
 	tr := &http.Transport{MaxIdleConns: 100, MaxIdleConnsPerHost: 20, IdleConnTimeout: 90 * time.Second, ResponseHeaderTimeout: 120 * time.Second}
-	return &Client{HTTP: &http.Client{Timeout: 120 * time.Second, Transport: tr}, StreamHTTP: &http.Client{Transport: tr}, AgentHost: AgentHost, UgHost: UgHost, OAuthHost: OAuthHost, PricingHost: WorkHost, ClientID: ClientID, CheckinRetryDelay: 8 * time.Second, Function: Function, PricingFunctions: PricingFunctionsWork, PricingChannel: "traework", PricingPrimary: PricingPrimaryWork}
+	return &Client{HTTP: &http.Client{Timeout: 120 * time.Second, Transport: tr}, StreamHTTP: &http.Client{Transport: tr}, AgentHost: AgentHost, UgHost: UgHost, OAuthHost: OAuthHost, PricingHost: WorkHost, ClientID: ClientID, CheckinRetryDelay: 8 * time.Second, IdleTimeout: idle.DefaultTimeout, Function: Function, PricingFunctions: PricingFunctionsWork, PricingChannel: "traework", PricingPrimary: PricingPrimaryWork}
 }
 
 // NewTraeCode 返回 TraeCode（代码版）专用 Client：function=solo_agent。
@@ -205,23 +209,27 @@ func (c *Client) ChatStream(a *auth.Auth, body []byte) (rc io.ReadCloser, status
 		return nil, 0, nil, err
 	}
 	SOLOHeaders(req, a, true)
+	req, cancel := idle.WithCancel(req)
 	hc := c.HTTP
 	if c.StreamHTTP != nil {
 		hc = c.StreamHTTP
 	}
 	resp, err := hc.Do(req)
 	if err != nil {
+		cancel()
 		log.Printf("traework chat_stream uid=%s: transport error: %v", a.UID, err)
 		return nil, 0, nil, err
 	}
 	if resp.StatusCode >= 400 {
+		cancel()
 		raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 		resp.Body.Close()
 		kind := Classify(resp.StatusCode, string(raw))
 		log.Printf("traework chat_stream uid=%s: upstream %d %s body=%s", a.UID, resp.StatusCode, kind, truncate(string(raw), 200))
 		return nil, resp.StatusCode, raw, nil
 	}
-	return resp.Body, resp.StatusCode, nil, nil
+	// 成功分支：cancel 所有权交给 idle.Monitor（其 Close 会 cancel；静默超时也会 cancel）。
+	return idle.Monitor(resp.Body, c.IdleTimeout, cancel), resp.StatusCode, nil, nil
 }
 
 func (c *Client) FetchModels(a *auth.Auth) ([]provider.ModelInfo, error) {

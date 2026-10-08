@@ -2,11 +2,13 @@ package upstream
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"io"
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 
 	"wild-work/internal/auth"
 )
@@ -229,5 +231,71 @@ func TestRegionBases(t *testing.T) {
 	}
 	if c.chatBase(gl) != "https://gchat.example" || c.billingBase(gl) != "https://gbilling.example" {
 		t.Error("global bases wrong")
+	}
+}
+
+// stallBody 首帧之后永久阻塞，模拟「上游连上但发完首字节后不再吐数据」。
+type stallBody struct {
+	sent      bool
+	cancelled chan struct{}
+}
+
+func (s *stallBody) Read(p []byte) (int, error) {
+	if !s.sent {
+		s.sent = true
+		p[0] = 'x'
+		return 1, nil
+	}
+	// 阻塞直到 ctx 被 cancel（由 idle 监控触发）
+	<-s.cancelled
+	return 0, context.Canceled
+}
+
+func (s *stallBody) Close() error { return nil }
+
+// 上游发完首帧后卡死时，空闲监控必须切断流——这是 idle 接线的核心保证
+// （流式 client 无总时长上限，若没有本机制该请求会无限期挂住，连接与 goroutine 无法释放）。
+func TestChatStreamIdleMonitorBreaksStalledStream(t *testing.T) {
+	stalled := &stallBody{cancelled: make(chan struct{})}
+	c := testClient(func(r *http.Request) (*http.Response, error) {
+		// ctx 被 cancel 时放行阻塞中的 Read
+		go func() {
+			<-r.Context().Done()
+			close(stalled.cancelled)
+		}()
+		return &http.Response{
+			StatusCode: 200,
+			Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+			Body:       stalled,
+		}, nil
+	})
+	c.IdleTimeout = 50 * time.Millisecond
+	a := &auth.Auth{AccessToken: "at", UID: "u1"}
+
+	rc, status, _, err := c.ChatStream(a, []byte(`{}`))
+	if err != nil || status != 200 {
+		t.Fatalf("chat: status=%d err=%v", status, err)
+	}
+	defer rc.Close()
+
+	// 首帧正常读出
+	buf := make([]byte, 16)
+	if _, err := rc.Read(buf); err != nil {
+		t.Fatalf("首帧应可读: %v", err)
+	}
+
+	// 之后卡死：静默超时后监控应 cancel，使阻塞的 Read 返回错误而非永久挂起
+	done := make(chan error, 1)
+	go func() {
+		_, err := rc.Read(buf)
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Error("卡死流的 Read 应返回错误，实际 nil")
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("空闲监控未生效：Read 永久挂起")
 	}
 }
