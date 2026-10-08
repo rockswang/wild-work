@@ -1539,7 +1539,6 @@ async function loadUsage() {
   try {
     const st = await api(`/api/usage?days=${usageDays}`);
     if (st.disabled) {
-      $("usageSince").textContent = "（统计不可用）";
       return;
     }
     renderUsage(st);
@@ -1547,13 +1546,6 @@ async function loadUsage() {
 }
 
 function renderUsage(st) {
-  // 角标：已记录起始日
-  if (st.recorded_since) {
-    const days = Math.max(1, Math.round((Date.now() - new Date(st.recorded_since + "T00:00:00")) / 86400000) + 1);
-    $("usageSince").textContent = `已记录 ${days} 天`;
-  } else {
-    $("usageSince").textContent = "暂无记录";
-  }
   $("ucTokens").textContent = fmtTokensFull(st.token.total);
   $("ucReqs").textContent = fmtCredits(st.token.requests);
   $("ucSpend").textContent = fmtCredits(st.credit.spend);
