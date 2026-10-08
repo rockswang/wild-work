@@ -109,6 +109,7 @@ wild-work
 | 用量与流水 | token 与积分流水（ledger 口径，R17）；token / 积分两个子 tab |
 | 费率 | 各渠道模型定价表（按渠道分组），渠道标签带余额角标、模型名点击复制（PR #69） |
 | 运行统计 | 实时统计（stats 口径，R43）：今日情况 / 平台概览 / 使用中接棒 / 最近临期 / 模型消耗 / 请求日志 / 异常账号 / 运行日志，30s 轮询 |
+| 自定义模型 | 第三方 OpenAI 兼容源直转：API 源 / 模型两级列表 + 弹层表单增删改（数据走 /api/custommodels；裸名或「源名/模型」名命中即直转，见 internal/custommodels 与 server/custom.go） |
 
 管理 API（REST，均挂 `/api/*`；除 `/api/auth/*` 外均需有效面板会话——密码为空时不校验）：
 
@@ -145,6 +146,8 @@ POST /api/fees/refresh             # 异步刷新费率
 GET  /api/usage                    # 用量/积分流水聚合（R17，ledger 口径）
 GET  /api/stats                    # 运行统计快照（R43，stats 口径）
 GET  /api/stats/logs?limit=15      # 运行统计的最近请求日志行
+GET  /api/custommodels            # 自定义模型配置全量（源 + 模型，见 internal/custommodels）
+POST /api/custommodels            # {action: upsert_source|delete_source|upsert_model|delete_model, ...}
 GET  /api/logs                     # 最近 300 行日志
 POST /api/quit                     # 退出程序
 ```

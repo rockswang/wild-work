@@ -21,6 +21,7 @@ import (
 
 	"wild-work/internal/auth"
 	"wild-work/internal/config"
+	"wild-work/internal/custommodels"
 	"wild-work/internal/ledger"
 	"wild-work/internal/login"
 	"wild-work/internal/login_glm"
@@ -77,6 +78,8 @@ type Options struct {
 	Handler    *server.Handler
 	// Ledger 流水记账器（main 装配时创建，与 scheduler 共用同一实例）；nil 时 App 自建。
 	Ledger *ledger.Ledger
+	// Custom 自定义模型配置存储（main 装配时创建）；nil = 管理端点回 disabled。
+	Custom *custommodels.Store
 }
 
 // App 应用编排。
@@ -142,6 +145,9 @@ type App struct {
 	stats     *statsEngine.Stats
 	statsStop chan struct{}
 
+	// custom 自定义模型配置（opts.Custom 透传；nil = 管理端点回 disabled）
+	custom *custommodels.Store
+
 	pricingMu      sync.Mutex
 	pricingCache   []provider.ModelPricing // 本地缓存
 	pricingFetched time.Time
@@ -157,6 +163,7 @@ func New(opts Options) (*App, error) {
 		runtimes: opts.Runtimes,
 		handler:  opts.Handler,
 		auth:     newAuthState(),
+		custom:   opts.Custom,
 	}
 	a.loginStateFP = filepath.Join(filepath.Dir(opts.Config.StateFile), "login-state.json")
 	a.pricingFP = filepath.Join(filepath.Dir(opts.Config.StateFile), "pricing-cache.json")
@@ -2672,6 +2679,67 @@ func (a *App) HandleAPI(mux *http.ServeMux) {
 			limit = n
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"rows": a.stats.Logs(limit)})
+	})
+	// 自定义模型面板（第四个主 tab）：GET 全量；POST 按 action 增删改源/模型。
+	// 挂在私有 mux 上自动受会话守卫保护（R4：/api/* 除 auth 外统一鉴权）。
+	mux.HandleFunc("GET /api/custommodels", func(w http.ResponseWriter, r *http.Request) {
+		if a.custom == nil {
+			writeJSON(w, http.StatusOK, map[string]any{"disabled": true})
+			return
+		}
+		srcs, mods := a.custom.Snapshot()
+		writeJSON(w, http.StatusOK, map[string]any{"sources": srcs, "models": mods})
+	})
+	mux.HandleFunc("POST /api/custommodels", func(w http.ResponseWriter, r *http.Request) {
+		if a.custom == nil {
+			apiError(w, http.StatusBadRequest, "自定义模型功能未启用")
+			return
+		}
+		var req struct {
+			Action string               `json:"action"` // upsert_source / delete_source / upsert_model / delete_model
+			Name   string               `json:"name"`   // delete_* 用：要删除的源/模型名
+			Source *custommodels.Source `json:"source"` // upsert_source 用
+			Model  *custommodels.Model  `json:"model"`  // upsert_model 用
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			apiError(w, http.StatusBadRequest, "请求体解析失败")
+			return
+		}
+		switch req.Action {
+		case "upsert_source":
+			if req.Source == nil {
+				apiError(w, http.StatusBadRequest, "缺少 source 字段")
+				return
+			}
+			if err := a.custom.UpsertSource(*req.Source); err != nil {
+				apiError(w, http.StatusBadRequest, err.Error())
+				return
+			}
+		case "delete_source":
+			if err := a.custom.DeleteSource(strings.TrimSpace(req.Name)); err != nil {
+				apiError(w, http.StatusBadRequest, err.Error())
+				return
+			}
+		case "upsert_model":
+			if req.Model == nil {
+				apiError(w, http.StatusBadRequest, "缺少 model 字段")
+				return
+			}
+			if err := a.custom.UpsertModel(*req.Model); err != nil {
+				apiError(w, http.StatusBadRequest, err.Error())
+				return
+			}
+		case "delete_model":
+			if err := a.custom.DeleteModel(strings.TrimSpace(req.Name)); err != nil {
+				apiError(w, http.StatusBadRequest, err.Error())
+				return
+			}
+		default:
+			apiError(w, http.StatusBadRequest, "未知 action: "+req.Action)
+			return
+		}
+		srcs, mods := a.custom.Snapshot()
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "sources": srcs, "models": mods})
 	})
 	mux.HandleFunc("POST /api/quit", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true})

@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"wild-work/internal/auth"
+	"wild-work/internal/custommodels"
 	"wild-work/internal/ledger"
 	"wild-work/internal/pool"
 	"wild-work/internal/provider"
@@ -72,6 +73,10 @@ type Config struct {
 	// Stats 运行统计引擎（非 nil 时转发请求插桩 AddUsage/AddRequestRow；见 internal/stats 包注释）。
 	Stats *statsEngine.Stats
 
+	// Custom 自定义模型配置（非 nil 时启用：裸模型名命中启用中的自定义模型 →
+	// 直接转发第三方 OpenAI 兼容源，见 custom.go；nil = 功能关闭，零行为变化）。
+	Custom *custommodels.Store
+
 	MaxRotate    int
 	HardCooldown time.Duration
 	SoftCooldown time.Duration
@@ -96,6 +101,11 @@ type Handler struct {
 
 	ledger *ledger.Ledger     // 记账器（cfg.Ledger 透传，nil = 不记账）
 	stats  *statsEngine.Stats // 运行统计引擎（cfg.Stats 透传，nil = 不插桩）
+	// custom 自定义模型配置（cfg.Custom 透传，nil = 直转关闭）。
+	// customStream/customJSON 直转专用 HTTP client（流式无总超时 / 非流式带总超时，见 custom.go）。
+	custom       *custommodels.Store
+	customStream *http.Client
+	customJSON   *http.Client
 
 	apiMu    sync.RWMutex // 保护 cfg.APIKey（面板可运行时修改）
 	stickyMu sync.RWMutex
@@ -126,7 +136,8 @@ func NewHandler(cfg Config) *Handler {
 	if cfg.RefreshSkew <= 0 {
 		cfg.RefreshSkew = 10 * time.Minute
 	}
-	h := &Handler{cfg: cfg, mux: http.NewServeMux(), sticky: make(map[string]*stickyEntry), ledger: cfg.Ledger, stats: cfg.Stats}
+	h := &Handler{cfg: cfg, mux: http.NewServeMux(), sticky: make(map[string]*stickyEntry), ledger: cfg.Ledger, stats: cfg.Stats, custom: cfg.Custom}
+	h.initCustomClients()
 	h.mux.HandleFunc("POST /v1/chat/completions", h.withAuth(h.chatCompletions))
 	h.mux.HandleFunc("GET /v1/models", h.withAuth(h.models))
 	h.mux.HandleFunc("GET /status", h.withAuth(h.status))
@@ -327,6 +338,10 @@ func (h *Handler) modelList() []map[string]any {
 			out = append(out, buildModelEntry(k, mi))
 		}
 	}
+	// 自定义模型合并（裸名，决策：不带前缀）：命中即可用，与渠道模型并列列出。
+	if h.custom != nil {
+		out = append(out, customModelEntries(h.custom.EnabledIDs())...)
+	}
 	return out
 }
 
@@ -440,6 +455,17 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	if err := json.Unmarshal(body, &peek); err != nil {
 		writeOpenAIError(w, http.StatusBadRequest, "invalid_request", "invalid JSON body: "+err.Error())
 		return
+	}
+	// 自定义模型直转：命中启用中的自定义模型 → 直接转发第三方（优先于渠道路径）。
+	// 模型名支持裸名与「源名/模型」虚拟前缀两种形态（后者与渠道模型的命名观感一致，
+	// 前缀=所属源名）。渠道前缀（kind/model）的请求永远走渠道——自定义表里不可能
+	// 存在渠道前缀名（入库校验拒绝真实渠道 Kind 作前缀），故这里对含 "/" 的名称
+	// 也先查一次自定义表，渠道流量不受影响；未命中照旧走下面的渠道路径。
+	if h.custom != nil {
+		if tgt, ok := h.custom.Resolve(peek.Model); ok {
+			h.serveCustom(w, r, body, peek.Stream, tgt)
+			return
+		}
 	}
 	rt, model, err := h.runtimeForModel(peek.Model)
 	if err != nil {

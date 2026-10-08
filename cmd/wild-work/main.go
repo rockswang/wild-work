@@ -28,6 +28,7 @@ import (
 	"wild-work/internal/app"
 	"wild-work/internal/auth"
 	"wild-work/internal/config"
+	"wild-work/internal/custommodels"
 	"wild-work/internal/gateway"
 	"wild-work/internal/glm"
 	"wild-work/internal/ledger"
@@ -413,11 +414,20 @@ func main() {
 		provider.Oczen:       {Kind: provider.Oczen, Pool: ocPool, Upstream: ocUp, Scheduler: ocSch},
 	}
 
+	// 自定义模型代理配置（data/custom-models.json，两级：API 源 + 模型）。
+	// 文件损坏不阻断启动——Store 仍返回可用空表并附带 error，未命中的请求照旧
+	// 走渠道路径；损坏文件在下次面板保存时被覆盖、自动自愈。
+	customStore, cmErr := custommodels.Load(stateDir)
+	if cmErr != nil {
+		log.Printf("custom models load failed（自定义模型按空配置运行）: %v", cmErr)
+	}
+
 	appInst, err := app.New(app.Options{
 		ConfigPath: cfgPath,
 		Config:     cfg,
 		Runtimes:   appRuntimes,
 		Ledger:     lg,
+		Custom:     customStore,
 	})
 	if err != nil {
 		fatal("初始化失败：%v", err)
@@ -447,6 +457,7 @@ func main() {
 		APIKey:       cfg.APIKey,
 		Ledger:       appInst.Ledger(),
 		Stats:        appInst.Stats(), // 转发路径插桩 AddUsage/AddRequestRow（运行统计）
+		Custom:       customStore,     // 自定义模型直转（裸名命中 → 直接转发第三方）
 		HardCooldown: cfg.HardCreditDur,
 		SoftCooldown: cfg.SoftRateDur,
 		ErrThreshold: cfg.Cooldown.ErrThresh,

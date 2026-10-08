@@ -1533,6 +1533,31 @@ function bind() {
   $("btnHelpClose").onclick = closeHelp;
   $("btnAboutClose").onclick = closeAbout;
 
+  // 自定义模型面板（第四个主 tab）
+  $("btnAddCmSource").onclick = () => openCmSourceEditor(null);
+  $("btnAddCmModel").onclick = () => openCmModelEditor(null);
+  $("btnCmSourceSave").onclick = saveCmSource;
+  $("btnCmSourceCancel").onclick = closeCmSource;
+  $("btnCmModelSave").onclick = saveCmModel;
+  $("btnCmModelCancel").onclick = closeCmModel;
+  $("cmSourceOverlay").onclick = (e) => { if (e.target === $("cmSourceOverlay")) closeCmSource(); };
+  $("cmModelOverlay").onclick = (e) => { if (e.target === $("cmModelOverlay")) closeCmModel(); };
+  $("cmSrcName").onkeydown = (e) => { if (e.key === "Enter") saveCmSource(); };
+  $("cmModName").onkeydown = (e) => { if (e.key === "Enter") saveCmModel(); };
+  // 列表操作（编辑/删除）：事件委托一次绑定，data-cm 带名称（含引号也安全）
+  $("cmSourceList").onclick = (e) => {
+    const op = e.target.closest("span[data-cmop]");
+    if (!op) return;
+    if (op.dataset.cmop === "edit") openCmSourceEditor(op.dataset.cm);
+    else if (op.dataset.cmop === "del") deleteCmSource(op.dataset.cm);
+  };
+  $("cmModelList").onclick = (e) => {
+    const op = e.target.closest("span[data-cmop]");
+    if (!op) return;
+    if (op.dataset.cmop === "edit") openCmModelEditor(op.dataset.cm);
+    else if (op.dataset.cmop === "del") deleteCmModel(op.dataset.cm);
+  };
+
   // 登录确认弹层
   $("btnLoginConfirm").onclick = confirmLogin;
   $("btnLoginConfirmCancel").onclick = () => $("loginConfirmOverlay").classList.add("hidden");
@@ -1744,7 +1769,7 @@ function fmtDay(ts) {
   return `${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
 }
 
-// 主面板 tab 切换（账号管理 / 用量与流水 / 运行统计）
+// 主面板 tab 切换（账号管理 / 用量与流水 / 运行统计 / 自定义模型）
 function bindMainTabs() {
   document.querySelectorAll(".main-tabs .mtab").forEach((b) => {
     b.onclick = () => {
@@ -1752,6 +1777,7 @@ function bindMainTabs() {
       $("mtabAccounts").classList.toggle("hidden", b.dataset.mtab !== "accounts");
       $("mtabUsage").classList.toggle("hidden", b.dataset.mtab !== "usage");
       $("mtabStats").classList.toggle("hidden", b.dataset.mtab !== "stats");
+      $("mtabCustom").classList.toggle("hidden", b.dataset.mtab !== "custom");
       if (b.dataset.mtab === "usage") {
         loadUsage(); // 切到用量 tab 时拉最新（首次渲染自动刷新）
         if (usageChart) usageChart.resize();
@@ -1759,6 +1785,9 @@ function bindMainTabs() {
       }
       if (b.dataset.mtab === "stats") {
         loadStats(); // 切到运行统计 tab 时拉最新（后台 30s 轮询兜底）
+      }
+      if (b.dataset.mtab === "custom") {
+        loadCustomModels(); // 切到自定义模型 tab 时拉最新
       }
     };
   });
@@ -2172,5 +2201,186 @@ function showStatsNotification(title, body) {
     }
   } catch (e) { /* 降级面板提示 */ }
   toast(`${title}：${body}`);
+}
+
+// ---------- 自定义模型面板（第四个主 tab；数据来自 /api/custommodels） ----------
+// 两级配置：API 源（base_url + api_key）+ 模型（裸名 → 源，可选 upstream_id 改写）。
+// 客户端用裸模型名请求 /v1/chat/completions 时直转第三方；带渠道前缀的请求不受影响。
+let cmData = null; // 最近一次 /api/custommodels 响应（{sources, models}）
+
+// cmMaskKey API Key 列表脱敏展示（编辑弹层内仍回显完整值，与顶栏 API-Key 同语义）。
+function cmMaskKey(k) {
+  k = String(k || "");
+  if (!k) return "（未设置）";
+  if (k.length <= 12) return k.slice(0, 2) + "…";
+  return k.slice(0, 5) + "…" + k.slice(-4);
+}
+
+async function loadCustomModels() {
+  try {
+    const r = await api("/api/custommodels");
+    if (r.disabled) {
+      $("cmSourceList").innerHTML = `<div class="empty">自定义模型功能未启用（data/custom-models.json 加载失败，见运行日志）</div>`;
+      $("cmModelList").innerHTML = "";
+      return;
+    }
+    cmData = r;
+    renderCustomModels();
+  } catch (e) { toast(e.message); }
+}
+
+// cmStatusTag 启用/停用小标签。
+function cmStatusTag(on) {
+  return on ? `<span class="tag ok">启用</span>` : `<span class="tag neutral">停用</span>`;
+}
+
+// cmOpsCell 操作列：data 属性 + 事件委托（bind 里绑定一次），名称含引号也安全。
+function cmOpsCell(name) {
+  return `<span class="icon-op" data-cmop="edit" data-cm="${esc(name)}" title="编辑">✎</span>` +
+    `<span class="icon-op danger" data-cmop="del" data-cm="${esc(name)}" title="删除">✕</span>`;
+}
+
+function renderCustomModels() {
+  const sources = (cmData && cmData.sources) || [];
+  const models = (cmData && cmData.models) || [];
+
+  const sb = $("cmSourceList");
+  if (!sources.length) {
+    sb.innerHTML = `<div class="empty">还没有 API 源，点击上方「＋ API 源」添加</div>`;
+  } else {
+    sb.innerHTML = `<table class="table"><thead><tr><th>名称</th><th>Base URL</th><th>API Key</th><th>状态</th><th style="width:76px">操作</th></tr></thead><tbody>` +
+      sources.map((s) => `<tr>` +
+        `<td class="cm-mono">${esc(s.name)}</td>` +
+        `<td class="cm-wrap" title="${esc(s.base_url)}">${esc(s.base_url)}</td>` +
+        `<td class="cm-mono" title="点击编辑可查看完整值">${esc(cmMaskKey(s.api_key))}</td>` +
+        `<td>${cmStatusTag(s.enabled)}</td>` +
+        `<td>${cmOpsCell(s.name)}</td>` +
+        `</tr>`).join("") + `</tbody></table>`;
+  }
+
+  const mb = $("cmModelList");
+  if (!models.length) {
+    mb.innerHTML = `<div class="empty">还没有模型，点击上方「＋ 模型」添加</div>`;
+  } else {
+    mb.innerHTML = `<table class="table"><thead><tr><th>模型名</th><th>API 源</th><th>上游 ID</th><th>备注</th><th>状态</th><th style="width:76px">操作</th></tr></thead><tbody>` +
+      models.map((m) => `<tr>` +
+        `<td class="cm-mono" title="客户端用该裸名请求即可直转">${esc(m.name)}</td>` +
+        `<td class="cm-mono">${esc(m.source)}</td>` +
+        `<td class="cm-mono">${m.upstream_id ? esc(m.upstream_id) : `<span class="muted">—</span>`}</td>` +
+        `<td class="cm-wrap">${m.note ? esc(m.note) : `<span class="muted">—</span>`}</td>` +
+        `<td>${cmStatusTag(m.enabled)}</td>` +
+        `<td>${cmOpsCell(m.name)}</td>` +
+        `</tr>`).join("") + `</tbody></table>`;
+  }
+}
+
+// ---------- API 源编辑弹层 ----------
+function openCmSourceEditor(name) {
+  const src = name != null ? ((cmData && cmData.sources) || []).find((s) => s.name === name) : null;
+  $("cmSourceTitle").textContent = src ? "编辑 API 源" : "添加 API 源";
+  $("cmSrcName").value = src ? src.name : "";
+  $("cmSrcName").disabled = !!src; // 名称是主键，创建后不可改（改名 = 新建 + 旧条目残留）
+  $("cmSrcURL").value = src ? src.base_url : "";
+  $("cmSrcKey").value = src ? src.api_key : "";
+  $("cmSrcEnabled").checked = src ? src.enabled : true;
+  $("cmSourceErr").textContent = "";
+  $("cmSourceOverlay").classList.remove("hidden");
+  if (!src) $("cmSrcName").focus();
+}
+
+function closeCmSource() {
+  $("cmSourceOverlay").classList.add("hidden");
+}
+
+async function saveCmSource() {
+  const src = {
+    name: $("cmSrcName").value.trim(),
+    base_url: $("cmSrcURL").value.trim(),
+    api_key: $("cmSrcKey").value.trim(),
+    enabled: $("cmSrcEnabled").checked,
+  };
+  if (!src.name) { $("cmSourceErr").textContent = "名称不能为空"; return; }
+  $("cmSourceErr").textContent = "";
+  $("btnCmSourceSave").disabled = true;
+  try {
+    const r = await api("/api/custommodels", { action: "upsert_source", source: src });
+    cmData = r;
+    renderCustomModels();
+    closeCmSource();
+    toast("API 源已保存");
+  } catch (e) {
+    $("cmSourceErr").textContent = e.message; // 失败就地展示，弹层保留输入
+  } finally {
+    $("btnCmSourceSave").disabled = false;
+  }
+}
+
+function deleteCmSource(name) {
+  confirmDialog(`确定删除 API 源「${name}」？仍被模型引用时会拒绝删除。`, async () => {
+    try {
+      const r = await api("/api/custommodels", { action: "delete_source", name });
+      cmData = r;
+      renderCustomModels();
+      toast("API 源已删除");
+    } catch (e) { toast(e.message); }
+  });
+}
+
+// ---------- 模型编辑弹层 ----------
+function openCmModelEditor(name) {
+  const sources = (cmData && cmData.sources) || [];
+  if (!sources.length) { toast("请先添加 API 源"); return; }
+  const m = name != null ? ((cmData && cmData.models) || []).find((x) => x.name === name) : null;
+  $("cmModelTitle").textContent = m ? "编辑模型" : "添加模型";
+  $("cmModName").value = m ? m.name : "";
+  $("cmModName").disabled = !!m; // 名称即路由键，创建后不可改
+  $("cmModSource").innerHTML = sources.map((s) =>
+    `<option value="${esc(s.name)}">${esc(s.name)}${s.enabled ? "" : "（已停用）"}</option>`).join("");
+  if (m) $("cmModSource").value = m.source;
+  $("cmModUpstream").value = m ? (m.upstream_id || "") : "";
+  $("cmModNote").value = m ? (m.note || "") : "";
+  $("cmModEnabled").checked = m ? m.enabled : true;
+  $("cmModelError").textContent = "";
+  $("cmModelOverlay").classList.remove("hidden");
+  if (!m) $("cmModName").focus();
+}
+
+function closeCmModel() {
+  $("cmModelOverlay").classList.add("hidden");
+}
+
+async function saveCmModel() {
+  const m = {
+    name: $("cmModName").value.trim(),
+    source: $("cmModSource").value,
+    upstream_id: $("cmModUpstream").value.trim(),
+    note: $("cmModNote").value.trim(),
+    enabled: $("cmModEnabled").checked,
+  };
+  if (!m.name) { $("cmModelError").textContent = "模型名不能为空"; return; }
+  $("cmModelError").textContent = "";
+  $("btnCmModelSave").disabled = true;
+  try {
+    const r = await api("/api/custommodels", { action: "upsert_model", model: m });
+    cmData = r;
+    renderCustomModels();
+    closeCmModel();
+    toast("模型已保存");
+  } catch (e) {
+    $("cmModelError").textContent = e.message; // 失败就地展示，弹层保留输入
+  } finally {
+    $("btnCmModelSave").disabled = false;
+  }
+}
+
+function deleteCmModel(name) {
+  confirmDialog(`确定删除模型「${name}」？`, async () => {
+    try {
+      const r = await api("/api/custommodels", { action: "delete_model", name });
+      cmData = r;
+      renderCustomModels();
+      toast("模型已删除");
+    } catch (e) { toast(e.message); }
+  });
 }
 
