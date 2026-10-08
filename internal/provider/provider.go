@@ -95,6 +95,19 @@ func (k ErrKind) String() string {
 	}
 }
 
+// Rotatable 报告该错误是否应换下一个账号重试本请求（账号级错误）。
+// 账号有问题的（限流/欠费/登录态死/偶发 404/上游 5xx/账号故障）：换号有价值；
+// 请求内容有问题的（内容拦截/上下文超限/模型不存在）：换号必然复现，透传原文结束；
+// ErrClient（其他 4xx 业务错误）默认可换一次——部分渠道业务错误挂在账号权益上。
+func (k ErrKind) Rotatable() bool {
+	switch k {
+	case ErrSoftRate, ErrHardCredit, ErrSessionDead, ErrNotFound, ErrServer, ErrAccountFault, ErrClient:
+		return true
+	default:
+		return false
+	}
+}
+
 // Error 带分类的上游错误。
 type Error struct {
 	Kind   ErrKind
