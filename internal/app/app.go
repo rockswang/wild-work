@@ -1936,15 +1936,18 @@ type AccountView struct {
 	CreditsStale bool `json:"credits_stale,omitempty"`
 	// CreditsNA 积分概念不适用（如 OpenCodeZen 匿名通道），UI 显示「不适用」
 	// 而非 0，并隐藏刷新积分与明细入口。
-	CreditsNA      bool   `json:"credits_na,omitempty"`
-	Cooling        bool   `json:"cooling"`
-	Until          string `json:"until"`
-	Reason         string `json:"reason"`
-	Disabled       bool   `json:"disabled"`
-	ErrCount       int    `json:"err_count"`
-	LastCheckinOK  bool   `json:"last_checkin_ok"`
-	LastCheckinAt  string `json:"last_checkin_at"`
-	LastCheckinMsg string `json:"last_checkin_msg"`
+	CreditsNA      bool              `json:"credits_na,omitempty"`
+	Cooling        bool              `json:"cooling"`
+	Until          string            `json:"until"`
+	Reason         string            `json:"reason"`
+	Disabled       bool              `json:"disabled"`
+	// ModelCooling 模型级冷却（model → 解冻时刻）；仅该账号该模型限流，账号整体仍可用
+	// （429/6004 上游按模型计）。面板据此区分「整号冷却」与「个别模型限流」。
+	ModelCooling   map[string]string `json:"model_cooling,omitempty"`
+	ErrCount       int               `json:"err_count"`
+	LastCheckinOK  bool              `json:"last_checkin_ok"`
+	LastCheckinAt  string            `json:"last_checkin_at"`
+	LastCheckinMsg string            `json:"last_checkin_msg"`
 }
 
 // State Web UI 初始数据。
@@ -2061,6 +2064,7 @@ func (a *App) accountViews() []AccountView {
 			Until:          fmtTime(s.Until),
 			Reason:         s.Reason,
 			Disabled:       s.Disabled,
+			ModelCooling:   fmtTimeMap(s.ModelCooling),
 			ErrCount:       s.ErrCount,
 			LastCheckinOK:  s.LastCheckinOK,
 			LastCheckinAt:  fmtTime(s.LastCheckinAt),
@@ -2915,6 +2919,24 @@ func fmtTime(t time.Time) string {
 		return ""
 	}
 	return t.Format("01-02 15:04")
+}
+
+// fmtTimeMap 模型级冷却 map 的时间格式化（仅保留未过期条目；空 map 返回 nil 以便 omitempty）。
+func fmtTimeMap(m map[string]time.Time) map[string]string {
+	if len(m) == 0 {
+		return nil
+	}
+	now := time.Now()
+	out := make(map[string]string, len(m))
+	for model, t := range m {
+		if t.After(now) {
+			out[model] = fmtTime(t)
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 func shortUID(uid string) string {

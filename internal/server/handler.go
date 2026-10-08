@@ -154,11 +154,11 @@ func (h *Handler) stickyKey(kind provider.Kind) string { return kind.String() }
 
 // pickWithSticky 粘性路由选择账号。
 // 优先使用上次成功路由的账号，直到：
-//   - 账号进入冷却/禁用状态
+//   - 账号进入冷却/禁用状态，或对该请求模型处于模型级冷却（429/6004 按模型限额）
 //   - 连续成功请求达到 maxReqs 次（默认 50），自动轮换
 //
-// 任一条件触发则降级为 Pick() 选新账号并重置粘性记录。
-func (h *Handler) pickWithSticky(rt *Runtime) *auth.Auth {
+// 任一条件触发则降级为 PickForModel(model) 选新账号并重置粘性记录。
+func (h *Handler) pickWithSticky(rt *Runtime, model string) *auth.Auth {
 	const defaultMaxReqs = 50
 
 	h.stickyMu.RLock()
@@ -170,7 +170,8 @@ func (h *Handler) pickWithSticky(rt *Runtime) *auth.Auth {
 		acct := rt.Pool.AuthByUID(sticky.uid)
 		if acct != nil {
 			status, ok := rt.Pool.Status(sticky.uid)
-			if ok && !status.Cooling && !status.Disabled {
+			modelCooled := ok && status.ModelCooling != nil && status.ModelCooling[model].After(time.Now())
+			if ok && !status.Cooling && !status.Disabled && !modelCooled {
 				log.Printf("sticky route platform=%s uid=%s count=%d/%d",
 					rt.Kind, sticky.uid, sticky.reqCount, sticky.maxReqs)
 				return acct
@@ -178,8 +179,8 @@ func (h *Handler) pickWithSticky(rt *Runtime) *auth.Auth {
 		}
 	}
 
-	// 降级：选择余额最高的 healthy 账号
-	acct := rt.Pool.Pick()
+	// 降级：选择对当前模型可用的、余额最高的 healthy 账号
+	acct := rt.Pool.PickForModel(model)
 	if acct == nil {
 		return nil
 	}
@@ -481,14 +482,14 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	tried := map[string]bool{}
 	var lastErr error
 	for i := 0; i < h.cfg.MaxRotate; i++ {
-		acct := h.pickWithSticky(rt)
+		acct := h.pickWithSticky(rt, model)
 		if acct == nil {
 			break
 		}
 		if tried[acct.UID] {
 			// 粘性路由选回已尝试的账号，清除粘性记录后重试
 			h.stickyClear(rt)
-			acct = rt.Pool.PickExcluding(tried)
+			acct = rt.Pool.PickExcludingForModel(tried, model)
 			if acct == nil {
 				break
 			}
@@ -546,8 +547,16 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			case provider.ErrHardCredit:
 				rt.Pool.Cooldown(acct.UID, pool.CoolHard, h.cfg.HardCooldown, "余额/权益不足")
 			case provider.ErrSoftRate:
-				rt.Pool.Cooldown(acct.UID, pool.CoolSoft, h.cfg.SoftCooldown, "429 rate limit")
-			case provider.ErrSessionDead:
+			// 429/6004 上游按模型限额（「您也可以切换其他模型继续使用」）：
+			// 只冷却该账号的该模型，同号其他模型继续参与选号；
+			// 短时间内第二个模型也撞墙时 CooldownModel 会升级整号冷却（防上游按账号计时）。
+			escalated := rt.Pool.CooldownModel(acct.UID, model, h.cfg.SoftCooldown, "429 rate limit")
+			if escalated {
+				log.Printf("model cooldown escalated to account platform=%s uid=%s model=%s", rt.Kind, acct.UID, model)
+			} else {
+				log.Printf("model cooldown platform=%s uid=%s model=%s", rt.Kind, acct.UID, model)
+			}
+		case provider.ErrSessionDead:
 				rt.Pool.Disable(acct.UID, "session dead")
 			case provider.ErrNotFound:
 				rt.Pool.Cooldown(acct.UID, pool.CoolSoft, h.cfg.SoftCooldown, "upstream 404")
@@ -668,14 +677,29 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	// 客户端（如 Claude Code/Codex）只看到这条错误，必须足以让用户知道去面板做什么。
 	statRow.Status = http.StatusServiceUnavailable
 	sts := rt.Pool.List()
-	var bound, disabled, cooling int
+	now := time.Now()
+	var bound, disabled, cooling, modelAvail int
+	var earliest time.Time // 全池对该模型最早的解冻时刻（账号级与模型级冷却取最小）
+	consider := func(t time.Time) {
+		if t.After(now) && (earliest.IsZero() || t.Before(earliest)) {
+			earliest = t
+		}
+	}
 	for _, s := range sts {
 		if s.Disabled {
 			disabled++
-		} else if s.Cooling {
+			continue
+		}
+		if s.Cooling {
 			cooling++
+			consider(s.Until)
+			continue
+		}
+		bound++
+		if t, ok := s.ModelCooling[model]; ok {
+			consider(t)
 		} else {
-			bound++
+			modelAvail++
 		}
 	}
 	if len(sts) == 0 {
@@ -689,11 +713,23 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				rt.Kind, rt.Kind))
 		return
 	}
+	// 账号均健康、但请求模型在全部账号上都处于模型级限流冷却：
+	// 明确告知解冻时间，避免误以为账号故障去重登（2026-09-23 全池 6004 事故的教训）。
+	if bound > 0 && modelAvail == 0 {
+		writeOpenAIError(w, http.StatusServiceUnavailable, "no_healthy_account",
+			fmt.Sprintf("渠道 %s 的 %d 个账号均健康，但模型 %s 已在全部账号上限流冷却：最早约 %s 解冻（到点自动恢复，无需重新登录），也可先切换其他模型",
+				rt.Kind, bound, model, formatUnfreeze(earliest)))
+		return
+	}
 	if bound == 0 {
 		// 匿名渠道没有「重新登录」这个概念，给出针对性提示（否则会误导用户去找登录入口）。
 		hint := fmt.Sprintf("%s 账号需重新登录（日志会有 refresh token is invalid）", rt.Kind)
 		if noLoginChannel(rt.Kind) {
 			hint = "该渠道无需登录，稍后重试即可（若持续失败请查看日志）"
+		}
+		// 多数是限流冷却而非登录态问题：给出最早解冻时间，重登提示仅在无任何冷却时兜底。
+		if cooling > 0 && !earliest.IsZero() {
+			hint = fmt.Sprintf("最早约 %s 解冻（多为限流冷却，到点自动恢复；若长时间未恢复再检查登录态）", formatUnfreeze(earliest))
 		}
 		writeOpenAIError(w, http.StatusServiceUnavailable, "no_healthy_account",
 			fmt.Sprintf("渠道 %s 的 %d 个账号当前全部不可用（禁用 %d / 冷却 %d）：可在面板查看原因；%s",
@@ -706,6 +742,18 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		msg += ": " + lastErr.Error()
 	}
 	writeOpenAIError(w, http.StatusServiceUnavailable, "no_healthy_account", msg)
+}
+
+// formatUnfreeze 解冻时刻的可读格式：24h 内只报时刻（HH:MM），更远带日期。
+// 零值返回占位文案（调用方一般已排除零值，防御性兜底）。
+func formatUnfreeze(t time.Time) string {
+	if t.IsZero() {
+		return "稍后（请查看面板冷却原因）"
+	}
+	if time.Until(t) < 24*time.Hour {
+		return t.Format("15:04")
+	}
+	return t.Format("2006-01-02 15:04")
 }
 
 // noLoginChannel 报告渠道是否「无登录概念」（不存在凭证文件、也无重登入口）。

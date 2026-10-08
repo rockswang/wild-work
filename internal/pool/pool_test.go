@@ -324,3 +324,89 @@ func TestPickExpiringZeroBalance(t *testing.T) {
 		t.Fatalf("pick=%+v want u2", got)
 	}
 }
+
+// TestCooldownModelKeepsOtherModelsUsable 429/6004 按模型限额：
+// 冷却 u1 的 glm 后，u1 对 deepseek 仍可被选中；不带模型过滤的 Pick() 也不受影响。
+func TestCooldownModelKeepsOtherModelsUsable(t *testing.T) {
+	p := New("")
+	p.Add(&auth.Auth{UID: "u1"})
+	p.SetCreditDetail("u1", 100, 0, 0)
+	if escalated := p.CooldownModel("u1", "glm-5.3", time.Hour, "429 rate limit"); escalated {
+		t.Fatal("首次单模型冷却不应升级")
+	}
+	if got := p.PickForModel("glm-5.3"); got != nil {
+		t.Fatalf("glm-5.3 已模型级冷却，不应被选中: %+v", got)
+	}
+	if got := p.PickForModel("deepseek-v4.1-flash"); got == nil || got.UID != "u1" {
+		t.Fatalf("同号其他模型应可用: %+v", got)
+	}
+	if got := p.Pick(); got == nil || got.UID != "u1" {
+		t.Fatalf("账号整体仍健康（Pick 无模型过滤）: %+v", got)
+	}
+	st, _ := p.Status("u1")
+	if st.Cooling {
+		t.Errorf("单模型冷却不应把整号标记为 cooling: %+v", st)
+	}
+	if st.ModelCooling["glm-5.3"].IsZero() {
+		t.Errorf("Status 应暴露模型级冷却: %+v", st.ModelCooling)
+	}
+}
+
+// TestCooldownModelEscalatesOnSecondActiveModel 短时间内第二个模型也撞墙 →
+// 升级整号冷却到最晚重置点（防上游实际按账号计时逐模型撞墙）。
+func TestCooldownModelEscalatesOnSecondActiveModel(t *testing.T) {
+	p := New("")
+	p.Add(&auth.Auth{UID: "u1"})
+	p.SetCreditDetail("u1", 100, 0, 0)
+	if escalated := p.CooldownModel("u1", "glm-5.3", time.Hour, "429 rate limit"); escalated {
+		t.Fatal("首次不应升级")
+	}
+	if escalated := p.CooldownModel("u1", "deepseek-v4.1-flash", 2*time.Hour, "429 rate limit"); !escalated {
+		t.Fatal("第二个模型仍冷却中时再次撞墙应升级整号")
+	}
+	if got := p.Pick(); got != nil {
+		t.Fatalf("升级后整号应冷却: %+v", got)
+	}
+	if got := p.PickForModel("kimi-k2.7"); got != nil {
+		t.Fatalf("升级后第三个模型也不应选中该号: %+v", got)
+	}
+	st, _ := p.Status("u1")
+	if !st.Cooling || len(st.ModelCooling) != 0 {
+		t.Errorf("升级后应为整号冷却且清空模型级条目: %+v", st)
+	}
+}
+
+// TestCooldownModelNoEscalateAfterExpiry 第一个模型冷却已过期时不算「短时间内第二次」，
+// 不触发升级（重置点已过，说明那次限流确实只针对单模型）。
+func TestCooldownModelNoEscalateAfterExpiry(t *testing.T) {
+	p := New("")
+	p.Add(&auth.Auth{UID: "u1"})
+	p.SetCreditDetail("u1", 100, 0, 0)
+	if escalated := p.CooldownModel("u1", "glm-5.3", -time.Minute, "429 rate limit"); escalated {
+		t.Fatal("过期时长不应升级")
+	}
+	if escalated := p.CooldownModel("u1", "deepseek-v4.1-flash", time.Hour, "429 rate limit"); escalated {
+		t.Fatal("首个模型冷却已过期，第二次不应升级")
+	}
+	if got := p.PickForModel("glm-5.3"); got == nil || got.UID != "u1" {
+		t.Fatalf("过期模型应恢复可用: %+v", got)
+	}
+}
+
+// TestCooldownModelPersists 模型级冷却随 state.json 持久化：重启后仍生效（6004 重置窗口可达数小时）。
+func TestCooldownModelPersists(t *testing.T) {
+	dir := t.TempDir()
+	fp := filepath.Join(dir, "state.json")
+	p := New(fp)
+	p.Add(&auth.Auth{UID: "u1"})
+	p.CooldownModel("u1", "glm-5.3", time.Hour, "429 rate limit")
+
+	p2 := New(fp)
+	p2.Add(&auth.Auth{UID: "u1"})
+	if got := p2.PickForModel("glm-5.3"); got != nil {
+		t.Fatalf("重启后模型级冷却应保留: %+v", got)
+	}
+	if got := p2.PickForModel("deepseek-v4.1-flash"); got == nil || got.UID != "u1" {
+		t.Fatalf("重启后同号其他模型应可用: %+v", got)
+	}
+}

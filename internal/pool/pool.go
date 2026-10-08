@@ -62,6 +62,9 @@ type Status struct {
 	LastCheckinOK  bool      `json:"last_checkin_ok,omitempty"`
 	LastCheckinAt  time.Time `json:"last_checkin_at,omitempty"`
 	LastCheckinMsg string    `json:"last_checkin_msg,omitempty"`
+	// ModelCooling 账号在个别模型上的独立冷却（429/6004 按模型限，账号整体仍可用）。
+	// 仅包含仍处于未来的条目；空 = 无模型级冷却。供路由过滤与面板展示。
+	ModelCooling map[string]time.Time `json:"model_cooling,omitempty"`
 }
 
 type entry struct {
@@ -76,6 +79,9 @@ type entry struct {
 	reason       string
 	until        time.Time
 	errCount     int
+	// modelCool 模型级冷却：model → 解冻时刻（429/6004 上游按模型限额，
+	// 只冷却撞墙的模型，账号对其他模型仍可用）。条目过期后延迟清理。
+	modelCool map[string]time.Time
 
 	lastCheckinOK  bool
 	lastCheckinAt  time.Time
@@ -92,6 +98,18 @@ func (e *entry) healthy(now time.Time) bool {
 	return true
 }
 
+// healthyForModel 在 healthy 基础上再过滤模型级冷却：model 为空时退化为 healthy。
+func (e *entry) healthyForModel(now time.Time, model string) bool {
+	if !e.healthy(now) {
+		return false
+	}
+	if model == "" {
+		return true
+	}
+	t, ok := e.modelCool[model]
+	return !ok || !now.Before(t)
+}
+
 // stateFile 持久化格式。
 // version 用于识别旧版本状态文件：v2.2.0 及之前无 unusable 字段，
 // 读入后这些账号的余额口径不可信（pool 会置 creditsStale）。
@@ -105,15 +123,16 @@ type stateFile struct {
 const stateVersion = 3
 
 type accountState struct {
-	Credits        int64     `json:"credits"`
-	Expiring       int64     `json:"expiring,omitempty"`
-	Unusable       int64     `json:"unusable,omitempty"`
-	Disabled       bool      `json:"disabled"`
-	Reason         string    `json:"reason,omitempty"`
-	Until          time.Time `json:"until,omitempty"`
-	LastCheckinOK  bool      `json:"last_checkin_ok,omitempty"`
-	LastCheckinAt  time.Time `json:"last_checkin_at,omitempty"`
-	LastCheckinMsg string    `json:"last_checkin_msg,omitempty"`
+	Credits        int64                `json:"credits"`
+	Expiring       int64                `json:"expiring,omitempty"`
+	Unusable       int64                `json:"unusable,omitempty"`
+	Disabled       bool                 `json:"disabled"`
+	Reason         string               `json:"reason,omitempty"`
+	Until          time.Time            `json:"until,omitempty"`
+	ModelCool      map[string]time.Time `json:"model_cooling,omitempty"`
+	LastCheckinOK  bool                 `json:"last_checkin_ok,omitempty"`
+	LastCheckinAt  time.Time            `json:"last_checkin_at,omitempty"`
+	LastCheckinMsg string               `json:"last_checkin_msg,omitempty"`
 }
 
 // Pool 账号池。
@@ -175,6 +194,18 @@ func (p *Pool) Pick() *auth.Auth {
 // 即使后者总余额更高——目的是优先烧掉快过期的积分，避免浪费。
 // expiring 仅统计可消耗额度，且 expiring ≤ credits，不会出现虚高。
 func (p *Pool) PickExcluding(tried map[string]bool) *auth.Auth {
+	return p.PickExcludingForModel(tried, "")
+}
+
+// PickForModel 返回对指定模型可用的 healthy 账号（过滤模型级冷却）；
+// model 为空时等价 Pick()。供聊天路由使用——429/6004 按模型限额后，
+// 同账号其他模型仍可参与选号。
+func (p *Pool) PickForModel(model string) *auth.Auth {
+	return p.PickExcludingForModel(nil, model)
+}
+
+// PickExcludingForModel 同 PickExcluding，但额外跳过「该模型处于模型级冷却」的账号。
+func (p *Pool) PickExcludingForModel(tried map[string]bool, model string) *auth.Auth {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 	now := time.Now()
@@ -183,7 +214,7 @@ func (p *Pool) PickExcluding(tried map[string]bool) *auth.Auth {
 		if tried != nil && tried[uid] {
 			continue
 		}
-		if !e.healthy(now) {
+		if !e.healthyForModel(now, model) {
 			continue
 		}
 		if best == nil || entryBetter(e, best) {
@@ -248,6 +279,48 @@ func (p *Pool) ClearPenalty(uid string) {
 		}
 	}
 	p.saveLocked()
+}
+
+// CooldownModel 模型级冷却：只把 uid 账号的指定模型冻到 now+d，账号对其他模型仍可用。
+// 上游 429/6004 实测按模型限额（「您也可以切换其他模型继续使用」），账号级冷却粒度
+// 过粗会把同号健康模型一起拖死。
+// 升级兜底：若该账号已有 ≥1 个模型仍处于冷却中，本次视为「短时间内第二次撞墙」——
+// 上游可能实际按账号计时（多模型同时 6004），直接升级为整号冷却到最晚重置点，
+// 防止逐模型把每个模型都撞一遍 429 才发现是整号被限。返回是否发生了升级。
+func (p *Pool) CooldownModel(uid, model string, d time.Duration, reason string) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	e, ok := p.byUID[uid]
+	if !ok {
+		return false
+	}
+	now := time.Now()
+	if e.modelCool == nil {
+		e.modelCool = map[string]time.Time{}
+	}
+	e.modelCool[model] = now.Add(d)
+	// 统计仍处于未来的模型级冷却，顺便清理过期条目
+	active, latest := 0, time.Time{}
+	for m, t := range e.modelCool {
+		if !now.Before(t) {
+			delete(e.modelCool, m)
+			continue
+		}
+		active++
+		if t.After(latest) {
+			latest = t
+		}
+	}
+	escalated := false
+	if active >= 2 {
+		e.until = latest
+		e.reason = reason + "（多模型接连限流，升级整号冷却）"
+		e.errCount = 0
+		e.modelCool = nil
+		escalated = true
+	}
+	p.saveLocked()
+	return escalated
 }
 
 // Disable 永久禁用（session 死亡），需人工重登后手工恢复或文件替换。
@@ -378,6 +451,15 @@ func (p *Pool) List() []Status {
 
 func (p *Pool) statusOf(uid string, e *entry) Status {
 	now := time.Now()
+	var mc map[string]time.Time
+	for m, t := range e.modelCool {
+		if now.Before(t) {
+			if mc == nil {
+				mc = map[string]time.Time{}
+			}
+			mc[m] = t
+		}
+	}
 	return Status{
 		UID:             uid,
 		Nickname:        e.a.Nickname,
@@ -393,6 +475,7 @@ func (p *Pool) statusOf(uid string, e *entry) Status {
 		LastCheckinOK:   e.lastCheckinOK,
 		LastCheckinAt:   e.lastCheckinAt,
 		LastCheckinMsg:  e.lastCheckinMsg,
+		ModelCooling:    mc,
 	}
 }
 
@@ -423,6 +506,7 @@ func (p *Pool) load() {
 			disabled:       s.Disabled,
 			reason:         s.Reason,
 			until:          s.Until,
+			modelCool:      s.ModelCool,
 			lastCheckinOK:  s.LastCheckinOK,
 			lastCheckinAt:  s.LastCheckinAt,
 			lastCheckinMsg: s.LastCheckinMsg,
@@ -435,7 +519,17 @@ func (p *Pool) saveLocked() {
 		return
 	}
 	sf := stateFile{Version: stateVersion, Accounts: map[string]accountState{}}
+	now := time.Now()
 	for uid, e := range p.byUID {
+		var mc map[string]time.Time
+		for m, t := range e.modelCool {
+			if now.Before(t) { // 过期条目不落盘
+				if mc == nil {
+					mc = map[string]time.Time{}
+				}
+				mc[m] = t
+			}
+		}
 		sf.Accounts[uid] = accountState{
 			Credits:        e.credits,
 			Expiring:       e.expiring,
@@ -443,6 +537,7 @@ func (p *Pool) saveLocked() {
 			Disabled:       e.disabled,
 			Reason:         e.reason,
 			Until:          e.until,
+			ModelCool:      mc,
 			LastCheckinOK:  e.lastCheckinOK,
 			LastCheckinAt:  e.lastCheckinAt,
 			LastCheckinMsg: e.lastCheckinMsg,
