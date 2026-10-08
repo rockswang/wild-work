@@ -196,3 +196,80 @@ func TestFetchModelsRejectsOversizedResponse(t *testing.T) {
 		t.Fatalf("不应退化成 JSON 解析错误：%v", err)
 	}
 }
+
+// TestFetchModelPricingHandlesLargeCatalog 定价目录与模型目录同源同大
+// （doJSON 已放宽到 maxJSONBody=8MB），响应随模型数膨胀可能超过 1MB——
+// 旧上限（1<<20）会把 JSON 截成半截，"trae pricing parse" 报语法错误，
+// 整个定价刷新失败。本用例用一个 >1MB 的合法响应断言完整解析：
+// 若上限被改回 1MB，这里会因 "trae pricing parse" 失败而红。
+func TestFetchModelPricingHandlesLargeCatalog(t *testing.T) {
+	// 造一个超过 1MB 的合法定价目录：条目数 + 每条填充让总量跨过 1<<20。
+	const filler = 4096
+	features := `{"consumption_rate":{"enable":true,"data":{"rate":0.1}}}`
+	names := make([]string, 0, 300)
+	for i := 0; len(names) < 300; i++ {
+		fill := strings.Repeat("x", filler)
+		names = append(names, fmt.Sprintf(`{"name":"model-%03d-%s","display_name":"M%03d","features":%q}`, i, fill, i, features))
+	}
+	body := `{"code":0,"data":{"list":[{"function":"solo_work_lite","models":[` + strings.Join(names, ",") + `]}]}}`
+	if len(body) <= 1<<20 {
+		t.Fatalf("测试数据没超过 1MB（%d），用例失去意义", len(body))
+	}
+
+	var gotReq atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != EpModelsPricing {
+			http.NotFound(w, r)
+			return
+		}
+		gotReq.Add(1)
+		_, _ = w.Write([]byte(body))
+	}))
+	defer srv.Close()
+
+	c := New()
+	c.HTTP = srv.Client()
+	c.PricingHost = srv.URL
+
+	out, err := c.FetchModelPricing(&auth.Auth{AccessToken: "at"})
+	if err != nil {
+		t.Fatalf("FetchModelPricing 应能解析 >1MB 定价目录，却失败：%v", err)
+	}
+	if len(out) != 300 {
+		t.Fatalf("定价条目数=%d want 300（响应 %d 字节）", len(out), len(body))
+	}
+	if gotReq.Load() != 1 {
+		t.Fatalf("upstream 请求数=%d want 1", gotReq.Load())
+	}
+}
+
+// TestFetchModelPricingRejectsOversizedResponse 超过 maxJSONBody 的响应必须显式报错，
+// 而不是被截成半截后由 json.Unmarshal 抛语法错误——对齐 doJSON 的超限语义
+// （同 TestFetchModelsRejectsOversizedResponse 的判定口径）。
+func TestFetchModelPricingRejectsOversizedResponse(t *testing.T) {
+	// 合法但超限的 JSON（用空白填充，避免构造出非法 JSON 干扰判断）。
+	body := `{"code":0,"data":{"list":[{"function":"solo_work_lite","models":[` + strings.Repeat(" ", maxJSONBody+1024) + `]}]}}`
+	if len(body) <= maxJSONBody {
+		t.Fatalf("测试数据没超过上限（%d）", len(body))
+	}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(body))
+	}))
+	defer srv.Close()
+
+	c := New()
+	c.HTTP = srv.Client()
+	c.PricingHost = srv.URL
+
+	_, err := c.FetchModelPricing(&auth.Auth{AccessToken: "at"})
+	if err == nil {
+		t.Fatal("超限响应应报错")
+	}
+	if !strings.Contains(err.Error(), "exceeds") {
+		t.Fatalf("应为显式超限错误，实际：%v", err)
+	}
+	if strings.Contains(err.Error(), "pricing parse") {
+		t.Fatalf("不应退化成 JSON 解析错误：%v", err)
+	}
+}

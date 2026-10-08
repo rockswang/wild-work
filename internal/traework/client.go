@@ -290,9 +290,14 @@ func (c *Client) FetchModelPricing(a *auth.Auth) ([]provider.ModelPricing, error
 		return nil, err
 	}
 	defer resp.Body.Close()
-	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	// 8MB 上限（本地补丁 0005）：与 doJSON 同步放宽——模型定价列表随模型数膨胀，防同类截断。
+	// 多读 1 字节判定超限：超限时显式报错，而非截成半截后由 json.Unmarshal 误报语法错误（对齐 doJSON）。
+	raw, _ := io.ReadAll(io.LimitReader(resp.Body, maxJSONBody+1))
 	if resp.StatusCode >= 400 {
 		return nil, fmt.Errorf("trae pricing api status %d: %s", resp.StatusCode, truncate(string(raw), 120))
+	}
+	if len(raw) > maxJSONBody {
+		return nil, fmt.Errorf("traework: pricing response body exceeds %d bytes", maxJSONBody)
 	}
 	var env struct {
 		Code int `json:"code"`
