@@ -9,6 +9,9 @@ import (
 //
 // function 由调用方（渠道 Client）传入，用于区分办公版（solo_work_lite）与
 // 代码版（solo_agent）——两者是同一上游下的不同 function，模型与计费口径均不同。
+// function 决定上游从哪个模型池选模型：模型目录（FetchModels 双池合并）会登记
+// 每个模型实际所在的池，此处据此覆盖 function——用错池的请求上游不报
+//「模型不存在」，而是 4001 param is invalid。
 func PrepareBody(src []byte, function string) []byte {
 	if len(src) == 0 {
 		return src
@@ -18,7 +21,6 @@ func PrepareBody(src []byte, function string) []byte {
 		return src
 	}
 	obj["stream"] = true
-	obj["function"] = function
 	if msgs, ok := obj["messages"].([]any); ok {
 		for _, mi := range msgs {
 			m, ok := mi.(map[string]any)
@@ -74,6 +76,11 @@ func PrepareBody(src []byte, function string) []byte {
 	}
 	obj["config_name"] = model
 	obj["model"] = model
+	// 按模型实际归属池覆盖 function（见 modelpool.go）；未登记的模型沿用渠道默认。
+	if fn := functionForModel(model); fn != "" {
+		function = fn
+	}
+	obj["function"] = function
 	normalizeToolChoice(obj)
 	normalizeTools(obj)
 	out, err := json.Marshal(obj)

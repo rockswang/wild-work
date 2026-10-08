@@ -235,8 +235,51 @@ func (c *Client) ChatStream(a *auth.Auth, body []byte) (rc io.ReadCloser, status
 func (c *Client) FetchModels(a *auth.Auth) ([]provider.ModelInfo, error) {
 	// traework 上游 llm_utils_chat 强制 stream=true（见 PrepareBody），
 	// 所有模型均为流式模式；非流式请求由本地 Aggregate() 缓冲 SSE 后聚合。
-	// mode_type=nil 返回全部配置，按 config_name 去重避免流式/非流式重复。
-	body := map[string]any{"function": c.Function, "config_names": nil, "need_prompt": false, "current_config_info": nil, "poly_prompt": true, "mode_type": nil, "agent_type": nil}
+	//
+	// 双池合并：get_detail_param 的目录不保证按 function 过滤，而 chat 按
+	// function 选池——只拉本渠道池会出现「列表里有、调用 4001」的错位。
+	// 故两个池都拉一遍（先本渠道池、后另一池），按 config_name 先到先得
+	// 去重，并把每个模型记入其实际归属池（PrepareBody 据此覆盖 function）。
+	// 本渠道池失败照旧报错；另一池失败只记日志、用本渠道池结果继续。
+	seen := make(map[string]bool, 64)
+	out := make([]provider.ModelInfo, 0, 64)
+	// 顺序固定：本渠道池先到先得（归属登记与去重都吃顺序），不能用 map 遍历。
+	pools := []string{c.Function, otherFunction(c.Function)}
+	for i, fn := range pools {
+		primary := i == 0
+		list, err := c.fetchModelsForPool(a, fn)
+		if err != nil {
+			if primary {
+				return nil, err
+			}
+			log.Printf("traework models: %s 池拉取失败（继续用 %s 池结果）: %v", fn, c.Function, err)
+			continue
+		}
+		for _, cfg := range list {
+			name := strings.TrimSpace(cfg.ConfigName)
+			if name == "" || seen[name] {
+				continue
+			}
+			// 跳过自定义模型：部分模型上游不返回 is_custom_model，直接用前缀匹配兜底
+			if cfg.DisplayConfig.IsCustomModel || strings.HasPrefix(name, "custom_model_") {
+				log.Printf("traework skip custom model: %s", name)
+				continue
+			}
+			seen[name] = true
+			recordModelFunc(name, fn)
+			out = append(out, provider.ModelInfo{ID: name, Name: cfg.DisplayConfig.DisplayName})
+		}
+	}
+	if len(out) == 0 {
+		return nil, fmt.Errorf("models api returned empty list")
+	}
+	return out, nil
+}
+
+// fetchModelsForPool 拉取单个 function 池的模型配置（mode_type=nil 返回全部，
+// 按 config_name 去重避免流式/非流式重复——池内去重，跨池去重在 FetchModels）。
+func (c *Client) fetchModelsForPool(a *auth.Auth, function string) ([]poolEntry, error) {
+	body := map[string]any{"function": function, "config_names": nil, "need_prompt": false, "current_config_info": nil, "poly_prompt": true, "mode_type": nil, "agent_type": nil}
 	raw, _ := json.Marshal(body)
 	req, err := http.NewRequest(http.MethodPost, c.agentBase()+EpModels, bytes.NewReader(raw))
 	if err != nil {
@@ -248,38 +291,21 @@ func (c *Client) FetchModels(a *auth.Auth) ([]provider.ModelInfo, error) {
 		return nil, err
 	}
 	var resp struct {
-		ConfigInfoList []struct {
-			ConfigName    string `json:"config_name"`
-			DisplayConfig struct {
-				DisplayName   string `json:"display_name"`
-				IsCustomModel bool   `json:"is_custom_model"` // 自定义模型（第三方代理）需额外授权
-			} `json:"display_config"`
-		} `json:"config_info_list"`
+		ConfigInfoList []poolEntry `json:"config_info_list"`
 	}
 	if err := json.Unmarshal(data, &resp); err != nil {
 		return nil, fmt.Errorf("models parse: %w", err)
 	}
-	// 按 config_name 去重：上游可能为同一模型返回流式/非流式两条配置。
-	// 过滤掉 is_custom_model=true 或 config_name 以 custom_model_ 开头的自定义模型（第三方代理，需额外授权）
-	seen := make(map[string]bool, len(resp.ConfigInfoList))
-	out := make([]provider.ModelInfo, 0, len(resp.ConfigInfoList))
-	for _, cfg := range resp.ConfigInfoList {
-		name := strings.TrimSpace(cfg.ConfigName)
-		if name == "" || seen[name] {
-			continue
-		}
-		// 跳过自定义模型：部分模型上游不返回 is_custom_model，直接用前缀匹配兜底
-		if cfg.DisplayConfig.IsCustomModel || strings.HasPrefix(name, "custom_model_") {
-			log.Printf("traework skip custom model: %s", name)
-			continue
-		}
-		seen[name] = true
-		out = append(out, provider.ModelInfo{ID: name, Name: cfg.DisplayConfig.DisplayName})
-	}
-	if len(out) == 0 {
-		return nil, fmt.Errorf("models api returned empty list")
-	}
-	return out, nil
+	return resp.ConfigInfoList, nil
+}
+
+// poolEntry 单池目录条目（get_detail_param）。
+type poolEntry struct {
+	ConfigName    string `json:"config_name"`
+	DisplayConfig struct {
+		DisplayName   string `json:"display_name"`
+		IsCustomModel bool   `json:"is_custom_model"` // 自定义模型（第三方代理）需额外授权
+	} `json:"display_config"`
 }
 
 // FetchModelPricing 从 /api/remote/v1/models 拉取模型积分倍率。

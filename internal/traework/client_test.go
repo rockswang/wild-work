@@ -162,8 +162,10 @@ func TestFetchModelsHandlesLargeCatalog(t *testing.T) {
 	if len(out) != 300 {
 		t.Fatalf("模型数=%d want 300（响应 %d 字节）", len(out), len(body))
 	}
-	if gotReq.Load() != 1 {
-		t.Fatalf("upstream 请求数=%d want 1", gotReq.Load())
+	// 双池合并（见 FetchModels）会对每个池各请求一次：本用例的假上游对两次
+	// 请求返回同一份大目录，合并去重后仍应是 300 条。
+	if gotReq.Load() != 2 {
+		t.Fatalf("upstream 请求数=%d want 2（双池各一次）", gotReq.Load())
 	}
 }
 
