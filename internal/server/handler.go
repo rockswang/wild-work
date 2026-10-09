@@ -50,6 +50,10 @@ type Runtime struct {
 	models   []provider.ModelInfo
 	fetched  time.Time
 	lastFail time.Time
+	// lastOK 最近一次成功拉取的模型列表，跨 TTL 保留。
+	// 无静态兜底表的渠道（qodercn/qodercom）在动态缓存过期、上游短暂失败时，
+	// 费率表靠它兜底显示，避免整渠道从面板消失（旧模型照常配费率）。
+	lastOK []provider.ModelInfo
 }
 
 // Config handler 依赖。
@@ -412,6 +416,7 @@ func (h *Handler) fetchRuntimeModels(rt *Runtime) []provider.ModelInfo {
 	rt.models = infos
 	rt.fetched = now
 	rt.lastFail = time.Time{}
+	rt.lastOK = infos // 成功即留底，供费率表跨 TTL 兜底
 	rt.mu.Unlock()
 	if rt.Kind == provider.WorkBuddy { // 兼容旧测试观察点
 		dynamicModelsCache.Lock()
@@ -970,12 +975,19 @@ func (h *Handler) CachedChannelModels() map[provider.Kind][]provider.ModelInfo {
 		// 下次是否重新拉取，不决定「要不要展示」。
 		rt.mu.RLock()
 		models := rt.models
+		lastOK := rt.lastOK
 		rt.mu.RUnlock()
 		if len(models) > 0 {
 			out[k] = models
 			continue
 		}
-		out[k] = rt.StaticModels
+		// lastOK 兜底（二开增强）：InvalidateModels 清空 models 后、重拉完成前的窗口，
+		// 靠最近一次成功模型顶住，避免渠道瞬时从面板消失。
+		infos := lastOK
+		if len(infos) == 0 {
+			infos = rt.StaticModels
+		}
+		out[k] = infos
 	}
 	return out
 }
