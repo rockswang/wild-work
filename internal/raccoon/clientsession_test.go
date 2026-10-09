@@ -101,3 +101,17 @@ func TestJWTName(t *testing.T) {
 		t.Fatalf("非 JWT 应返回空, got %q", got)
 	}
 }
+
+// TestRescueFromClientSession_RejectsExpiredToken 客户端令牌已过期时不采纳。
+func TestRescueFromClientSession_RejectsExpiredToken(t *testing.T) {
+	access := makeJWT(t, map[string]any{"name": "U1", "exp": time.Now().Add(-time.Hour).Unix()})
+	writeClientAuth(t, access, "rt-U1")
+
+	a := &auth.Auth{UID: "U1", AccessToken: "stale", RefreshToken: "stale-rt"}
+	if err := RescueFromClientSession(a); err == nil {
+		t.Fatal("客户端令牌已过期时应报错")
+	}
+	if a.AccessToken != "stale" {
+		t.Fatal("拒绝采纳时不得改动账号令牌")
+	}
+}

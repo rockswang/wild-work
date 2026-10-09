@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"wild-work/internal/auth"
 )
@@ -88,6 +89,11 @@ func RescueFromClientSession(a *auth.Auth) error {
 	}
 	if uid := jwtName(access); uid == "" || uid != a.UID {
 		return fmt.Errorf("raccoon: 客户端会话 uid 不匹配（客户端=%q 账号=%q），拒绝采纳", uid, a.UID)
+	}
+	// 客户端令牌已过期（如客户端登出后残留旧会话）时不采纳——采纳一个过期
+	// access 只会把「必然失败的请求」延迟到下一次上游 401，毫无收益。
+	if exp := jwtExp(access); exp > 0 && exp <= time.Now().Unix() {
+		return fmt.Errorf("raccoon: 客户端会话 access 已过期（exp=%d），拒绝采纳", exp)
 	}
 	a.Lock()
 	a.AccessToken = access
