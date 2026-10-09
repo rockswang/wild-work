@@ -31,7 +31,7 @@ func newTestLedger(t *testing.T) *Ledger {
 func grantAndConsumeItem(remain, used int64) []provider.ResourceItem {
 	return []provider.ResourceItem{
 		{Name: "CodeBuddy个人版国内运营裂变包", Total: remain + used, Used: used, Remain: remain,
-			ExpireAt: "2026-10-09", Key: "CodeBuddy个人版国内运营裂变包|2026-10-09", Usable: true},
+			ExpireAt: "2099-01-01", Key: "CodeBuddy个人版国内运营裂变包|2099-01-01", Usable: true},
 	}
 }
 
