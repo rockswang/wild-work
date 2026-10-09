@@ -155,6 +155,11 @@ func (c *Client) do(method, url string, a *auth.Auth, body []byte) (*http.Respon
 func (c *Client) RefreshToken(a *auth.Auth) error {
 	rt := strings.TrimSpace(a.RefreshTokenValue())
 	if rt == "" {
+		// 本地无 refresh 可用：客户端文件里可能有活凭证（本渠道与客户端共用会话）。
+		if rerr := RescueFromClientSession(a); rerr == nil {
+			log.Printf("raccoon: 本地 refresh 为空，已采纳本机客户端最新令牌 uid=%s", a.UID)
+			return nil
+		}
 		return fmt.Errorf("raccoon: 无 refresh token，需重新从客户端导入凭据")
 	}
 	payload, err := json.Marshal(map[string]string{"refresh_token": rt})
@@ -173,6 +178,12 @@ func (c *Client) RefreshToken(a *auth.Auth) error {
 		}
 	}
 	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+		// 401/403 的最常见成因：与客户端共用的会话被客户端续期轮换作废（客户端文件里
+		// 始终持有唯一活凭证）。先尝试本机自救，成功即视为刷新成功（调用方会 SaveAtomic）。
+		if rerr := RescueFromClientSession(a); rerr == nil {
+			log.Printf("raccoon: refresh 被拒（疑客户端轮换），已采纳本机客户端最新令牌 uid=%s", a.UID)
+			return nil
+		}
 		return &provider.Error{Kind: provider.ErrSessionDead, Status: resp.StatusCode, Msg: truncate(string(raw), 300)}
 	}
 	if resp.StatusCode != http.StatusOK {
