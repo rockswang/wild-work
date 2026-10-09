@@ -654,17 +654,24 @@ function renderFees(fees) {
     return ` <span class="rate-note"${style}>${esc(m.note)}</span>`;
   };
 
-  // 模型标识单元格：模型名 + 上下文/能力/促销标记。
-  // 模型名做成可点击复制（复制完整「渠道/模型」，如 workbuddy/glm-4.6），
-  // 方便直接粘进客户端配置。data-mid 存完整标识供事件委托读取；
-  // 保留原有 title（模型详情）并在其后追加一行复制提示。
-  const modelIdCell = (m, kind) => {
+  // 模型单元格（二开，升级勿丢）：上方为模型名 + 能力/上下文标记，下方为完整模型 ID
+  // （含渠道前缀，即客户端添加模型时实际要填的模型名），点击一键复制到剪贴板。
+  // 模型名本身也可点击复制完整 ID（官方 v2.6.1 交互），两处 data-mid 语义一致。
+  // m.model 来自 /api/fees 是裸名（不带渠道前缀），完整 ID 需拼上 chPrefix（ch.channel）。
+  const modelCellHtml = (m, chPrefix) => {
     if (!m) return "";
-    const mid = `${kind}/${m.model}`;
-    const copyTip = `点击复制：${mid}`;
-    const title = `${modelTip(m)}\n${copyTip}`;
-    return `<code class="fee-model-copy" data-mid="${esc(mid)}" role="button" tabindex="0" title="${esc(title)}">${esc(m.model)}</code>`
-      + `${ctxTag(m)}${capIcons(m)}${noteCell(m)}`;
+    const raw = m.model;
+    // 短名：去掉渠道前缀（`xxx/name` -> `name`），展示在上行的模型名位置
+    const short = raw.includes("/") ? raw.slice(raw.indexOf("/") + 1) : raw;
+    // 完整 ID：裸名补上渠道前缀；模型名本身已带前缀则原样用
+    const full = raw.includes("/") ? raw : (chPrefix ? `${chPrefix}/${raw}` : raw);
+    const copyTip = `点击复制：${full}`;
+    const line = `<div class="mline"><code class="fee-model-copy" data-mid="${esc(full)}" role="button" tabindex="0" title="${esc(modelTip(m))}\n${copyTip}">${esc(short)}</code>${ctxTag(m)}${capIcons(m)}${noteCell(m)}</div>`;
+    // 仅当完整ID != 短名时才显示可复制的完整 ID 行，避免裸名模型重复
+    const idRow = full !== short
+      ? `<span class="full-id" data-mid="${esc(full)}" title="点击复制完整模型 ID：${esc(full)}">${esc(full)}</span>`
+      : "";
+    return `<div class="mcell">${line}${idRow}</div>`;
   };
 
   // 渠道多标签：每个渠道一个 tab，panel 内双列模型布局不变（issue：费率表太长）。
@@ -699,7 +706,9 @@ function renderFees(fees) {
     for (let i = 0; i < models.length; i += 2) {
       const m1 = models[i];
       const m2 = models[i + 1];
-      html += `<tr><td>${modelIdCell(m1, ch.channel)}</td><td>${rateCell(m1)}</td><td>${modelIdCell(m2, ch.channel)}</td><td>${rateCell(m2)}</td></tr>`;
+      const id1 = modelCellHtml(m1, ch.channel);
+      const id2 = modelCellHtml(m2, ch.channel);
+      html += `<tr><td>${id1}</td><td>${rateCell(m1)}</td><td>${id2}</td><td>${rateCell(m2)}</td></tr>`;
     }
     html += `</tbody></table></div>`;
   }
@@ -713,10 +722,17 @@ function renderFees(fees) {
 function bindFeesTabs() {
   const box = $("feesBox");
   box.addEventListener("click", (e) => {
-    // 模型名点击复制优先判定：code.fee-model-copy 不是 .fees-tab，互不冲突。
+    // 模型名点击复制（官方 v2.6.1）：code.fee-model-copy 优先判定，
+    // 与下方的 .full-id（二开完整 ID 行）互不冲突、语义一致。
     const code = e.target.closest("code.fee-model-copy");
     if (code && box.contains(code)) {
       copyText(code.dataset.mid, "模型名");
+      return;
+    }
+    // 完整模型 ID 一键复制（二开，升级勿丢）：点费率表每行模型下方的完整ID即复制
+    const cpid = e.target.closest && e.target.closest(".full-id");
+    if (cpid) {
+      copyText(cpid.dataset.mid || cpid.textContent, "模型 ID");
       return;
     }
     const btn = e.target.closest(".fees-tab");
