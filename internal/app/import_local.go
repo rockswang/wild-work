@@ -30,7 +30,8 @@ import (
 //
 // 设计要点：
 //   - 路径**自适应探测**（多候选 + 环境变量覆盖），不做硬编码单一路径；
-//   - 只在 Windows 生效（客户端只有 Windows 版）；
+//   - Windows/macOS 均生效（Loomy/小浣熊/MonkeyCode 官方客户端 2026 年起均有 macOS 版，
+//     凭据路径按平台分别探测；找不到时返回带路径的错误提示）；
 //   - 写入走 tmp+rename 原子替换、0600，并与 internal/auth.Parse 的嵌套格式逐字段对齐；
 //   - **绝不打印凭据值**（日志只记文件名与 uid）。
 
@@ -261,6 +262,11 @@ func monkeyCodeCookiePath(file string) (string, error) {
 		cands = append(cands, filepath.Join(local, "com.chaitin.baizhi.monkeycode", file))
 		cands = append(cands, filepath.Join(local, "MonkeyCode", file))
 	}
+	// macOS：Electron 数据目录 `~/Library/Application Support/com.chaitin.baizhi.monkeycode/`
+	// （2026-10-08 实测 macOS 版客户端目录与 Windows 版同名，cookie 文件格式一致）。
+	if home, err := os.UserHomeDir(); err == nil {
+		cands = append(cands, filepath.Join(home, "Library", "Application Support", "com.chaitin.baizhi.monkeycode", file))
+	}
 	for _, p := range cands {
 		if fileExists(p) {
 			return p, nil
@@ -306,6 +312,11 @@ func monkeyCodeSettingsPath() (string, error) {
 	if local := strings.TrimSpace(os.Getenv("LOCALAPPDATA")); local != "" {
 		cands = append(cands, filepath.Join(local, "com.chaitin.baizhi.monkeycode", "ohmyagent", "settings.json"))
 		cands = append(cands, filepath.Join(local, "MonkeyCode", "ohmyagent", "settings.json"))
+	}
+	// macOS：settings.json 在 `~/Library/Application Support/com.chaitin.baizhi.monkeycode/ohmyagent/`
+	// （2026-10-08 实测与 Windows 版同级目录结构一致）。
+	if home, err := os.UserHomeDir(); err == nil {
+		cands = append(cands, filepath.Join(home, "Library", "Application Support", "com.chaitin.baizhi.monkeycode", "ohmyagent", "settings.json"))
 	}
 	for _, p := range cands {
 		if fileExists(p) {
@@ -399,13 +410,18 @@ func loomyClientSessionPath() (string, error) {
 	if appData := strings.TrimSpace(os.Getenv("APPDATA")); appData != "" {
 		cands = append(cands, filepath.Join(appData, "Loomy", "auth-session.json"))
 	}
+	// macOS：客户端数据目录 `~/Library/Application Support/loomy/`（2026-10-08 实测
+	// 桌面版凭据即该目录下的 auth-session.json，字段与 Windows 版一致）。
+	if home, err := os.UserHomeDir(); err == nil {
+		cands = append(cands, filepath.Join(home, "Library", "Application Support", "loomy", "auth-session.json"))
+	}
 	for _, p := range cands {
 		if fileExists(p) {
 			return p, nil
 		}
 	}
 	if len(cands) == 0 {
-		return "", errors.New("未找到 Loomy 客户端目录（C:\\Users\\Public\\Loomy 不存在）：请先安装并登录 Loomy 客户端")
+		return "", errors.New("未找到 Loomy 客户端目录（C:\\Users\\Public\\Loomy 或 ~/Library/Application Support/loomy 不存在）：请先安装并登录 Loomy 客户端")
 	}
 	return "", fmt.Errorf("未找到 Loomy 会话文件（已尝试 %d 个路径）：请先在客户端完成登录", len(cands))
 }
