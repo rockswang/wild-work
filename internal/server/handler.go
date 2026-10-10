@@ -642,10 +642,26 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 					kind := sec.Kind()
 					switch kind {
 					case provider.ErrSoftRate:
+						// 单号渠道（当前仅一个账号，如 loomy/小浣熊）：冷却 = 整条渠道下线，
+						// 反不如透传——客户端已通过 SSE 收到上游原始限流错误（3004/429），
+						// 会自行退避重试；与非流式「单账号不罚账号」口径一致。
+						// SingleAccount 渠道（oczen）官方已有完整豁免语义，保持官方原样不重复覆盖。
+						if len(rt.Pool.List()) <= 1 && !rt.SingleAccount {
+							log.Printf("stream error passthrough platform=%s uid=%s kind=%s（单号渠道不罚账号，客户端自行重试）",
+								rt.Kind, acct.UID, kind)
+							break
+						}
 						rt.Pool.Cooldown(acct.UID, pool.CoolSoft, h.cfg.SoftCooldown, "stream business error: "+serr.Error())
 						log.Printf("stream error cooled platform=%s uid=%s kind=%s cooldown=%s",
 							rt.Kind, acct.UID, kind, h.cfg.SoftCooldown)
 					case provider.ErrHardCredit:
+						if len(rt.Pool.List()) <= 1 && !rt.SingleAccount {
+							// 单号渠道：余额/权益不足透传原文，客户端/用户直接看到真实原因（如充值），
+							// 而不是被 503 掩盖成「渠道不可用」。
+							log.Printf("stream error passthrough platform=%s uid=%s kind=%s（单号渠道不罚账号）",
+								rt.Kind, acct.UID, kind)
+							break
+						}
 						rt.Pool.Cooldown(acct.UID, pool.CoolHard, h.cfg.HardCooldown, "stream business error: "+serr.Error())
 						log.Printf("stream error cooled platform=%s uid=%s kind=%s cooldown=%s",
 							rt.Kind, acct.UID, kind, h.cfg.HardCooldown)
