@@ -355,6 +355,16 @@ body {
 }
 .fees code + .ctx-tag { vertical-align: baseline; }
 
+/* 完整模型ID：费率表每行模型下方显示「渠道/模型」，点击即复制（客户端该填的模型名） */
+.fees .mcell { display: flex; flex-direction: column; gap: 3px; align-items: flex-start; }
+.fees .mline { display: inline-flex; align-items: baseline; flex-wrap: wrap; }
+.fees .full-id {
+  display: inline-block; font-family: ui-monospace, monospace; font-size: 11px;
+  color: var(--muted); background: #f0f2f5; padding: 1px 6px; border-radius: 4px;
+  cursor: pointer; user-select: all; line-height: 1.5; white-space: nowrap;
+}
+.fees .full-id:hover { color: var(--primary); background: #e0e7ff; }
+
 /* 配置说明 */
 .docs { font-size: 13px; }
 .docs p { margin-bottom: 8px; }
