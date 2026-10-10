@@ -143,6 +143,9 @@ async function showCreditDetail(e, uid) {
   if (!d) {
     try {
       d = await api("/api/account/resource_detail", { uid });
+      // 竞态守卫：等待接口期间鼠标已移开（hideCreditDetail 已排定关闭且未被
+      // tip hover/翻页取消）→ 不再弹出，避免 tooltip 残留在页面上。
+      if (detailTimer !== null) return;
       detailCache[uid] = d;
     } catch (err) { return; }
   }
@@ -176,7 +179,19 @@ function renderCreditDetail() {
   const d = detailCache[detailState.uid];
   if (!d || !d.items || !d.items.length) return;
 
-  const items = d.items;
+  const items = d.items.slice();
+  // 临期判定与后端 ExpiringWithin 同口径：北京时间墙钟 now + 阈值天数，到期日当天零点前即临期。
+  const expDays = state.expiring_days || 1;
+  const bjNow = Date.now() + new Date().getTimezoneOffset() * 60000 + 8 * 3600 * 1000;
+  const expDeadline = bjNow + expDays * 24 * 3600 * 1000;
+  // 排序：临期（可消耗、有剩余、窗口内到期）→ 可用 → 已用完/不可用/仅展示垫底；组内按到期日升序。
+  const expUtcOf = (it) => {
+    if (!it.expire_at) return Infinity;
+    const [ey, em, ed] = it.expire_at.split("-").map(Number);
+    return ey && em && ed ? Date.UTC(ey, em - 1, ed) : Infinity;
+  };
+  const groupOf = (it) => (it.usable && it.remain > 0) ? (expUtcOf(it) < expDeadline ? 0 : 1) : 2;
+  items.sort((a, b) => groupOf(a) - groupOf(b) || expUtcOf(a) - expUtcOf(b));
   const pages = Math.max(1, Math.ceil(items.length / DETAIL_PAGE_SIZE));
   const page = Math.min(Math.max(0, detailState.page), pages - 1);
   detailState.page = page;
@@ -202,7 +217,7 @@ function renderCreditDetail() {
   html += `</tr></thead><tbody>`;
   for (const it of slice) {
     // 不可用额度整行淡显 + 角标，与可用额度区分开（如 TraeWork 的官方客户端专用池）。
-    const cls = it.usable ? "" : ' class="detail-unusable"';
+    let cls = it.usable ? "" : ' class="detail-unusable"';
     let tag = "";
     if (!it.usable) {
       tag = '<span class="detail-tag" title="该额度仅供官方客户端使用，本工具无法消耗">不可用</span>';
@@ -210,8 +225,26 @@ function renderCreditDetail() {
       // 单位与积分不同（如 MonkeyCode 的每日 Token 额度）：展示但不计入合计。
       tag = '<span class="detail-tag" title="单位与积分不同，仅作展示，不计入合计">仅展示</span>';
     }
+    // 临期条目（可消耗且有剩余、窗口内到期，与后端 ExpiringWithin 余额口径一致）：
+    // 整行淡红底 + 到期日红字 + 临期红章；已用完（remain=0）不标临期，避免与汇总口径打架。
+    let expCell = "-", expCellCls = "";
+    if (it.usable && it.remain > 0 && it.expire_at) {
+      const [ey, em, ed] = it.expire_at.split("-").map(Number);
+      if (ey && em && ed) {
+        const expUtc = Date.UTC(ey, em - 1, ed) - 8 * 3600 * 1000;
+        if (expUtc < expDeadline) {
+          expCell = `${esc(it.expire_at)}<span class="detail-exp-tag" title="${expDays} 天内到期，优先消耗">临期</span>`;
+          expCellCls = ' class="detail-exp"';
+          cls = ' class="detail-exp-row"';
+        } else {
+          expCell = esc(it.expire_at);
+        }
+      } else {
+        expCell = esc(it.expire_at);
+      }
+    }
     html += `<tr${cls}><td>${esc(it.name)}${tag}</td><td>${it.total}</td><td>${it.used}</td><td>${it.remain}</td>`;
-    if (hasExpiry) html += `<td>${it.expire_at ? esc(it.expire_at) : "-"}</td>`;
+    if (hasExpiry) html += `<td${expCellCls}>${expCell}</td>`;
     html += `</tr>`;
   }
   html += `</tbody></table>`;
@@ -1705,6 +1738,9 @@ function bindMainTabs() {
       $("mtabAccounts").classList.toggle("hidden", b.dataset.mtab !== "accounts");
       $("mtabUsage").classList.toggle("hidden", b.dataset.mtab !== "usage");
       $("mtabStats").classList.toggle("hidden", b.dataset.mtab !== "stats");
+      // 切换主 tab 强制收起积分明细 tooltip，避免残留浮在其他页签上
+      const tip = $("creditTip");
+      if (tip) { tip.style.display = "none"; if (detailTimer) { clearTimeout(detailTimer); detailTimer = null; } }
       if (b.dataset.mtab === "usage") {
         loadUsage(); // 切到用量 tab 时拉最新（首次渲染自动刷新）
         if (usageChart) usageChart.resize();

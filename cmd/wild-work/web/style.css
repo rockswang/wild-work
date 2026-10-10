@@ -453,12 +453,21 @@ body {
 .detail-table th, .detail-table td { text-align: left; padding: 3px 8px; border-bottom: 1px solid var(--border); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 150px; }
 .detail-table th { color: var(--muted); font-weight: 500; font-size: 11px; }
 .detail-table td:nth-child(2), .detail-table td:nth-child(3), .detail-table td:nth-child(4) { text-align: right; }
-.detail-table td:last-child { font-weight: 600; }
+.detail-table td:last-child { font-weight: 600; min-width: 112px; }
+/* 套餐名列收窄，把空间让给有效期列（否则日期+临期红章会被 ellipsis 截断） */
+.detail-table td:first-child { max-width: 130px; }
 /* 不可用额度整行淡显 + 角标 */
 .detail-table tr.detail-unusable { color: var(--muted); }
 .detail-tag {
   font-size: 10px; padding: 1px 5px; margin-left: 5px; border-radius: 8px;
   background: #f0f2f5; color: var(--muted);
+}
+/* 临期额度（阈值内到期，与汇总条/卡片临期同口径同色系）：整行淡红底 + 到期日红字 + 临期红章 */
+.detail-table tr.detail-exp-row { background: #fef2f2; }
+.detail-table td.detail-exp { color: var(--danger); }
+.detail-exp-tag {
+  font-size: 10px; padding: 1px 5px; margin-left: 5px; border-radius: 8px;
+  background: var(--danger); color: #fff; font-weight: 600;
 }
 .detail-sum {
   display: flex; gap: 14px; margin-top: 7px; padding-top: 6px;
@@ -782,7 +791,7 @@ body {
 /* 最近临期（块级单元格 + 满高右边框竖线，末列弹性左对齐） */
 #mtabStats .st-ex-row {
   display: grid;
-  grid-template-columns: 30px 110px 168px 88px 84px 1fr;
+  grid-template-columns: 30px 110px 168px 100px 96px 1fr;
   font-size: 12px;
   line-height: 1.5;
   white-space: nowrap;
@@ -900,6 +909,6 @@ body {
 
 @media (max-width: 640px) {
   #mtabStats .st-plat-row { grid-template-columns: 24px 96px 40px 76px 60px 60px 84px 64px 64px 1fr; font-size: 11px; }
-  #mtabStats .st-ex-row { grid-template-columns: 24px 88px 120px 76px 68px 1fr; font-size: 11px; }
+  #mtabStats .st-ex-row { grid-template-columns: 24px 88px 120px 96px 88px 1fr; font-size: 11px; }
   #mtabStats .st-ab-row { grid-template-columns: 24px 64px 88px 110px 1fr 76px 64px; font-size: 11px; }
 }
