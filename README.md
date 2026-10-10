@@ -375,30 +375,26 @@ curl -X POST "http://127.0.0.1:7863/v1/systemone" \
 
 如果对本仓库发布包不放心，可以克隆到本地让 Agent 帮你审查一遍，然后自行基于源码构建（见 [DEVELOPMENT.md](DEVELOPMENT.md)）。
 
-### 2. TraeWork 积分里的「不可用」是什么？
+### 2. 小浣熊在 macOS / Linux 上能用吗？
 
-TraeWork 的额度分两个池，由上游 `available_endpoint` 字段区分：
+可以。小浣熊官方有 macOS / Linux / 银河麒麟客户端（不止 Windows），本工具的「从客户端导入」路径探测
+**本身跨平台**——用标准用户目录 / 环境变量定位客户端凭据（`~/.box-agent/config/auth.json`，或
+`BOX_AGENT_CONFIG_DIR` 覆盖），客户端把配置写在标准位置即可命中；同时从客户端读到的活凭证也用于
+运行时自愈（客户端续期会轮换 token，本工具会从同一个会话文件自动取新 token，无需重新导入）。
 
-- `ep=0`（通用池）：本工具能消耗，显示为**可用积分**
-- `ep=1`（官方客户端专用池）：只有 Trae 官方客户端能用，本工具消耗不了，显示为**不可用**
+> 真正仅 Windows 的是**小浣熊的浏览器授权登录**（依赖 Windows 的 `office-raccoon://` 协议注册 / HKCU）；
+> 在 macOS / Linux 上请使用「从客户端导入」路径，或在非 Windows 手动放置客户端凭据后导入。
+>
+> 注：MonkeyCode 客户端仅发布过 Windows 版；Loomy 客户端配置目录为 Windows 专用路径，其导入在
+> 非 Windows 上按尽力而为处理，找不到凭证时返回明确报错。
 
-所以 TraeWork 卡片会出现类似 `1828可用积分/4400不可用` 的显示——后者再多也帮不上 API 转发。
-本工具的可消耗余额只算 `ep=0`，不会因为专用池额度高而误判账号可用。
-
-> 注：早期版本把所有额度混成一个数字（且用 `group_type` 误判可用性），会让 TraeWork 账号看起来余额充足；
-> v2.2.1 起修正为按 `available_endpoint` 拆分统计。
-
-### 3. TraeWork DeepSeek V4 Flash 模型响应慢
-
-在官方客户端里这个模型也会排队，我的办法是 `ds4f` 用 WorkBuddy 的，`ds4p` 用 TraeWork 的。
-
-### 4. 如何绑定多个 WorkBuddy 国际版账号？
+### 3. 如何绑定多个 WorkBuddy 国际版账号？
 
 添加新账号时，因为默认使用当前已登录的 github/Google 等账号自动登录，因此无法快速添加新的账号。
 这里给出我的方案，在浏览器右上角菜单选择“新建无痕窗口”，在窗口地址栏输入`http://127.0.0.1:7863`打开 WildWork 主界面，即可在干净环境内新增账号。
 也可以打开开发者控制台，单独清除 github.com 和 workbuddy.ai 的 Cookies。
 
-### 5. WorkBuddy 国际版登录后积分显示为0，刷新积分报错
+### 4. WorkBuddy 国际版登录后积分显示为0，刷新积分报错
 注册 WorkBuddy 国际版新账号时，需要选择地区后奖励积分才发放。
 
 ## ⚠️ 风险警告与免责声明
