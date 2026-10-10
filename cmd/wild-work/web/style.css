@@ -270,6 +270,35 @@ body {
 .btn.alt.wbai { background: #0d9488; border-color: #0d9488; color: #fff; }
 .fees .note { color: var(--muted); font-size: 12px; margin-bottom: 8px; }
 
+/* 模型查找入口：标题行内的放大镜按钮（比默认 icon-btn 小一号，避免抬胀标题行） */
+.panel-head h2 .search-btn {
+  width: 24px; height: 24px; font-size: 13px; border-radius: 6px;
+  vertical-align: middle; margin-left: 4px; padding: 0; line-height: 1;
+}
+
+/* 模型查找对话框：紧凑固定尺寸（不随结果跳变/变高，避免位置困扰）。
+   结果上限 12 条（见 app.js MODEL_SEARCH_MAX），故列表高度按上限预留即可。 */
+.modal.modal-search {
+  width: 460px; max-width: 94vw;
+  height: 460px; max-height: 86vh;
+  display: flex; flex-direction: column;
+}
+.modal-search .modal-title { margin-bottom: 10px; }
+.modal-search #modelSearchInput { width: 100%; box-sizing: border-box; margin-bottom: 8px; flex: none; }
+.ms-list { flex: 1 1 auto; min-height: 0; overflow: hidden; }
+.ms-row {
+  display: flex; align-items: center; gap: 8px;
+  padding: 5px 8px; border-radius: 6px; cursor: pointer;
+  font-size: 13px; line-height: 1.5;
+}
+.ms-row:hover { background: #eff6ff; }
+.ms-row:focus-visible { outline: 2px solid var(--primary); outline-offset: -2px; }
+.ms-name { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: ui-monospace, Consolas, monospace; }
+.ms-tags { flex: none; color: var(--muted); font-size: 11px; }
+.ms-rate { flex: none; font-weight: 600; font-size: 12px; color: var(--primary); font-variant-numeric: tabular-nums; }
+.ms-empty { color: var(--muted); font-size: 13px; padding: 14px 8px; text-align: center; }
+.ms-foot { flex: none; margin-top: 6px; color: var(--muted); font-size: 12px; min-height: 18px; }
+
 /* 渠道多标签：收束长费率表（每渠道一个 tab，panel 内双列布局不变） */
 .fees-tabs {
   display: flex;

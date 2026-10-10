@@ -144,7 +144,7 @@
   <!-- 模型列表和费率 -->
   <section class="panel">
     <div class="panel-head">
-      <h2>模型列表和费率</h2>
+      <h2>模型列表和费率 <button class="icon-btn search-btn" id="btnModelSearch" title="查找模型（按关键字快速定位全渠道模型）">🔍</button></h2>
       <button class="btn small" id="btnRefreshFees">刷新</button>
     </div>
     <div id="feesBox" class="fees"></div>
@@ -431,6 +431,16 @@
     <div class="modal-actions" style="justify-content:center">
       <button class="btn small primary" id="btnAboutClose">关闭</button>
     </div>
+  </div>
+</div>
+
+<div class="overlay hidden" id="modelSearchOverlay">
+  <div class="modal modal-search">
+    <div class="modal-title">查找模型</div>
+    <input id="modelSearchInput" class="input" type="text" spellcheck="false" autocomplete="off"
+      placeholder="输入关键字过滤（模型名 / 渠道 / 完整 ID）">
+    <div class="ms-list" id="modelSearchList"></div>
+    <div class="ms-foot" id="modelSearchFoot"></div>
   </div>
 </div>
 

@@ -81,8 +81,22 @@ const window = { addEventListener: () => {}, location: { search: "" } };
 
 // 源码改写：注入 state + 导出函数
 const patched =
-  raw.replace(/let state = null;/, "let state = " + JSON.stringify(FAKE_STATE) + ";") +
-  "\n; globalThis.__T = { renderAccounts, renderSummary, loadStats, renderStats, renderPlatformTable, renderRotation, renderExpiry, renderModels, renderLogs, renderAbnormal, renderAppLog, handleToasts };";
+  raw.replace(/let state = null;/, "let state = " + JSON.stringify(FAKE_STATE) + ";")
+  // 模型查找面板：预置一份费率缓存（正常由 loadFees 填充），供 renderModelSearch 过滤。
+  + "\n; lastFees = " + JSON.stringify({ channels: [
+    { channel: "qodercn", models: [
+      { model: "qwen3.8-flash", priced: true, rate: 0.3, free: false, has_context: true, context_window: 180000, supports_images: false, supports_reasoning: false },
+      { model: "glm-5.3", priced: true, rate: 0.5, free: false, has_context: true, context_window: 200000, supports_images: true, supports_reasoning: true },
+    ] },
+    { channel: "workbuddy", models: [
+      { model: "deepseek-v4", priced: false, rate: 0, free: false, has_context: false },
+      { model: "muse-free", priced: true, rate: 0, free: true, has_context: true, context_window: 128000 },
+    ] },
+    // 溢出场景：另 12 个 qwen* 模型，与 qodercn/qwen3.8-flash 合并共 13 条命中 > 上限 12
+    { channel: "loomy", models: Array.from({ length: 12 }, (_, i) =>
+      ({ model: `qwen-bulk-${i}`, priced: true, rate: 0.1, free: false, has_context: false })) },
+  ] }) + ";"
+  + "\n; globalThis.__T = { renderAccounts, renderSummary, loadStats, renderStats, renderPlatformTable, renderRotation, renderExpiry, renderModels, renderLogs, renderAbnormal, renderAppLog, handleToasts, renderModelSearch, collectAllModels };";
 
 new Function("document", "window", "localStorage", "fetch", "location", "navigator", patched)(
   document,
@@ -119,6 +133,30 @@ check("汇总条渲染了 traework", sum.includes("TraeWork"));
 check("汇总可用 = 2050+2686 = 4736", sum.includes("4,736"), sum.slice(0, 160));
 check("汇总临期 = 100", sum.includes("临期100"));
 check("汇总含合计", sum.includes("合计"));
+
+// ---- 场景 2.5：模型查找面板（纯前端过滤，固定高度/限量/超出提示） ----
+// 假缓存共 16 个模型：qodercn 2 + workbuddy 2 + loomy 12（含 13 个 qwen* 用于溢出断言）
+check("collectAllModels 展平全渠道 16 个模型", T.collectAllModels().length === 16, `实际 ${T.collectAllModels().length}`);
+check("collectAllModels 完整 ID = 渠道/裸名", T.collectAllModels()[0].full === "qodercn/qwen3.8-flash");
+T.renderModelSearch("glm");
+let msHtml = document.getElementById("modelSearchList").innerHTML;
+check("搜索 glm 命中 1 条", (msHtml.match(/class="ms-row"/g) || []).length === 1, msHtml.slice(0, 120));
+check("命中项 data-mid 为完整 ID", msHtml.includes('data-mid="qodercn/glm-5.3"'));
+check("命中项显示渠道徽章与费率", msHtml.includes("QoderCN") && msHtml.includes("x0.50"));
+check("底部提示共 N 个匹配", /共 1 个匹配/.test(document.getElementById("modelSearchFoot").textContent));
+T.renderModelSearch("");
+msHtml = document.getElementById("modelSearchList").innerHTML;
+check("空关键字受上限约束只列 12 条", (msHtml.match(/class="ms-row"/g) || []).length === 12, `实际 ${(msHtml.match(/class="ms-row"/g) || []).length}`);
+check("空关键字提示可输关键字缩小范围", /输入关键字可缩小范围/.test(document.getElementById("modelSearchFoot").textContent), document.getElementById("modelSearchFoot").textContent);
+check("免费模型显示 Free", msHtml.includes("Free"));
+check("未定价模型显示 unknown", msHtml.includes("unknown"));
+T.renderModelSearch("zzz-none");
+check("无匹配时提示无匹配", /无匹配/.test(document.getElementById("modelSearchList").innerHTML));
+// 限量：13 个 qwen* 命中 > 上限 12 → 只渲染 12 条，底部提示还有未显示
+T.renderModelSearch("qwen");
+msHtml = document.getElementById("modelSearchList").innerHTML;
+check("超上限时只渲染 12 条", (msHtml.match(/class="ms-row"/g) || []).length === 12, `实际 ${(msHtml.match(/class="ms-row"/g) || []).length}`);
+check("超上限时底部提示未显示数量", /还有 1 个未显示/.test(document.getElementById("modelSearchFoot").textContent), document.getElementById("modelSearchFoot").textContent);
 
 // ---- 场景 3：运行统计（/api/stats 载荷 → 各区块渲染） ----
 // 载荷形状 = internal/stats 引擎 Snapshot 的 JSON（与 sidecar /capi/stats 对齐）

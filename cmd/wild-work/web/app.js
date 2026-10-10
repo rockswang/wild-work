@@ -105,6 +105,7 @@ async function loadState() {
 async function loadFees() {
   try {
     const fees = await api("/api/fees");
+    lastFees = fees; // 供模型查找面板取全渠道模型（纯前端，不改后端）
     renderFees(fees);
   } catch (e) { /* 费率接口失败不阻塞 */ }
 }
@@ -114,11 +115,73 @@ async function refreshFees() {
   try {
     await api("/api/fees/refresh", {});
     const fees = await api("/api/fees");
+    lastFees = fees;
     renderFees(fees);
     toast("模型列表和费率已刷新");
   } catch (e) { toast(e.message); } finally {
     $("btnRefreshFees").disabled = false;
   }
+}
+
+// ---------- 模型查找（纯前端：从最近一次 /api/fees 结果里按关键字过滤） ----------
+// lastFees 最近一次费率接口响应（loadFees/refreshFees 填充）；查找面板读它取全渠道模型。
+let lastFees = null;
+const MODEL_SEARCH_MAX = 12; // 结果上限：超出只提示、不纵向滚动，保证对话框固定高度
+
+// collectAllModels 展平全渠道模型，附带裸名/完整 ID（完整 ID = 渠道/模型，即客户端该填的名字）。
+function collectAllModels() {
+  const out = [];
+  for (const ch of (lastFees && lastFees.channels) || []) {
+    for (const m of ch.models || []) {
+      const raw = m.model;
+      const short = raw.includes("/") ? raw.slice(raw.indexOf("/") + 1) : raw;
+      const full = raw.includes("/") ? raw : (ch.channel ? `${ch.channel}/${raw}` : raw);
+      out.push({ ch: ch.channel, m, short, full });
+    }
+  }
+  return out;
+}
+
+function openModelSearch() {
+  $("modelSearchOverlay").classList.remove("hidden");
+  const inp = $("modelSearchInput");
+  inp.value = "";
+  renderModelSearch("");
+  inp.focus();
+}
+function closeModelSearch() { $("modelSearchOverlay").classList.add("hidden"); }
+
+// renderModelSearch 按关键字过滤全渠道模型并渲染（固定高度、限量、超出提示）。
+// 关键字匹配完整 ID 或裸名（大小写不敏感）——两处都包含渠道名，故搜渠道亦可。
+function renderModelSearch(q) {
+  const kw = String(q || "").trim().toLowerCase();
+  const all = collectAllModels();
+  const hit = kw ? all.filter((x) => x.full.toLowerCase().includes(kw) || x.short.toLowerCase().includes(kw)) : all;
+  const shown = hit.slice(0, MODEL_SEARCH_MAX);
+  const box = $("modelSearchList");
+  if (!shown.length) {
+    box.innerHTML = `<div class="ms-empty">${all.length ? "无匹配模型" : "费率数据尚未加载，请点「刷新」后再试"}</div>`;
+  } else {
+    box.innerHTML = shown.map(({ ch, m, short, full }) => {
+      const caps = [m.supports_images ? "👁" : "", m.supports_reasoning ? "🧠" : ""].join("");
+      const ctx = (m.has_context && m.context_window) ? `(${fmtTokens(m.context_window)})` : "";
+      const rate = m.free ? "Free" : (m.priced ? `x${m.rate.toFixed(2)}` : "unknown");
+      return `<div class="ms-row" data-mid="${esc(full)}" role="button" tabindex="0" title="点击复制完整模型 ID：${esc(full)}">`
+        + `<span class="badge ${chClass(ch)}">${esc(chLabel(ch))}</span>`
+        + `<span class="ms-name">${esc(short)}</span>`
+        + `<span class="ms-tags">${ctx}${caps}</span>`
+        + `<span class="ms-rate">${esc(rate)}</span>`
+        + `</div>`;
+    }).join("");
+  }
+  // 底部提示：命中数 / 未显示数（结果超上限时明确告知，用户可细化关键字）。
+  const hidden = hit.length - shown.length;
+  $("modelSearchFoot").textContent = !all.length ? ""
+    : (hit.length === 0 ? "无匹配"
+      : (hidden > 0
+        ? (kw ? `命中 ${hit.length} 个，仅显示前 ${shown.length} 个，还有 ${hidden} 个未显示，请细化关键字`
+              : `共 ${hit.length} 个模型，仅显示前 ${shown.length} 个，输入关键字可缩小范围`)
+        : `共 ${hit.length} 个匹配`));
 }
 
 // ---------- 积分明细 tooltip ----------
@@ -1480,6 +1543,20 @@ function bind() {
   $("btnCopyUrl").onclick = copyUrl;
   $("btnCancelLogin").onclick = cancelLogin;
   $("btnRefreshFees").onclick = refreshFees;
+  // 模型查找面板（纯前端）：入口按钮 + 关闭 + 输入即过滤 + 结果点击复制完整 ID。
+  $("btnModelSearch").onclick = openModelSearch;
+  $("modelSearchOverlay").onclick = (e) => { if (e.target === $("modelSearchOverlay")) closeModelSearch(); };
+  $("modelSearchInput").oninput = (e) => renderModelSearch(e.target.value);
+  $("modelSearchInput").onkeydown = (e) => { if (e.key === "Escape") closeModelSearch(); };
+  $("modelSearchList").onclick = (e) => {
+    const row = e.target.closest(".ms-row");
+    if (row) copyText(row.dataset.mid, "模型 ID");
+  };
+  $("modelSearchList").onkeydown = (e) => {
+    if (e.key !== "Enter" && e.key !== " ") return;
+    const row = e.target.closest(".ms-row");
+    if (row) { e.preventDefault(); copyText(row.dataset.mid, "模型 ID"); }
+  };
   $("chkAutostart").onchange = toggleAutostart;
   $("btnAdminLogout").onclick = () => logout();
   $("btnClearAdminPass").onclick = clearAdminPassword;
