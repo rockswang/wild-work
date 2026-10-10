@@ -435,3 +435,60 @@ func (r *errAfterReader) Read(p []byte) (int, error) {
 	r.off += n
 	return n, nil
 }
+
+// TestRefreshWithTokenWebFirst 刷新必须**先试 web 前缀**（2026-10-10 实测 electron 旧前缀已 404），
+// 并正确解析出轮换后的 access/refresh。
+func TestRefreshWithTokenWebFirst(t *testing.T) {
+	var hit []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hit = append(hit, r.URL.Path)
+		var body map[string]string
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		if body["refresh_token"] != "old-rt" {
+			t.Errorf("提交的 refresh_token 不符：%v", body)
+		}
+		_, _ = w.Write([]byte(`{"code":0,"data":{"access_token":"new-at","refresh_token":"new-rt"}}`))
+	}))
+	defer srv.Close()
+
+	c := New()
+	c.AuthBase = srv.URL
+	at, rt, err := c.RefreshWithToken("old-rt")
+	if err != nil {
+		t.Fatalf("RefreshWithToken: %v", err)
+	}
+	if at != "new-at" || rt != "new-rt" {
+		t.Fatalf("轮换后的令牌不符：at=%q rt=%q", at, rt)
+	}
+	if len(hit) != 1 || hit[0] != EpAuthRefreshWeb {
+		t.Fatalf("应先试且只试 web 前缀，实际命中 %v", hit)
+	}
+}
+
+// TestRefreshFallsBackToElectronOn404 web 前缀 404 时回落 electron 旧前缀（兼容旧上游）。
+func TestRefreshFallsBackToElectronOn404(t *testing.T) {
+	var hit []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hit = append(hit, r.URL.Path)
+		if r.URL.Path == EpAuthRefreshWeb {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		_, _ = w.Write([]byte(`{"code":0,"data":{"access_token":"at2","refresh_token":"rt2"}}`))
+	}))
+	defer srv.Close()
+
+	c := New()
+	c.AuthBase = srv.URL
+	at, rt, err := c.RefreshWithToken("old-rt")
+	if err != nil {
+		t.Fatalf("应回落成功：%v", err)
+	}
+	if at != "at2" || rt != "rt2" {
+		t.Fatalf("回落结果不符：at=%q rt=%q", at, rt)
+	}
+	want := []string{EpAuthRefreshWeb, EpAuthRefresh}
+	if len(hit) != 2 || hit[0] != want[0] || hit[1] != want[1] {
+		t.Fatalf("回落路径不符：%v", hit)
+	}
+}

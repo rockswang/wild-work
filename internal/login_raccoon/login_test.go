@@ -3,170 +3,56 @@ package login_raccoon
 import (
 	"encoding/base64"
 	"encoding/json"
-	"net/http"
-	"net/http/httptest"
-	"strings"
-	"sync/atomic"
 	"testing"
 
 	"wild-work/internal/raccoon"
 )
 
-// fakeJWT 造一个仅含 payload 的假 JWT（jwtExp 只解 payload，不验签）。
-func fakeJWT(t *testing.T, exp int64) string {
+// fakeJWT 造一个仅含 payload 的假 JWT（本包只解 payload，不验签）。
+func fakeJWT(t *testing.T, claims map[string]any) string {
 	t.Helper()
-	payload, _ := json.Marshal(map[string]any{"exp": exp, "name": "tester"})
+	payload, _ := json.Marshal(claims)
 	return "header." + base64.RawURLEncoding.EncodeToString(payload) + ".sig"
 }
 
-// TestExchangeSuccess 正常兑换：按约定字段发授权码、解析 data 信封、取到 exp。
-func TestExchangeSuccess(t *testing.T) {
-	const exp = int64(1800000000)
-	tok := fakeJWT(t, exp)
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != raccoon.EpAuthCodeWeb {
-			t.Errorf("请求路径不符：%s", r.URL.Path)
-		}
-		if r.Method != http.MethodPost {
-			t.Errorf("期望 POST，实际 %s", r.Method)
-		}
-		if ct := r.Header.Get("Content-Type"); !strings.Contains(ct, "application/json") {
-			t.Errorf("Content-Type 不符：%s", ct)
-		}
-		var body map[string]string
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-			t.Errorf("请求体解析失败：%v", err)
-		}
-		if body["authorization_code"] != "code-1" {
-			t.Errorf("授权码字段不符：%v", body)
-		}
-		_ = json.NewEncoder(w).Encode(map[string]any{
-			"code": 0,
-			"data": map[string]any{
-				"access_token":    tok,
-				"refresh_token":   "rt-1",
-				"office_identity": "org-1",
-				"office_org_name": "测试组织",
-				"office_org_role": "owner",
-			},
-		})
-	}))
-	defer srv.Close()
-
-	r, err := exchange(srv.URL, srv.Client(), "code-1")
-	if err != nil {
-		t.Fatalf("exchange: %v", err)
+// TestJwtOwnerType 区分真实账号（users）与访客（visitors）——这是「Cookie 出现 ≠ 登录完成」
+// 的判据：小浣熊对未登录访客也会下发 raccoon_refresh_token，必须靠 owner_type 甄别，
+// 否则会抓到一个不可用的访客凭据（对齐智谱清言 R28 的教训）。
+func TestJwtOwnerType(t *testing.T) {
+	cases := []struct {
+		name string
+		tok  string
+		want string
+	}{
+		{"真实账号", fakeJWT(t, map[string]any{"owner_type": "users", "name": "RaccoonAiden"}), "users"},
+		{"访客", fakeJWT(t, map[string]any{"owner_type": "visitors", "name": ""}), "visitors"},
+		{"无字段", fakeJWT(t, map[string]any{"name": "x"}), ""},
+		{"非法", "not-a-jwt", ""},
+		{"空", "", ""},
 	}
-	if r.AccessToken != tok || r.RefreshToken != "rt-1" || r.OfficeIdentity != "org-1" {
-		t.Fatalf("凭据解析不符：%+v", r)
-	}
-	if r.ExpiresAt != exp {
-		t.Fatalf("exp 期望 %d 实际 %d", exp, r.ExpiresAt)
+	for _, c := range cases {
+		if got := jwtOwnerType(c.tok); got != c.want {
+			t.Errorf("%s: jwtOwnerType 期望 %q 实际 %q", c.name, c.want, got)
+		}
 	}
 }
 
-// TestExchangeBusinessError 业务码非 0（如 200035 = 授权码已消费）应立即失败，
-// 且不再拿同一个 code 去试另一个前缀（换端点也没用，只会白跑一次请求）。
-func TestExchangeBusinessError(t *testing.T) {
-	var calls int32
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		atomic.AddInt32(&calls, 1)
-		_ = json.NewEncoder(w).Encode(map[string]any{
-			"code": 200035,
-			"msg":  "authorization code invalid",
-		})
-	}))
-	defer srv.Close()
-
-	_, err := exchange(srv.URL, srv.Client(), "code-1")
-	if err == nil {
-		t.Fatal("期望失败")
+// TestJwtName 取 uid（name claim）。
+func TestJwtName(t *testing.T) {
+	tok := fakeJWT(t, map[string]any{"owner_type": "users", "name": "RaccoonAiden"})
+	if got := jwtName(tok); got != "RaccoonAiden" {
+		t.Fatalf("jwtName 期望 RaccoonAiden 实际 %q", got)
 	}
-	if !strings.Contains(err.Error(), "200035") {
-		t.Fatalf("错误应带上业务码：%v", err)
-	}
-	if n := atomic.LoadInt32(&calls); n != 1 {
-		t.Fatalf("业务错误不应回落重试，实际请求 %d 次", n)
-	}
-}
-
-// TestExchangeFallsBackOn404 端点不存在（404）时回落到另一个前缀。
-func TestExchangeFallsBackOn404(t *testing.T) {
-	var paths []string
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		paths = append(paths, r.URL.Path)
-		if r.URL.Path == raccoon.EpAuthCodeWeb {
-			w.WriteHeader(http.StatusNotFound)
-			return
+	for _, bad := range []string{"", "not-a-jwt", "a.b"} {
+		if got := jwtName(bad); got != "" {
+			t.Fatalf("jwtName(%q) 期望空 实际 %q", bad, got)
 		}
-		_ = json.NewEncoder(w).Encode(map[string]any{
-			"code": 0,
-			"data": map[string]any{"access_token": fakeJWT(t, 1), "refresh_token": "rt"},
-		})
-	}))
-	defer srv.Close()
-
-	r, err := exchange(srv.URL, srv.Client(), "code-1")
-	if err != nil {
-		t.Fatalf("exchange 应回落成功：%v", err)
-	}
-	if r.RefreshToken != "rt" {
-		t.Fatalf("回落结果不符：%+v", r)
-	}
-	if len(paths) != 2 || paths[0] != raccoon.EpAuthCodeWeb || paths[1] != raccoon.EpAuthCodeElectron {
-		t.Fatalf("回落路径不符：%v", paths)
-	}
-}
-
-// TestExchangeNoToken 响应里没有 access_token 必须报错，不能当成成功。
-func TestExchangeNoToken(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_ = json.NewEncoder(w).Encode(map[string]any{"code": 0, "data": map[string]any{}})
-	}))
-	defer srv.Close()
-
-	_, err := exchange(srv.URL, srv.Client(), "code-1")
-	if err == nil || !strings.Contains(err.Error(), "access_token") {
-		t.Fatalf("期望缺 token 报错，实际 %v", err)
-	}
-}
-
-// TestExchangeTopLevelToken 兼容个别版本把凭据直接放在顶层。
-func TestExchangeTopLevelToken(t *testing.T) {
-	tok := fakeJWT(t, 42)
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_ = json.NewEncoder(w).Encode(map[string]any{"code": 0, "access_token": tok, "refresh_token": "rt"})
-	}))
-	defer srv.Close()
-
-	r, err := exchange(srv.URL, srv.Client(), "code-1")
-	if err != nil {
-		t.Fatalf("exchange: %v", err)
-	}
-	if r.AccessToken != tok {
-		t.Fatalf("顶层 token 未兜底解析：%+v", r)
-	}
-}
-
-// TestExchangeEmptyCode 空授权码直接拒绝，不发请求。
-func TestExchangeEmptyCode(t *testing.T) {
-	var calls int32
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		atomic.AddInt32(&calls, 1)
-	}))
-	defer srv.Close()
-
-	if _, err := exchange(srv.URL, srv.Client(), "  "); err == nil {
-		t.Fatal("空授权码应报错")
-	}
-	if n := atomic.LoadInt32(&calls); n != 0 {
-		t.Fatalf("空授权码不应发请求，实际 %d 次", n)
 	}
 }
 
 // TestJwtExp 覆盖 exp 解析（含非法输入不得 panic）。
 func TestJwtExp(t *testing.T) {
-	if got := jwtExp(fakeJWT(t, 123456)); got != 123456 {
+	if got := jwtExp(fakeJWT(t, map[string]any{"exp": float64(123456)})); got != 123456 {
 		t.Fatalf("jwtExp 期望 123456 实际 %d", got)
 	}
 	for _, bad := range []string{"", "not-a-jwt", "a.b", "a.!!!.c"} {
@@ -176,10 +62,111 @@ func TestJwtExp(t *testing.T) {
 	}
 }
 
-// TestShutdownIdempotent 无 state、无备份时 Shutdown 必须静默成功（幂等）。
-func TestShutdownIdempotent(t *testing.T) {
-	dir := t.TempDir()
-	statePath := dir + "/login-state.json"
-	Shutdown(statePath, dir)
-	Shutdown(statePath, dir)
+// TestWebLoginURL 登录入口必须指向网页版登录页（带 loginModal=true 直接弹登录框）。
+func TestWebLoginURL(t *testing.T) {
+	if WebLoginURL != "https://office.xiaohuanxiong.com/home?loginModal=true" {
+		t.Fatalf("WebLoginURL 不符：%s", WebLoginURL)
+	}
 }
+
+// TestCookieConstants Cookie 名与域必须与实盘抓包一致
+// （2026-10-10 抓包：raccoon_refresh_token 落在 .xiaohuanxiong.com 域）。
+func TestCookieConstants(t *testing.T) {
+	if CookieName != "raccoon_refresh_token" {
+		t.Fatalf("CookieName 不符：%s", CookieName)
+	}
+	if CookieDomain != "xiaohuanxiong.com" {
+		t.Fatalf("CookieDomain 不符：%s", CookieDomain)
+	}
+}
+
+// TestPollWithoutSession 无会话时 Poll 报错而非 panic。
+func TestPollWithoutSession(t *testing.T) {
+	mu.Lock()
+	old := current
+	current = nil
+	mu.Unlock()
+	defer func() { mu.Lock(); current = old; mu.Unlock() }()
+
+	if _, err := Poll(); err != ErrPending {
+		t.Fatalf("无会话时 Poll 应返回 ErrPending（取消由上层 ctx 分支处理），实际 %v", err)
+	}
+}
+
+// TestPollSessionStates 覆盖 Poll 对各状态的映射（不启动真实浏览器）。
+func TestPollSessionStates(t *testing.T) {
+	mk := func(status string, err error, res Result) *WebSession {
+		s := &WebSession{status: status, err: err}
+		if status == "success" {
+			s.result = res
+		}
+		return s
+	}
+	cases := []struct {
+		name    string
+		sess    *WebSession
+		wantErr bool
+		wantUID string
+	}{
+		{"pending", mk("pending", nil, Result{}), true, ""},
+		{"success", mk("success", nil, Result{AccessToken: "at", RefreshToken: "rt"}), false, ""},
+		{"failed", mk("failed", errStr("浏览器未找到"), Result{}), true, ""},
+		{"cancelled", mk("cancelled", nil, Result{}), true, ""},
+	}
+	for _, c := range cases {
+		mu.Lock()
+		current = c.sess
+		mu.Unlock()
+		r, err := Poll()
+		if c.wantErr {
+			if err == nil {
+				t.Errorf("%s: 期望错误，实际成功 %+v", c.name, r)
+			}
+			if c.name == "pending" && err != ErrPending {
+				t.Errorf("%s: 期望 ErrPending 实际 %v", c.name, err)
+			}
+		} else {
+			if err != nil {
+				t.Errorf("%s: 期望成功，实际 %v", c.name, err)
+			}
+			if r.RefreshToken != "rt" {
+				t.Errorf("%s: 凭据不符 %+v", c.name, r)
+			}
+		}
+	}
+	mu.Lock()
+	current = nil
+	mu.Unlock()
+}
+
+// TestStartRejectsConcurrentLogin 已有 pending 会话时拒绝再次发起。
+func TestStartRejectsConcurrentLogin(t *testing.T) {
+	mu.Lock()
+	current = &WebSession{status: "pending"}
+	mu.Unlock()
+	defer func() { mu.Lock(); current = nil; mu.Unlock() }()
+
+	if _, err := Start(); err == nil {
+		t.Fatal("已有 pending 会话时应拒绝并发登录")
+	}
+}
+
+// TestShutdownIdempotent 无会话时 Shutdown 必须静默成功（幂等）。
+func TestShutdownIdempotent(t *testing.T) {
+	mu.Lock()
+	current = nil
+	mu.Unlock()
+	Shutdown()
+	Shutdown()
+}
+
+// TestRefreshWithTokenEmpty 空 refresh_token 应立刻报错，不发请求、不 panic。
+func TestRefreshWithTokenEmpty(t *testing.T) {
+	if _, _, err := raccoon.New().RefreshWithToken(""); err == nil {
+		t.Fatal("空 refresh_token 应报错")
+	}
+}
+
+type errStr string
+
+func (e errStr) Error() string { return string(e) }

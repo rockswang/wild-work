@@ -70,6 +70,7 @@ Wild-Work 是 WorkBuddy（国内版+国际版）/TraeWork/Qoder 多渠道账号�
 | R41 | **小浣熊协议回调必须由 `main.go` 在初始化前拦截（`--raccoon-callback`）**（2026-10-05） | **背景**：小浣熊「浏览器授权登录」的授权码经自定义深链 `office-raccoon://auth/callback` 回传，实现方式是登录期间临时改写 HKCU 的 `office-raccoon` 注册表命令行为 `"<wild-work.exe>" --raccoon-callback "%1"`。`internal/raccoon` 把 `CallbackFlag` 与 `SaveCallback()` 都写好了，**但 `cmd/wild-work/main.go` 从未解析该 flag** ⇒ Windows 唤起回调子进程后，它当作普通启动又拉了一份 daemon：端口被占（`listen … bind: Only one usage…`）、**且它的启动自愈看到「残留的协议改写」立刻 `RestoreProtocol`+`ClearCallback`** ⇒ 授权码从未落盘，常驻进程轮询到 5 分钟超时。**全程不报错不崩溃**，用户只看到「点完授权但账号没加进来」。**修法**：`main.go` 在 `os.Chdir(workDir())` 之后、**任何初始化（config/日志/服务/托盘）之前** 拦截 `handleRaccoonCallback(os.Args[1:])`，命中即「落盘后 `os.Exit`」，绝不启动第二份服务。**同时**：`windowsgui` 构建无控制台，回调结果必须追加写进 `data/app.log`（否则失败时零线索）。**同类教训**：这与 R34（新增渠道漏 `go xxxSch.Run()`）同族 —— **「声明了却没接线」的疏漏在源码层就能判定**，故补静态回归 `cmd/wild-work/raccoon_callback_test.go`（断言 main.go 调用了 handler、位置在服务初始化前、分支含 `os.Exit`），去掉修复即失败。**附带**：`/api/state` 新增 `login_error` —— 此前前端只看 `login_busy`，把**所有渠道**的登录失败/超时都显示成「登录完成」，正是它掩盖了本次问题；现由 `peekLoginError()` 非破坏式回传真实原因（读取即清空会被 `/api/state` 的其它调用方偷走） |
 | R42 | **渠道本地模型校验必须取「静态表 ∪ 动态目录」的并集**（2026-10-05） | **背景**：raccoon / loomy 都做本地模型名校验（上游对未知模型名**静默回落到默认模型**并返回 200，不校验会让用户以为在用 A、实际扣 B 的额度），但实现只查**静态表**（`KnownModel(id)`）⇒ 上游目录新增的模型会被本地 400 误拒，而**同一个模型正被 `/v1/models` 正常列出**（后者读的是动态目录 `FetchModels` 结果）——表现为「面板列出却调不动」。**实测（2026-10-05）**：raccoon 账户 `/v1/models` 列出 9 个模型，其中 `sn-sensenova-6-8-flash` 调对话被本地 400 `model_not_found`，但直连上游同一模型 **HTTP 200 正常服务**（`sn-sensenova-6-8-flash-lite` 在静态表里、`sn-sensenova-6-8-flash` 不在，二者仅差一个后缀）。**修法**：`fetchCatalog` / `fetchModels` 成功后把目录里的模型名记进 Client（`liveIDs`，**单调扩大、只增不减**——避免目录瞬时抖动把可用模型判成未知），`ChatStream` 改查 `c.knownModel()`（静态表 ∪ liveIDs）。两渠道同款修复 + 回归测试 `TestKnownModelAcceptsLiveCatalog`（去掉并集即失败）。**顺带**：给两个 Client 加 `Base` 字段（默认常量端点，测试注入 httptest 假上游），避免为写这条测试而把 `LLMBase`/`GatewayBase` 从 const 改成 var |
 | R43 | **运行统计（`internal/stats`）与用量流水（`internal/ledger`）是两套并列口径，不合并、不互校**（2026-10-07，PR #71–#73） | **背景**：新增「运行统计」tab 时引入了第二套统计面。分工：`ledger` = 磁盘 JSONL 双流水（`data/ledger/{usage,credit}-*.jsonl`），账号**条目差分**口径，按需扫描聚合（R17）；`stats` = 内存实时 + 按日归档 `data/stats.json`，「今日」口径——消耗走**余额下降差值**、收入走**日志签到事件**（`events.go` 正则解析 `app.log`，因「登录即自动签到」等场景条目晚于入账建立，差值恒 0 漏记）、逐请求 token 走 **usage 帧精确值**（`usage.go`）。**决议**：两者**零共享状态、零互相写入**（stats 仅只读 `ledger.Query(1)` 取当日作废），各自标注口径、互不引用；**数字天然不同是设计而非缺陷**（差值含积分包到期作废，ledger 已拆 spend/expire），**不追求对齐**。**边界**：`ledger` 仍是面板「用量与积分」的数据源与 issue #67 等待修的口径；`stats` 只服务「运行统计」tab。新增统计需求时**先明确归属**（精确拆分→ledger；实时/今日/趋势→stats），**不得**为对齐数字而改动另一侧。**注入纪律**：stats 全部数据输入走**进程内直调**（`allStatuses` / `handler.StickySnapshot` / `ledger.Query`），**不得** HTTP 自环（R13）；`main.go` 须 `go appInst.StartStatsFeeders(sctx)`（漏接线即静默无数据，同 R34 家族） |
+| R44 | **小浣熊登录改用「网页版 CDP 捕获」，废弃桌面协议回调**（2026-10-10） | **背景**：原「浏览器授权登录」靠改写 HKCU 的 `office-raccoon://` 协议注册来接住深链授权码（R41），仅 Windows 可用、要求本机装官方客户端、且与客户端抢协议。**实测**（`ref/xiaohuanxiong_web_20261010.saz`）：网页版登录成功后前端 JS 会把凭据写进 Cookie `raccoon_refresh_token`（域 `.xiaohuanxiong.com`），且该凭据与桌面端**同一套**（JWT 无平台声明）——实测目录/余额/推理/刷新四项全通，`model_catalog` 的 **9 个模型全部可用**。**修法**：`internal/login_raccoon` 改为网页版流程（`web.go`）——拉起**独立 profile** 的 Edge/Chrome（复用 `internal/cdp`）打开 `office.xiaohuanxiong.com/home?loginModal=true` → CDP 轮询 Cookie → **判据是 JWT `owner_type==users`**（访客也下发 Cookie，见 R28 同款教训）→ 调 `/api/web/auth/v1/refresh` 换取并落盘凭据。**跨平台**（纯 HTTP + 系统浏览器，不再依赖注册表）；桌面协议登录代码（`protocol*.go` 的 Hijack/Backup/restore、`--raccoon-callback` 入口）**保留但不再调用**，仅作旧版注册表残留的启动自愈（`healRaccoonProtocol`）。**「从客户端导入」路径保留**（`import_local.go`）。**已知限制（面板弹窗已告知）**：上游 refresh **轮换 refresh_token**，若同账号凭据被本工具与浏览器/客户端**共用**会互踢；要并存须用本流程**单独登录一次**（新建独立会话，`sid` 不同）。回归测试 `internal/login_raccoon/login_test.go`（owner_type 甄别 / Poll 状态机 / 并发拒绝 / 幂等 Shutdown） |
 
 ## 2. 架构选型（依据）
 
@@ -175,10 +176,12 @@ POST /api/quit                     # 退出程序
 > 按模型声明的 type 分流到 `{base}/messages`（Anthropic 形状）或 `{base}/responses`（Responses 形状），
 > 两路都是无状态 SSE；上游无目录/额度/刷新接口 → 模型表静态、额度恒 0、`RefreshToken` 空实现。
 > 协议对照参考：`codkeep/MonkeyCodeReverseEngineer`（Apache-2.0）。
-> **小浣熊（`raccoon/*`）**：两条添加路径 —— 面板登录按钮走浏览器授权（登录期间临时把
-> `office-raccoon://` 协议回调指向本工具以接住授权码，结束立即恢复注册表，见 internal/login_raccoon），
-> 弹窗次按钮「从客户端导入」读本机 `.box-agent/config/auth.json`。凭据 access_token ≈2h +
-> refresh_token ≈30d，保活每 4 小时一次以减少「请求先 401 再刷新」的往返；无签到端点。
+> **小浣熊（`raccoon/*`）**：两条添加路径 —— 面板登录按钮走**网页版自动登录**（拉起独立 profile 的
+> Edge/Chrome，登录后经 CDP 捕获 Cookie `raccoon_refresh_token`，见 internal/login_raccoon/web.go；
+> 跨平台，不再依赖 Windows 注册表，详见 R44），弹窗次按钮「从客户端导入」读本机
+> `.box-agent/config/auth.json`。凭据 access_token ≈1h + refresh_token ≈30d，保活每 4 小时一次
+> 以减少「请求先 401 再刷新」的往返；无签到端点。**注意互踢**：上游 refresh 轮换 refresh_token，
+> 同账号凭据共用（本工具 + 浏览器/客户端）会互踢，需各自单独登录（独立 `sid`）才能并存。
 > 上游默认档即最深思考，故不接档位面。
 > 接口结构整理：`xxhhlk/raccoon2api`（MIT）。
 > **Loomy（`loomy/*`）**：导入型渠道 —— 凭据由面板「从本机客户端导入」读

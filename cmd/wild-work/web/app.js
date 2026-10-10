@@ -394,11 +394,11 @@ const noExplicitCheckin = (g) => NO_EXPLICIT_CHECKIN.has(g);
 // 导入型渠道：凭据由本机已登录的官方客户端提供，没有浏览器登录流程（见 internal/app/import_local.go）。
 const IMPORT_LOCAL_CHANNELS = new Set(["monkeycode", "raccoon", "loomy"]);
 const isImportLocal = (ch) => IMPORT_LOCAL_CHANNELS.has(ch);
-// 支持「浏览器授权登录」的渠道：登录期间临时把该渠道的自定义协议回调指向本工具，
-// 以便接住授权码并完成 token 兑换。
-// 小浣熊两个集合都命中 —— 弹窗里同时给「浏览器授权登录」与「从客户端导入」两个动作。
-const PROTOCOL_LOGIN_CHANNELS = new Set(["raccoon"]);
-const hasProtocolLogin = (ch) => PROTOCOL_LOGIN_CHANNELS.has(ch);
+// 支持「网页版自动登录」的渠道：后端拉起独立 profile 的浏览器，用户在网页里登录，
+// 后端经 CDP 捕获凭据（小浣熊：Cookie 里的 raccoon_refresh_token）。
+// 小浣熊两个集合都命中 —— 弹窗里同时给「网页版登录」与「从客户端导入」两个动作。
+const WEB_LOGIN_CHANNELS = new Set(["raccoon"]);
+const hasWebLogin = (ch) => WEB_LOGIN_CHANNELS.has(ch);
 // 无手动签到渠道的状态文案：国际版是「自动领日活奖励」，千问办公为「无签到」。
 const NO_CHECKIN_TAG = { workbuddyai: "自动领日活奖励", oczen: "不支持" };
 const noCheckinText = (g) => NO_CHECKIN_TAG[g] || "无签到";
@@ -937,7 +937,7 @@ const NO_CHECKIN_LOGIN_HINT = {
   workbuddyai: "（无需手动签到，定时自动对话保活并领取日活奖励）",
   qwenwork: "（每日积分服务端 00:00 自动发放；若浏览器已登录千问办公则全自动完成，否则需扫码一次）",
   monkeycode: "（凭据来自本机已登录的 MonkeyCode 客户端；上游无续期接口，客户端重新登录后需再次导入）",
-  raccoon: "（凭据来自本机已登录的小浣熊客户端；access_token 约 2 小时，本工具会自动续期）",
+  raccoon: "（支持「网页版登录」与「从客户端导入」两种方式；access_token 约 1 小时，本工具会自动续期，上游刷新时会轮换 refresh_token）",
   loomy: "（凭据来自本机已登录的 Loomy 客户端；上游无续期接口，约 14 天后需重新登录并再次导入）",
   glm: "（登录后请按下方指引复制 refresh_token 粘贴回来）",
 };
@@ -950,12 +950,20 @@ function promptLogin(channel) {
   altBtn.classList.add("hidden");
   altBtn.onclick = null;
 
-  // 浏览器授权登录渠道：主按钮走浏览器授权 + 协议回调接管，次按钮回退到本机客户端导入。
-  if (hasProtocolLogin(channel)) {
+  // 网页版登录渠道：主按钮走「拉起浏览器 + 自动捕获凭据」，次按钮回退到本机客户端导入。
+  if (hasWebLogin(channel)) {
     pendingAction = "login";
     $("lcTitle").textContent = "添加 " + name + " 账号";
-    $("lcMsg").textContent = `点击「登录${name}」将打开浏览器授权页，登录完成后本工具会自动接管回调并保存账号。`
-      + `登录期间会把 ${name} 的协议注册临时指向本工具（结束即恢复），请勿在此期间启动${name}客户端，否则协议注册会被它覆盖。`
+    $("lcMsg").innerHTML = `点击「登录${name}」会打开一个<b>独立的浏览器窗口</b>（不影响你日常浏览器的登录态），`
+      + `请在其中正常登录（扫码 / 手机号 / 微信均可），登录完成后本工具会自动捕获凭据并保存账号。`
+      + `<div class="glm-warn" style="margin-top:10px">`
+      + `<div class="glm-warn-title">⚠️ 关于登录态互踢</div>`
+      + `本工具会用捕获到的凭据<b>自动续期</b>（上游刷新时会轮换 refresh_token）。`
+      + `若你把这个账号的凭据<b>同时</b>用在本工具和浏览器 / 官方客户端上，两边会争抢同一个 refresh_token，`
+      + `可能出现<b>其中一侧被挤下线</b>的情况（上游可能对同一账号限制单会话）。`
+      + `想两边同时用，请在本工具里点「登录${name}」<b>单独登录一次</b>（本流程新建独立会话），`
+      + `而不是从浏览器复制凭据粘进来。`
+      + `</div>`
       + `也可以改用「从客户端导入」：直接读取本机已登录客户端的凭据。`;
     $("btnLoginConfirm").textContent = "登录" + name;
     altBtn.textContent = "从客户端导入";
@@ -1010,12 +1018,17 @@ async function startLogin(channel) {
     const url = r.auth_url;
     if (!url) { toast("无法获取登录链接"); return; }
     $("loginTitle").textContent = `添加 ${chLabel(channel)} 账号`;
-    $("loginMsg").textContent = hasProtocolLogin(channel)
-      ? `请在浏览器新窗口中完成${chLabel(channel)}登录；完成后本工具会自动接管回调并保存账号（期间请勿启动${chLabel(channel)}客户端）。`
-      : "请在浏览器新窗口中完成登录…";
+    // 网页版登录：浏览器已由后端拉起（独立 profile），这里只需提示，不能再 window.open
+    // （否则会在用户日常浏览器里再开一个标签页，且那个标签页没有调试端口、捕获不到）。
+    if (hasWebLogin(channel)) {
+      $("loginMsg").textContent = `已为你打开一个独立的浏览器窗口，请在其中完成${chLabel(channel)}登录；`
+        + `登录完成后无需任何操作，本工具会自动捕获凭据并添加账号。`;
+    } else {
+      $("loginMsg").textContent = "请在浏览器新窗口中完成登录…";
+      window.open(url, "_blank", "noopener,noreferrer");
+    }
     $("loginOverlay").classList.remove("hidden");
     $("btnCopyUrl").dataset.url = url;
-    window.open(url, "_blank", "noopener,noreferrer");
     startLoginPoll();
   } catch (e) {
     toast(e.message);

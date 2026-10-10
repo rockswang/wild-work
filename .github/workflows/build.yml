@@ -187,15 +187,32 @@ jobs:
           # tag 触发 → 创建新正式 release（不会碰其他分支的 release）
           if [[ "${{ github.event_name }}" == "push" ]]; then
             TAG="${GITHUB_REF#refs/tags/}"
-            # release note 用仓库里的 RELEASE-<tag>.md（手写摘要），而非 --generate-notes
-            # （后者只给 commit 链接列表，没有面向用户的变更摘要）；
-            # 找不到该文件时回退到 --generate-notes，不阻塞发版。
+            # release note 取自仓库根目录的 RELEASES.md（按版本从旧到新，新版本 append 到末尾），
+            # 截取对应版本段落（`# wild-work <tag>` 起，到下一个 `# wild-work vX.Y.Z` 止）作为手写摘要，
+            # 而非 --generate-notes（后者只给 commit 链接列表，没有面向用户的变更摘要）。
+            # 兼容旧的独立文件 RELEASE-<tag>.md（若存在则优先）。
+            # 都找不到时回退到 --generate-notes，不阻塞发版。
             NOTES="RELEASE-${TAG}.md"
             if [[ -f "$NOTES" ]]; then
-              echo "=== 使用 $NOTES 作为 release note ==="
+              echo "=== 使用独立文件 $NOTES 作为 release note ==="
               gh release create "$TAG" release-assets/* --title "$TAG" --notes-file "$NOTES"
+            elif [[ -f RELEASES.md ]]; then
+              # 段落边界用「下一个 `# wild-work vX.Y.Z`」而非版本号后缀比较，
+              # 避免 v2.6.3 误匹配到 v2.6.30 之类的标题。
+              awk -v tag="$TAG" '
+                $0 ~ ("^# wild-work " tag "([^0-9.]|$)") { p=1 }
+                p && /^# wild-work / && $0 !~ ("^# wild-work " tag "([^0-9.]|$)") { exit }
+                p { print }
+              ' RELEASES.md > /tmp/release-notes.md
+              if [[ -s /tmp/release-notes.md ]]; then
+                echo "=== 使用 RELEASES.md 中 $TAG 段落作为 release note（$(wc -l < /tmp/release-notes.md) 行） ==="
+                gh release create "$TAG" release-assets/* --title "$TAG" --notes-file /tmp/release-notes.md
+              else
+                echo "=== RELEASES.md 中未找到 $TAG 段落，回退到自动生成 notes ==="
+                gh release create "$TAG" release-assets/* --generate-notes
+              fi
             else
-              echo "=== 未找到 $NOTES，回退到自动生成 notes ==="
+              echo "=== 既无 $NOTES 也无 RELEASES.md，回退到自动生成 notes ==="
               gh release create "$TAG" release-assets/* --generate-notes
             fi
             exit 0
