@@ -334,7 +334,7 @@ curl -X POST "http://127.0.0.1:7863/v1/systemone" \
   （「＋ MonkeyCode」是**导入**按钮：读取本机已登录客户端的凭据，不需要浏览器登录）
   （「＋ 小浣熊」的次按钮「从客户端导入」读取本机已登录客户端的凭据，不需要浏览器登录）
   （「＋ Loomy」是**导入**按钮：读取本机已登录客户端的凭据，不需要浏览器登录）
-  - ⚠️ **平台限制**：MonkeyCode / 小浣熊 / Loomy 三个渠道**仅支持 Windows**——小浣熊的浏览器授权依赖 Windows 的 `office-raccoon://` 协议注册（HKCU），且三个官方客户端均只有 Windows 版。其余渠道（WorkBuddy 系 / Trae 系 / Qoder 系 / 千问办公 / 智谱清言）跨平台可用。
+  - ⚠️ **平台限制**：MonkeyCode / 小浣熊 / Loomy 的「从客户端导入」路径探测**跨平台**（用标准用户目录 / 环境变量定位客户端凭据，macOS / Linux 上客户端把配置写在标准位置即可命中，找不到则返回明确报错）；真正仅 Windows 的是**小浣熊的浏览器授权登录**（依赖 Windows 的 `office-raccoon://` 协议注册 / HKCU）。小浣熊 / Loomy 官方另有 macOS / Linux 客户端，MonkeyCode 客户端则仅发布过 Windows 版（其导入在非 Windows 仍会按上述口径尽力而为）。其余渠道（WorkBuddy 系 / Trae 系 / Qoder 系 / 千问办公 / 智谱清言）跨平台可用。
 - **账号管理**：卡片显示积分、签到状态（WorkBuddy 国际版显示「自动领日活奖励」）；图标按钮操作（签到 ✓ / 刷新 ↻ / 停用 ⏸ / 删除 ✕）
   - **修改显示名**：点击卡片上的账号名即可修改，用于给账号起好认的别名
   - 账号按固定渠道序展示：OpenCodeZen → WorkBuddyCN → WorkBuddyAI → QoderCN → QoderCOM → TraeWork → 千问办公 → MonkeyCode → 小浣熊 → Loomy
