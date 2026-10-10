@@ -224,16 +224,14 @@ func TestQueryCrossMonthSegments(t *testing.T) {
 	}
 }
 
-// monthEdgeTs 构造「本月 1~6 号」的时间戳——7 天窗口跨月、from 落在上月末尾的场景，
-// 正是旧枚举 bug 的触发窗口（当前不在月初时取本月 2 号保证落在 7 天窗口内）。
+// monthEdgeTs 构造「跨月窗口边界」时间戳：今天 00:00 − 6 天 = Query(7) 的窗口起点
+// （fromTs，边界含），无论跑在哪天都必被聚合；当月天数 ≤ 6 时落在上月 → 仍覆盖
+// 旧枚举 bug 的触发场景（from 在上月末尾、跨月扫当月）。
 func monthEdgeTs(t *testing.T) int64 {
 	t.Helper()
 	now := time.Now()
-	ts := time.Date(now.Year(), now.Month(), 2, 0, 0, 0, 0, now.Location())
-	if ts.After(now) { // 本月 2 号还没到（今天是 1 号）：直接用当前时间
-		ts = now
-	}
-	return ts.Unix()
+	today := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
+	return today.AddDate(0, 0, -6).Unix()
 }
 
 // TestQueryMonthEnum 月份枚举：from 处于上月末尾时不得跳过当月（原 +15 天步进 bug 的
