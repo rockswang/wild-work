@@ -431,7 +431,7 @@ func TestResourceDetailSelfHealsSessionDead(t *testing.T) {
 		au.RefreshToken = "rt"
 	}
 
-	remain, items, err := a.ResourceDetail("uid-tip")
+	remain, items, _, _, err := a.ResourceDetail("uid-tip")
 	if err != nil {
 		t.Fatalf("ResourceDetail 应自愈，却报错: %v", err)
 	}
@@ -450,11 +450,36 @@ func TestResourceDetailNoRefreshTokenStillErrors(t *testing.T) {
 		au.RefreshToken = ""
 	}
 
-	if _, _, err := a.ResourceDetail("uid-nort"); err == nil {
+	if _, _, _, _, err := a.ResourceDetail("uid-nort"); err == nil {
 		t.Error("无 refresh token 时应报错，而不是静默返回空")
 	}
 	if up.refreshCalls.Load() != 0 {
 		t.Error("无 refresh token 时不应尝试刷新")
+	}
+}
+
+// TestResourceDetailWritesBackPoolSnapshot 同源修复的守门：ResourceDetail 成功后
+// pool 快照必须更新为同一响应的值。否则卡片顶层停留在上次刷新事件的旧值，
+// 面板出现「同屏两个数字对不上」（实测为时差，非上游口径问题）。
+func TestResourceDetailWritesBackPoolSnapshot(t *testing.T) {
+	up := &fakeUpstream{remain: 1234}
+	a, p := newTestApp(t, provider.Loomy, up, "uid-rd")
+
+	// 先置旧快照，模拟「上次刷新事件之后又发生了消耗」。
+	p.SetCreditDetail("uid-rd", 9999, 0, 0)
+
+	remain, items, expiring, unusable, err := a.ResourceDetail("uid-rd")
+	if err != nil {
+		t.Fatalf("ResourceDetail: %v", err)
+	}
+	if remain != 1234 || len(items) != 1 {
+		t.Fatalf("remain=%d items=%d, want 1234/1", remain, len(items))
+	}
+	if expiring != 0 || unusable != 0 {
+		t.Fatalf("expiring=%d unusable=%d, want 0/0", expiring, unusable)
+	}
+	if st, ok := p.Status("uid-rd"); !ok || st.Credits != 1234 {
+		t.Fatalf("pool 快照未回写: ok=%v credits=%d, want 1234", ok, st.Credits)
 	}
 }
 

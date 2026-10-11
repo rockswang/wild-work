@@ -292,6 +292,13 @@ POST /api/quit                     # 退出程序
       `ExpiringWithin` / `ledger.DiffCredits` 三处一律跳过），前端加「仅展示」角标。
       用于**同账号下计量单位不同的另一套额度**——MonkeyCode 的「每日 Token 额度」（单位是 token）
       与「积分余额」（credits）都该显示，但相加无意义。构造时须同时置 `Usable=true`。
+    - **明细路径与刷新路径同源回写 pool 快照（`creditSnapshot`，2026-10-11）**：`ResourceDetail`
+      与 `creditTotals` 共用 `creditSnapshot`——取数成功即 `SetCreditDetail` + ledger 差分，故 hover
+      明细也会刷新顶层快照；前端 `showCreditDetail` 用响应的 `usable_remain/expiring_remain/
+      unusable_remain` 回写卡片与汇总条（`data-uid` 定位，不全量重绘），`refreshOne/refreshAll/
+      checkin/checkinAll` 成功后清 `detailCache`。背景：面板「同屏两数字对不上」实为**时差**
+      （顶层仅刷新事件/30min 循环更新，明细是 hover 实时值），已实测同响应内上游汇总字段==明细池
+      相加，非上游口径问题。守门测试 `TestResourceDetailWritesBackPoolSnapshot`。
 18. **到期时间字段因渠道而异，缺失则不显示**：WorkBuddy 系是 `CycleEndTime`（**上游从不下发 `PackageEndTime`**，旧判据恒 miss），
     TraeWork 是 `expire_time`（Unix 秒），Qoder 无此字段。均按 **UTC+8 墙钟**解析（`softRateResetLoc`），
     用 `time.Local` 会在非 UTC+8 机器上算错一天。上游未下发时 `ResourceItem.ExpireAt` 必须为空串，

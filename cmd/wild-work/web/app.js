@@ -211,6 +211,7 @@ async function showCreditDetail(e, uid) {
       // tip hover/翻页取消）→ 不再弹出，避免 tooltip 残留在页面上。
       if (detailTimer !== null) return;
       detailCache[uid] = d;
+      syncCreditsFromDetail(uid, d);
     } catch (err) { return; }
   }
   if (!d || !d.items || !d.items.length) return;
@@ -234,6 +235,24 @@ async function showCreditDetail(e, uid) {
   if (left + tip.offsetWidth > window.innerWidth) left = Math.max(4, window.innerWidth - tip.offsetWidth - 10);
   tip.style.left = left + "px";
   tip.style.top = top + "px";
+}
+
+// syncCreditsFromDetail 把卡片与汇总条的积分数字回写成明细响应的同源代码。
+// 顶层原本是 pool 快照（仅刷新事件/30min 自动循环更新），明细是 hover 实时值，
+// 区间内消耗会让「同屏两个数字对不上」；后端 ResourceDetail 现已把同一响应回写
+// pool 快照，前端这里再把卡片与汇总条改为同源——弹层展开那一刻全屏数字一致。
+// 只改展示状态与对应 DOM，不重请求、不全量重绘（全量重绘会替换正在 hover 的
+// 卡片节点，tooltip 锚点与鼠标事件会丢）。
+function syncCreditsFromDetail(uid, d) {
+  const a = (state.accounts || []).find((x) => x.uid === uid);
+  if (!a || a.credits_na) return;
+  a.credits = d.usable_remain || 0;
+  a.unusable_credits = d.unusable_remain || 0;
+  a.expiring_credits = d.expiring_remain || 0;
+  a.credits_stale = false;
+  const cell = document.querySelector(`.acct-credits[data-uid="${uid}"]`);
+  if (cell) cell.innerHTML = creditsText(a);
+  renderSummary();
 }
 
 // renderCreditDetail 按 detailState 重绘 tooltip（含分页控件与可用/不可用小计）。
@@ -588,7 +607,7 @@ function renderAccounts() {
       </div>
       <div class="acct-uid">UID: ${esc(shortUid(a.uid))}</div>
       <div class="acct-mid">
-        <div class="acct-credits"${noCredits ? "" : ` onmouseenter="showCreditDetail(event,'${a.uid}')" onmouseleave="hideCreditDetail()"`}>${creditsText(a)}</div>
+        <div class="acct-credits" data-uid="${a.uid}"${noCredits ? "" : ` onmouseenter="showCreditDetail(event,'${a.uid}')" onmouseleave="hideCreditDetail()"`}>${creditsText(a)}</div>
         <div class="acct-checkin">${coolingTag}${checkinTag}${modelCoolingTag(a)}</div>
       </div>
     </div>`;
@@ -782,6 +801,7 @@ async function checkin(uid) {
     // 避免用户看到「无可用签到活动」误以为失败。
     if (!r.ok && r.retryable) toast(`暂未领到：${r.msg}（10:00–12:00 窗口内会自动重试）`);
     else toast(r.ok ? `签到成功：${r.msg}（剩余 ${r.remain}）` : `签到：${r.msg}`);
+    delete detailCache[uid]; // 签到改变余额，旧明细缓存会与新顶层打架
     loadState();
   } catch (e) { toast(e.message); }
 }
@@ -790,6 +810,7 @@ async function refreshOne(uid) {
   try {
     const r = await api("/api/account/refresh", { uid });
     toast(`刷新成功：剩余积分 ${r.remain}`);
+    delete detailCache[uid]; // 顶层已更新，旧明细缓存须作废，否则「新顶层+旧弹层」
     loadState();
   } catch (e) { toast(e.message); }
 }
@@ -820,6 +841,7 @@ async function checkinAll() {
   $("btnCheckinAll").disabled = true;
   try {
     const r = await api("/api/account/checkin_all", {});
+    detailCache = {}; // 批量签到改变余额，全部明细缓存作废
     const ok = (r.results || []).filter((x) => x.ok).length;
     const pending = (r.results || []).filter((x) => !x.ok && x.retryable).length;
     const skip = (state.accounts || []).filter((a) => noExplicitCheckin(a.group)).length;
@@ -837,6 +859,7 @@ async function refreshAll() {
   $("btnRefreshAll").disabled = true;
   try {
     const r = await api("/api/account/refresh_all", {});
+    detailCache = {}; // 顶层已全部更新，全部明细缓存作废
     toast(r.busy ? "已有刷新任务进行中" : `积分刷新完成：成功 ${r.ok} / 失败 ${r.failed}`);
     loadState();
   } catch (e) { toast(e.message); } finally {
