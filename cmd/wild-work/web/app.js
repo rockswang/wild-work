@@ -1015,7 +1015,7 @@ const NO_CHECKIN_LOGIN_HINT = {
   raccoon: "（支持「网页版登录」与「从客户端导入」两种方式；access_token 约 1 小时，本工具会自动续期，上游刷新时会轮换 refresh_token）",
   loomy: "（凭据来自本机已登录的 Loomy 客户端；上游无续期接口，约 14 天后需重新登录并再次导入）",
   glm: "（登录后请按下方指引复制 refresh_token 粘贴回来）",
-  cline: "（无需登录：在 app.cline.bot 注册账号，Account / API Keys → Create API Key 后粘贴即可；Key 不过期也不轮换）",
+  cline: "（两种凭据都能加：官方 API Key 不消耗额度、不过期；refreshToken 会换一次 token 验证、到期自动续期，适合批量导入）",
 };
 function promptLogin(channel) {
   pendingChannel = channel;
@@ -1050,12 +1050,15 @@ function promptLogin(channel) {
   }
 
   // 粘贴凭据型渠道（Cline）：弹专用输入框，而不是「打开浏览器登录」。
-  // Cline 的凭据是官方 API Key，创建动作发生在 app.cline.bot 网页里，本工具无法代劳，
-  // 所以这里没有轮询/回调，只有一次「验证 + 落盘」（后端只调 /api-keys，零 token 消耗）。
+  // Cline 的凭据由用户在官方站点/注册机取得，本工具无法代劳创建，
+  // 所以这里没有轮询/回调，只有一次「验证 + 落盘」。
+  // 支持两种形态：官方 API Key（零消耗验证）与 refreshToken（换一次 token 验证）。
   if (isPasteKey(channel)) {
     $("clineKeyInput").value = "";
+    $("clineTokenInput").value = "";
     $("clineErr").textContent = "";
     $("clineWarn").classList.add("hidden");
+    setClineMode("key"); // 默认停在 Key 形态（最常见的单账号添加路径）
     $("clineOverlay").classList.remove("hidden");
     setTimeout(() => $("clineKeyInput").focus(), 30);
     return;
@@ -1244,6 +1247,52 @@ async function submitClineKey() {
   } finally {
     btn.disabled = false;
   }
+}
+
+// submitClineToken 提交 refreshToken 形态的 Cline 凭据（与第三方 cline2api 号池互通）。
+// 后端会用它换一次 access token 来验证（一次性消耗，不占对话额度），落盘后由
+// ensureAccessToken 在每次到期前自动续期 —— 故这里不需要用户做任何后续操作。
+async function submitClineToken() {
+  const token = ($("clineTokenInput").value || "").trim();
+  if (!token) { $("clineErr").textContent = "请粘贴 refreshToken"; return; }
+  if (token.startsWith("sk_")) {
+    $("clineErr").textContent = "这看起来是 API Key（sk_ 开头），请切到「官方 API Key」标签添加";
+    return;
+  }
+  const btn = $("btnClineSubmit");
+  btn.disabled = true;
+  $("clineErr").textContent = "验证中（会换一次 token）…";
+  try {
+    await api("/api/login/cline_token", { refresh_token: token });
+    $("clineOverlay").classList.add("hidden");
+    $("clineTokenInput").value = "";
+    toast("Cline 账号已添加（refreshToken）");
+    await loadState();
+    refreshFees();
+  } catch (e) {
+    $("clineErr").textContent = e.message || "验证失败";
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+// clineMode 当前选中的凭据形态：key | token。
+// 两个 pane 互斥显示，提交按钮按形态路由到不同后端接口。
+let clineMode = "key";
+function setClineMode(mode) {
+  clineMode = mode;
+  $("clineKeyPane").classList.toggle("hidden", mode !== "key");
+  $("clineTokenPane").classList.toggle("hidden", mode !== "token");
+  $("btnClineModeKey").classList.toggle("primary", mode === "key");
+  $("btnClineModeToken").classList.toggle("primary", mode === "token");
+  $("clineModeHint").textContent = mode === "key"
+    ? "（不消耗额度；Key 不轮换，长期有效）"
+    : "（换一次 token 验证；到期自动续期，适合批量导入）";
+  $("clineWarn").classList.add("hidden");
+  $("clineErr").textContent = "";
+}
+function submitCline() {
+  return clineMode === "token" ? submitClineToken() : submitClineKey();
 }
 
 // 手工兜底：粘贴 refresh_token
@@ -1716,7 +1765,9 @@ function bind() {
   $("btnGLMCancel").onclick = cancelGLMLogin;
   $("btnGLMToggleManual").onclick = () => $("glmManual").classList.toggle("hidden");
   $("btnAddCline").onclick = () => promptLogin("cline");
-  $("btnClineSubmit").onclick = submitClineKey;
+  $("btnClineSubmit").onclick = submitCline;          // 按 clineMode 路由到 Key / refreshToken
+  $("btnClineModeKey").onclick = () => setClineMode("key");
+  $("btnClineModeToken").onclick = () => setClineMode("token");
   $("btnClineCancel").onclick = () => $("clineOverlay").classList.add("hidden");
   $("btnCheckinAll").onclick = checkinAll;
   $("btnRefreshAll").onclick = refreshAll;

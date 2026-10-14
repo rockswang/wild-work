@@ -619,24 +619,63 @@ func (s *Scheduler) refreshForCheckin(a *auth.Auth, uid string) error {
 	return nil
 }
 
+// isSessionDead 报告刷新失败是否属于「凭据本身已失效」。
 func isSessionDead(err error) bool {
 	var ue *provider.Error
 	return errors.As(err, &ue) && ue.Kind == provider.ErrSessionDead
 }
+
+// keepaliveSkipReason 判定该凭据本次保活是否需要跳过，返回跳过原因（空 = 需要刷新）。
+//
+// 两种「跳过」语义完全不同，日志/面板必须区分开：
+//   - 静态凭据（Key 模式：AccessToken 非空且无 RefreshToken）⇒ 「无需刷新」，
+//     **不是失败**。cline 的官方 API Key 就属这类：上游不签发 refresh token，
+//     凭据本身就是最终形态。把它记成 "no refresh token" 失败会在面板渲染成红字。
+//   - 距离过期还早 ⇒ 「未到刷新窗口」。cline 的 refreshToken 形态有效期约 1h，
+//     160 个号若每小时全刷一遍是纯浪费（每次刷新都是实打实的上游往返）。
+//     这里只在剩余寿命 < 阈值时才刷。
+func keepaliveSkipReason(a *auth.Auth) string {
+	if a == nil {
+		return "credential missing"
+	}
+	switch {
+	case strings.TrimSpace(a.RefreshToken) == "" && strings.TrimSpace(a.AccessTokenValue()) != "":
+		return "static credential (no refresh needed)"
+	case strings.TrimSpace(a.RefreshToken) == "":
+		return "no refresh token"
+	}
+	// 有效期充足则不刷：阈值取 2 倍 skew（默认 10 分钟），既避免临界刷新，
+	// 又不至于让 token 在下一次保活（24h）前过期。
+	if a.ExpiresAt > 0 && !a.NeedsRefresh(2*keepaliveRefreshWindow) {
+		return "not expiring yet"
+	}
+	return ""
+}
+
+// keepaliveRefreshWindow 是「多久算临近过期」的基准。
+// ExpiresAt 为 0 表示「从未换过 token」⇒ NeedsRefresh 恒真 ⇒ 首轮保活即完成首次刷新。
+const keepaliveRefreshWindow = 5 * time.Minute
 
 // RunKeepaliveNow 立即对所有账号刷新 token；session 死亡的自动禁用。
 // 禁用的账号也保活（停用仅影响 API 路由）。
 func (s *Scheduler) RunKeepaliveNow() {
 	name := s.name()
 	log.Printf("refresh batch start platform=%s", name)
+	var skipped, refreshed int
 	for _, st := range s.cfg.Pool.List() {
 		a := s.cfg.Pool.AuthByUID(st.UID)
-		if a == nil || a.RefreshToken == "" {
-			msg := "no refresh token"
-			log.Printf("refresh skip platform=%s uid=%s reason=%s", name, st.UID, msg)
-			s.notifyRefresh(st.UID, false, msg)
+		if reason := keepaliveSkipReason(a); reason != "" {
+			// 「无需刷新」不算失败，不上报红色状态（cline 的 Key 模式每天都走这条）。
+			if reason == "static credential (no refresh needed)" || reason == "not expiring yet" {
+				skipped++
+				log.Printf("refresh skip platform=%s uid=%s reason=%s", name, st.UID, reason)
+				continue
+			}
+			log.Printf("refresh skip platform=%s uid=%s reason=%s", name, st.UID, reason)
+			s.notifyRefresh(st.UID, false, reason)
 			continue
 		}
+		refreshed++
 		log.Printf("refresh start platform=%s uid=%s reason=keepalive", name, st.UID)
 		if err := s.cfg.Upstream.RefreshToken(a); err != nil {
 			log.Printf("refresh failed platform=%s uid=%s err=%v", name, st.UID, err)
@@ -656,5 +695,5 @@ func (s *Scheduler) RunKeepaliveNow() {
 		log.Printf("refresh success platform=%s uid=%s expires_at=%d", name, st.UID, a.ExpiresAt)
 		s.notifyRefresh(st.UID, true, "ok")
 	}
-	log.Printf("refresh batch done platform=%s", name)
+	log.Printf("refresh batch done platform=%s refreshed=%d skipped=%d", name, refreshed, skipped)
 }

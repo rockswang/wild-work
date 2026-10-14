@@ -1,13 +1,17 @@
 // Package cline 是 Cline（api.cline.bot）渠道的**免费模型池**上游实现。
 //
-// 凭据：官方文档化的 **API Key**（`sk_` + 64 hex），在 https://app.cline.bot/ →
-// 注册账号 → Account / API Keys → Create API Key 创建（创建时只显示一次）。**不走** WorkOS device-code OAuth ——
-// 后者需要弹浏览器、refresh token 会轮换、同凭据多处使用会互踢（对照 R26/R44），
-// 而 Key 不轮换 ⇒ 本渠道没有 RefreshToken，也没有任何保活/签到需求。
+// 凭据有**两种**形态，由 Auth 的字段区分（2026-10-14 扩展）：
 //
-// 渠道定位（决议 R46）：多账号 Key 池 + 免费额度调度器 + 反代。
-// 模型面**不做任何本地假设**：绑死上游 recommended-models 的 free 数组原样透传
-// （ID 不改写、不过滤、无静态表、无本地配置）。
+//  1. **官方 API Key**（`sk_` + 64 hex）：在 https://app.cline.bot/ → Account / API Keys
+//     创建。Key **不过期、不轮换** ⇒ 存 AccessToken、ExpiresAt 取 FarFutureExpiry()、
+//     不参与任何刷新。
+//  2. **refreshToken**（25 位短串）：WorkOS OAuth 登录链路的产物（同 cline2api 等
+//     第三方网关的号池格式）。存 RefreshToken，用它换 accessToken（有效期约 1h），
+//     换来的 token 需带 `workos:` 前缀才能过鉴权（见 authHeader）。**可批量导入**，
+//     是「大量账号池」场景的主用形态。
+//
+// 两种形态在 client 层统一收敛为「一个可用的 access token」：Key 模式直接就是 token，
+// refreshToken 模式经 ensureAccessToken 按需换取（带 single-flight）。
 //
 // 四个必须知道的实测事实（2026-10-10，逐项对照实验，详见 docs/cline渠道接入计划.md）：
 //  1. **`X-CLIENT-TYPE` 头必须非空**，否则所有 `cline-free/*` 别名一律 403
@@ -39,8 +43,13 @@ const (
 	EpRecommends   = "/ai/cline/recommended-models" // 返回 recommended/free/clinePass/clineCloud 四组；free[] 是模型面唯一来源
 	EpAPIKeys      = "/api-keys"                    // 返回本账号全部 Key（uid 与同账号判定的来源）
 	EpPlans        = "/plans"                       // 权益目录（含 inferenceCapThreshold 结构）
+	EpRefresh      = "/auth/refresh"                // refreshToken → accessToken（两种凭据形态都可用）
 	defaultBaseURL = APIBase
 )
+
+// workosPrefix 是 Cline access token 的传输前缀，**不可省略**（见 authHeader 实测说明）。
+// 取自官方 SDK：sdk/packages/shared/.../cline-environment.ts 的 WORKOS_TOKEN_PREFIX。
+const workosPrefix = "workos:"
 
 // 请求头常量。HeaderClientTypeValue 取何值都放行，**但不得为空**；
 // 一旦这个头被删，症状是「免费模型全部 403 且面板无异常」——同 R34 的静默失败家族。

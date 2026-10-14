@@ -1071,6 +1071,49 @@ func (a *App) SubmitClineKey(apiKey string) (string, string, error) {
 	return res.UID, warn, nil
 }
 
+// SubmitClineToken 提交用户粘贴的 Cline refreshToken（WorkOS OAuth 登录链路的产物，
+// 25 位短串，与第三方网关号池互通）：验证 → 落盘 → 重载账号池。
+//
+// 与 SubmitClineKey 的区别：
+//   - 验证方式不同：这里**换一次 token**（POST /auth/refresh）来证明凭据有效，
+//     顺带拿到 clineUserId 作稳定 uid；Key 模式则是只读 /api-keys（零消耗）。
+//   - 落盘形态不同：refreshToken 存 RefreshToken 字段、AccessToken 留空、
+//     ExpiresAt = 0 ⇒ 首次请求时由 cline.ensureAccessToken 换 token 并写回真值。
+//     这样无需在这里阻塞等换 token，面板响应更快。
+//   - 无「同账号多 Key」性质：一个 refreshToken 就是一个账号（不存在同号多凭据），
+//     故不做 Key 模式那种告警；但仍按 uid 去重（同账号重复导入会覆盖同一个文件）。
+func (a *App) SubmitClineToken(refreshToken string) (string, error) {
+	rt := strings.TrimSpace(refreshToken)
+	res, err := cline.ValidateRefreshToken(rt)
+	if err != nil {
+		return "", err
+	}
+
+	name := res.AccountName
+	if name == "" {
+		name = "refreshToken " + rt[:min(len(rt), 8)] + "…"
+	}
+	_ = os.MkdirAll(a.cfg.AuthDir, 0o755)
+	ca := &auth.Auth{
+		Kind:         "cline",
+		UID:          res.UID,
+		Nickname:     name,
+		RefreshToken: rt,
+		// 0 = 尚未换过 token ⇒ 首次请求时刷新（ensureAccessToken 会立刻处理并写回真值）。
+		// 注意这里**不能**用 FarFutureExpiry：那会让 NeedsRefresh 恒假、永远不换 token。
+		ExpiresAt: 0,
+		FilePath:  filepath.Join(a.cfg.AuthDir, "cline-"+res.UID+".json"),
+	}
+	if err := ca.SaveAtomic(); err != nil {
+		return "", fmt.Errorf("保存 Cline 凭据失败：%w", err)
+	}
+	// 日志零 token（不变量 2）：只打 uid，绝不打 refreshToken 内容
+	log.Printf("cline 账号已添加（粘贴 refreshToken）uid=%s", res.UID)
+	a.reloadAccounts()
+	a.afterAccountAdded(provider.Cline)
+	return res.UID, nil
+}
+
 // StartGLMAutoLogin 发起智谱清言自动登录：拉起独立 profile 的浏览器，
 // 用户在真实浏览器里登录，后台经 CDP 自动捕获 Cookie。
 //
@@ -2428,6 +2471,23 @@ func (a *App) HandleAPI(mux *http.ServeMux) {
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "uid": uid, "warning": warn})
+	})
+
+	// refreshToken 形态（与第三方 cline2api 号池互通）：换一次 token 验证后落盘。
+	mux.HandleFunc("POST /api/login/cline_token", func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			RefreshToken string `json:"refresh_token"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			apiError(w, http.StatusBadRequest, "请求体解析失败")
+			return
+		}
+		uid, err := a.SubmitClineToken(req.RefreshToken)
+		if err != nil {
+			apiError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "uid": uid})
 	})
 
 	mux.HandleFunc("POST /api/account/checkin", func(w http.ResponseWriter, r *http.Request) {

@@ -468,11 +468,35 @@ func LoadLoomyDir(dir string) ([]*Auth, error) {
 
 // LoadClineDir 扫描 Cline 凭证（cline-*.json）。
 //
-// 凭据不来自登录编排，而是面板「粘贴官方 API Key」（见 app.SubmitClineKey）。
+// 凭据有**两种形态**（见 internal/cline 包文档）：
+//   - 官方 API Key：accessToken = "sk_…"，无 refreshToken，expiresAt 为远期值
+//   - refreshToken：accessToken 可为空、refreshToken = 25 位短串，expiresAt 可为 0
+//     （0 表示「下次请求时换一次」——cline 的 ensureAccessToken 会立即刷新并写回真值）
+//
+// 故这里**不能**用严格的 Parse（它硬要求 accessToken 非空，会把 refreshToken 形态
+// 整批静默跳过），改用允许 accessToken 为空的解析器。
+//
 // glob 边界已核：现存前缀 workbuddy* / workbuddyai- / trae- / qoder* / qodercn- /
 // qodercom- / qwenwork- / glm- / monkeycode- / raccoon- / loomy- 与 cline- 无包含关系。
 func LoadClineDir(dir string) ([]*Auth, error) {
-	return loadPrefixed(dir, "cline")
+	files, err := filepath.Glob(filepath.Join(dir, "cline-*.json"))
+	if err != nil {
+		return nil, err
+	}
+	var out []*Auth
+	for _, f := range files {
+		raw, err := os.ReadFile(f)
+		if err != nil {
+			continue
+		}
+		a, err := parseAllowMissingAccessToken(raw)
+		if err != nil {
+			continue
+		}
+		a.Kind, a.FilePath = "cline", f
+		out = append(out, a)
+	}
+	return out, nil
 }
 
 // loadPrefixed 按前缀扫描并解析凭证（供无登录编排的「导入型」渠道复用）。

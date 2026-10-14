@@ -252,38 +252,66 @@
   </div>
 </div>
 
-<!-- Cline：粘贴官方 API Key（无浏览器登录编排；见 internal/cline 与 docs/cline渠道接入计划.md） -->
+<!-- Cline：两种凭据形态都能加（官方 sk_ Key / WorkOS refreshToken；见 internal/cline 包文档） -->
 <div class="overlay hidden" id="clineOverlay">
   <div class="modal modal-wide">
     <div class="modal-title">添加 Cline 账号</div>
     <div class="modal-body settings-body">
 
       <div class="cfg-section">
-        <div class="cfg-heading">申请办法</div>
-        <ol class="glm-steps">
-          <li>打开 <a href="https://app.cline.bot/" target="_blank" rel="noopener noreferrer">app.cline.bot</a> 并注册账号。</li>
-          <li>进入 <code>Account / API Keys</code> → <code>Create API Key</code>。</li>
-          <li>Key（形如 <code>sk_</code> + 64 位十六进制）<b>只在创建时完整显示一次</b>，请立即复制粘贴到下面。</li>
-        </ol>
-        <input id="clineKeyInput" class="input grow" spellcheck="false" autocomplete="off"
-               placeholder="粘贴 API Key（sk_…）" style="width:100%;font-family:ui-monospace,monospace">
+        <div class="cfg-heading">凭据类型</div>
+        <div class="hint" style="margin-bottom:8px">
+          <button class="btn small primary" id="btnClineModeKey">官方 API Key</button>
+          <button class="btn small" id="btnClineModeToken">refreshToken</button>
+          <span class="dim" id="clineModeHint"></span>
+        </div>
       </div>
 
-      <!-- 关键约束：额度按账号计，同账号多 Key 不扩额度。不写清就会有人在一个账号下建一堆 Key 以为能翻倍。 -->
-      <div class="glm-warn">
-        <div class="glm-warn-title">⚠️ 必须使用多个独立账号各自的 Key</div>
-        <ol>
-          <li>官方免费额度<b>按 Cline 账号计</b>（其权益字段名为 <code>…UsageCostUSDPerUser</code>）。</li>
-          <li>同一个账号下创建多把 Key <b>共享同一份额度</b>，不会增加可用额度。
-              本工具在检测到多把 Key 同属一个账号时会给出提示。</li>
-          <li>想扩额度请<b>注册多个独立 Cline 账号</b>，每个账号各建一把 Key，逐个粘贴添加。</li>
-        </ol>
+      <!-- 形态 A：官方 API Key（sk_…）—— 零消耗验证，Key 不过期不轮换 -->
+      <div id="clineKeyPane">
+        <div class="cfg-section">
+          <div class="cfg-heading">申请办法</div>
+          <ol class="glm-steps">
+            <li>打开 <a href="https://app.cline.bot/" target="_blank" rel="noopener noreferrer">app.cline.bot</a> 并注册账号。</li>
+            <li>进入 <code>Account / API Keys</code> → <code>Create API Key</code>。</li>
+            <li>Key（形如 <code>sk_</code> + 64 位十六进制）<b>只在创建时完整显示一次</b>，请立即复制粘贴到下面。</li>
+          </ol>
+          <input id="clineKeyInput" class="input grow" spellcheck="false" autocomplete="off"
+                 placeholder="粘贴 API Key（sk_…）" style="width:100%;font-family:ui-monospace,monospace">
+        </div>
+
+        <!-- 关键约束：额度按账号计，同账号多 Key 不扩额度。不写清就会有人在一个账号下建一堆 Key 以为能翻倍。 -->
+        <div class="glm-warn">
+          <div class="glm-warn-title">⚠️ 必须使用多个独立账号各自的 Key</div>
+          <ol>
+            <li>官方免费额度<b>按 Cline 账号计</b>（其权益字段名为 <code>…UsageCostUSDPerUser</code>）。</li>
+            <li>同一个账号下创建多把 Key <b>共享同一份额度</b>，不会增加可用额度。
+                本工具在检测到多把 Key 同属一个账号时会给出提示。</li>
+            <li>想扩额度请<b>注册多个独立 Cline 账号</b>，每个账号各建一把 Key，逐个粘贴添加。</li>
+          </ol>
+        </div>
+      </div>
+
+      <!-- 形态 B：refreshToken —— 换 token 验证（有一次性消耗），适合批量导入号池 -->
+      <div id="clineTokenPane" class="hidden">
+        <div class="cfg-section">
+          <div class="cfg-heading">refreshToken 从哪来</div>
+          <ol class="glm-steps">
+            <li>它是 Cline 官方客户端（VS Code / JetBrains）用 <b>WorkOS OAuth</b> 登录后留下的长期凭据，
+                常见于 <code>~/.cline2api/.cline-accounts.json</code> 之类的位置，或由第三方注册机批量产出。</li>
+            <li>形如 <b>25 位短串</b>（大小写字母 + 数字），与 <code>sk_</code> 开头的 API Key <b>不是同一种东西</b>。</li>
+            <li>粘贴后本工具会用它<b>换一次 access token</b> 来验证（一次性的换 token 调用，不消耗对话额度）；
+                之后到期前自动续期，无需人工干预。</li>
+          </ol>
+          <input id="clineTokenInput" class="input grow" spellcheck="false" autocomplete="off"
+                 placeholder="粘贴 refreshToken（25 位短串）" style="width:100%;font-family:ui-monospace,monospace">
+        </div>
       </div>
 
       <div class="hint">
         本渠道只调度 <b>免费模型</b>（上游无余额/额度查询接口，故积分显示「不适用」；
         实际花费见「用量与流水」）。订阅池 <code>cline-pass</code> 与付费模型不在本渠道使用范围内。
-        Key 不过期、不轮换，也不会与浏览器/客户端互相挤下线。
+        <span id="clineKeyNote">Key 不过期、不轮换，也不会与浏览器/客户端互相挤下线。</span>
       </div>
 
       <!-- 实测参数表：上游 recommended-models 不返回上下文/能力字段（实测），

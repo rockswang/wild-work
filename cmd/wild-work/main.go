@@ -383,11 +383,15 @@ func main() {
 	// 跳过、不会误禁用账号，但每天仍空跑一次并记录失败，故直接关掉。
 	lmSch := scheduler.New(scheduler.Config{Pool: lmPool, Upstream: lmUp, Name: "loomy",
 		CheckinMinutes: []int{}, KeepaliveHours: []int{}, ExpiringThreshold: expiringThreshold, Ledger: lg})
-	// Cline：官方 API Key **不过期**、无签到活动、无 refresh token ⇒ 定时任务全部关闭。
-	// 必须传显式空切片 []int{}（R39）：传 nil 会被 scheduler.New 的零值兜底补上默认时间，
-	// 于是每天空跑一次必然失败的签到，并在面板渲染红色「签到失败」。
+	// Cline：无签到活动，但凭据有两种形态 ——
+	//   · 官方 API Key（sk_…）：不过期、不轮换 ⇒ 刷新是 no-op
+	//   · refreshToken：access token 约 1h 过期 ⇒ 需要定时保活，
+	//     否则长期不用的号会带着过期 token 进池，首次请求才补救（能跑但多一次往返）
+	// 两种形态共用同一个 RefreshToken 实现（内部按形态分支），故开保活对 Key 模式无副作用。
+	// CheckinMinutes 仍必须传显式空切片（R39）：无签到活动，传 nil 会被 scheduler.New
+	// 的零值兜底补上默认时间，于是每天空跑一次必然失败的签到并在面板渲染红色「签到失败」。
 	clSch := scheduler.New(scheduler.Config{Pool: clPool, Upstream: clUp, Name: "cline",
-		CheckinMinutes: []int{}, KeepaliveHours: []int{}, ExpiringThreshold: expiringThreshold, Ledger: lg})
+		CheckinMinutes: []int{}, KeepaliveHours: []int{22}, ExpiringThreshold: expiringThreshold, Ledger: lg})
 	// OpenCodeZen 匿名：无账号、无签到、无 token 可保活（凭证是常量 public）。
 	// CheckinMinutes/KeepaliveHours 均为显式空切片 → 调度器不发生任何上游调用。
 	ocSch := scheduler.New(scheduler.Config{Pool: ocPool, Upstream: ocUp, Name: "oczen",
