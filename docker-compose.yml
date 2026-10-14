@@ -1,0 +1,34 @@
+# wild-work Docker Compose 部署
+#
+# 使用前必做：把下面的 WILDWORK_ADMIN_PASSWORD 改成你自己的强密码（不少于 8 位）。
+# 监听 0.0.0.0 时程序强制要求设置管理员密码，否则容器启动后会直接退出。
+#
+# 启动：  docker compose up -d
+# 停止：  docker compose down
+# 日志：  docker compose logs -f
+# 面板：  http://NAS_IP:7863  （用上面设置的管理员密码登录）
+
+services:
+  wild-work:
+    build: .
+    image: wild-work:latest
+    container_name: wild-work
+    restart: unless-stopped
+    ports:
+      - "7863:7863"
+    environment:
+      # 容器内监听地址，固定 0.0.0.0 才能从宿主机访问
+      - WILDWORK_LISTEN=0.0.0.0:7863
+      # 下游调用 /v1 接口时的 API Key，按需修改
+      - WILDWORK_API_KEY=WildWorkAPI
+      # ★ 必填：管理面板密码，监听 0.0.0.0 时必须设置
+      - WILDWORK_ADMIN_PASSWORD=CHANGE_ME_请改成强密码
+      # 区域：cn（国内）/ intl（国际），默认 cn
+      - WILDWORK_REGION=cn
+      # 时区：定时签到按此时区触发
+      - TZ=Asia/Shanghai
+    volumes:
+      # 账号凭据持久化（容器重建不丢失，勿删）
+      - ./auths:/app/auths
+      # 运行状态、积分流水持久化（容器重建不丢失，勿删）
+      - ./data:/app/data
