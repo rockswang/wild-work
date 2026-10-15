@@ -1,6 +1,6 @@
 //go:build live
 
-// live_test.go 对真实 opencode.ai/zen 验证 oczen 免费档会话头端到端可用。
+// live_test.go 对真实 opencode.ai/inference 验证 oczen 免费档会话头端到端可用。
 //
 // mock 测试只能证明「实现自洽」；这里证明「我们签发的会话头真的被 Zen 免费档
 // 接受」——2026-10-13 的 403 FreeTierError 就是「摘要段时间戳段被拒」这一

@@ -8,7 +8,9 @@
 //     取低 48 位，故末三位为 0xFFF-counter，实测只接受 counter 1–63）；
 //     摘要段/升序 ID 即便外形正确也被拒（2026-10-13 实盘）。
 //     ② 请求体须为「智能体形态」：stream=true 且 tools 内同时含 bash 与 read 两个 function；
-//     ③ 伪装头齐套（User-Agent / x-opencode-client / x-session-affinity / x-opencode-request / x-opencode-project）。
+//     ③ 伪装头齐套（User-Agent / x-opencode-client / x-session-affinity / x-opencode-project）。
+//     其中 x-opencode-project 必须是**裸 40 位小写 hex**：prj_ 前缀的规范 id
+//     会被拒（403）；x-opencode-request 同样被拒，不能发（2026-10-15 实盘）。
 //   - 匿名通道未观测到请求数配额（1900+ 次、峰值 230 req/min、64 并发均无 429），
 //     唯一约束是并发升高时的延迟背压（排队不拒绝）。
 package oczen
@@ -23,8 +25,13 @@ const (
 	// Kind 渠道标识，同时是模型名前缀。
 	Kind = provider.Oczen
 
-	// DefaultBase 上游 OpenCode Zen 基址（OpenAI 兼容面）。
-	DefaultBase = "https://opencode.ai/zen/v1"
+	// DefaultBase 上游基址（OpenAI 兼容面）。
+	//
+	// 必须是 /inference/v1，不能用 /zen/v1：同一份请求打到 /zen/v1 恒回
+	// 403 FreeTierError，打到 /inference/v1 即 200（2026-10-15 实盘消元，
+	// opencode2api 的 anonymous 车道走的也是 /inference）。两者模型目录
+	// 相同（GET /models 均 200、7212 字节），差异只在推理入口。
+	DefaultBase = "https://opencode.ai/inference/v1"
 
 	// AnonymousKey 匿名免费凭证：字面量 "public"，无需注册。
 	// 来源：opencode2api gateway.go anonymousZenKey。

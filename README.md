@@ -365,7 +365,7 @@ curl -X POST "http://127.0.0.1:7863/v1/systemone" \
 - `state` 文本约 32k token 预算（state + questions 共享），英文最强，数学/日期/十六进制请交给代码
 - `choice` 最多 255 个选项，`score` 2~10 级
 - **免费**：`cost:"0"`，实测 0.5~1.3s 完成决策
-- 也可直连上游：`POST https://opencode.ai/zen/v1/systemone` + `Authorization: Bearer public` + OpenCode 伪装头，但本网关已帮你处理了鉴权与伪装
+- 也可直连上游：`POST https://opencode.ai/inference/v1/systemone` + `Authorization: Bearer public` + OpenCode 伪装头，但本网关已帮你处理了鉴权与伪装
 
 > **别拿它当 GPT 用**——把它当成"语义判断 API"：给它状态和选择题，它回概率和置信度，你的代码根据 typed 值做后续决策。
 

@@ -141,8 +141,13 @@ CN 凭据在国际端点 401（双向隔离），两渠道凭据文件前缀 `qo
 
 | 用途 | 端点 | 鉴权 |
 |------|------|------|
-| 聊天 | `POST https://opencode.ai/zen/v1/chat/completions` | `Bearer public`（字面量，匿名） |
-| 模型列表 | `GET https://opencode.ai/zen/v1/models` | 同上 |
+| 聊天 | `POST https://opencode.ai/inference/v1/chat/completions` | `Bearer public`（字面量，匿名） |
+| 模型列表 | `GET https://opencode.ai/inference/v1/models` | 同上 |
+
+> **端点必须是 `/inference/v1`，不能用 `/zen/v1`**（2026-10-15 实盘消元）：同一份请求
+> 打到 `/zen/v1` 恒回 403 FreeTierError，打到 `/inference/v1` 即 200。两者模型目录相同
+> （`GET /models` 均 200、7212 字节），差异只在推理入口。opencode2api 的 anonymous 车道
+> 走的也是 `/inference`（其 `internal/config/config.go` 的 `Upstream.Anonymous`）。
 
 **无刷新/无余额/无签到**：匿名凭证是常量，`RefreshToken` 为空实现，`UserResource*` 恒 0，
 `DailyCheckin` 返回「无签到活动」（调度器配置为 `CheckinMinutes/KeepaliveHours` 均 nil，不会调用）。
@@ -152,7 +157,13 @@ CN 凭据在国际端点 401（双向隔离），两渠道凭据文件前缀 `qo
 2. 请求体必须 `stream:true` 且 `tools` 内同含 `bash`/`read` function（缺则注入桩工具；
    客户端无工具时同时置 `tool_choice:"none"`，有工具时保留其 `tool_choice`）；
 3. 伪装头齐套：`User-Agent: opencode/1.18.x`、`x-opencode-client: cli`、
-   `x-session-affinity`/`X-Session-Id`（同会话值）、`x-opencode-request`、`x-opencode-project`。
+   `x-session-affinity`/`X-Session-Id`（同会话值）、`x-opencode-project`。
+   - **不得发 `x-opencode-request`**：上游 2026-10-14 起一旦见到该头即回 403（实盘消元）。
+   - `x-opencode-project` 必须是**裸 40 位小写 hex**（官方 CLI 自身的形态）：`prj_` 前缀的
+     规范 id 会被拒 403；值本身不校验，只校验形状。本工具由会话标识 sha256 派生，
+     保证同一会话稳定映射（prompt cache 亲和）。
+   - `bash`/`read` 两个桩工具是正确的，**不要**换成官方 5 工具集
+     （`shell`/`edit`/`glob`/`grep`/`read` 实测 403，无 tools 同样 403）。
 
 模型暴露：只保留 ID 含 `free` 或恰为 `big-pickle` 的模型（地域受限的也保留）；
 上游不可达时回静态清单（`internal/oczen/free.go`）。定价恒为 `Rate=0, Explicit=true`。

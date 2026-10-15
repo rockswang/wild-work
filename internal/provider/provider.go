@@ -34,7 +34,7 @@ const (
 	// session 约 14 天且上游无 refresh 端点，到期需重新导入。
 	Loomy    Kind = "loomy"
 	TraeCode Kind = "traecode" // Trae 代码版：与 TraeWork 同一上游、共用账号，function=solo_agent
-	Oczen    Kind = "oczen"    // OpenCodeZen 匿名免费通道（opencode.ai/zen，无账号、凭证固定 public）
+	Oczen    Kind = "oczen"    // OpenCodeZen 匿名免费通道（opencode.ai/inference，无账号、凭证固定 public）
 	GLM      Kind = "glm"      // 智谱清言（chatglm.cn 网页版私有接口，凭据为 chatglm_refresh_token）
 	// Cline 免费池（api.cline.bot）：凭据是**官方文档化的 sk_ API Key**（非 OAuth），
 	// 一个账号一把 Key；Key 不轮换 ⇒ 无 RefreshToken、无保活、无签到；

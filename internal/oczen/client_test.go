@@ -143,6 +143,20 @@ func toolNames(obj map[string]any) map[string]bool {
 	return out
 }
 
+// hexOnlyLower 判断 s 是否为纯小写十六进制（x-opencode-project 的官方形状）。
+func hexOnlyLower(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return false
+		}
+	}
+	return true
+}
+
 // TestIsFreeModel 只暴露免费模型 + big-pickle；地域受限的也保留。
 func TestIsFreeModel(t *testing.T) {
 	free := []string{"mimo-v2.6-flash-free", "big-pickle", "muse-spark-1.2-contributor-free", "X-FREE", "nemotron-3.5-lightning-free"}
@@ -209,11 +223,20 @@ func TestChatStreamRequestShape(t *testing.T) {
 			t.Errorf("%s 非规范会话形状: %q", k, got)
 		}
 	}
-	if !strings.HasPrefix(gotH.Get("x-opencode-request"), "req_") {
-		t.Errorf("x-opencode-request 缺失: %q", gotH.Get("x-opencode-request"))
+	// 上游 2026-10-14 起：x-opencode-request 一旦出现即 403，故必须不发（2026-10-15 实盘）。
+	if got := gotH.Get("x-opencode-request"); got != "" {
+		t.Errorf("不得发送 x-opencode-request（上游会回 403），实际: %q", got)
 	}
-	if !strings.HasPrefix(gotH.Get("x-opencode-project"), "prj_") {
-		t.Errorf("x-opencode-project 缺失: %q", gotH.Get("x-opencode-project"))
+	// x-opencode-project 必须是官方 CLI 那种裸 40 位小写 hex；prj_ 前缀会被拒 403。
+	proj := gotH.Get("x-opencode-project")
+	if len(proj) != 40 {
+		t.Errorf("x-opencode-project 须为 40 位 hex，实际 %q（len=%d）", proj, len(proj))
+	}
+	if strings.HasPrefix(proj, "prj_") || !hexOnlyLower(proj) {
+		t.Errorf("x-opencode-project 须为裸小写 hex、不得带 prj_ 前缀: %q", proj)
+	}
+	if proj2 := gotH.Get("x-opencode-project"); proj2 == "" {
+		t.Errorf("x-opencode-project 缺失")
 	}
 	if gotBody["stream"] != true {
 		t.Errorf("请求体未强制 stream=true: %v", gotBody["stream"])

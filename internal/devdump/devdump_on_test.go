@@ -39,7 +39,7 @@ func TestShouldDumpFilter(t *testing.T) {
 		{http.MethodPost, "https://office.xiaohuanxiong.com/api/web/llm/v2/chat/completions", true},
 		{http.MethodPost, "https://api.cline.bot/api/v1/chat/completions", true},
 		{http.MethodPost, "https://loomyad.xunfei.cn/api/v1/chat/completions", true},
-		{http.MethodPost, "https://opencode.ai/zen/v1/chat/completions", true},
+		{http.MethodPost, "https://opencode.ai/inference/v1/chat/completions", true},
 		// 过滤项
 		{http.MethodPost, "https://copilot.tencent.com/v2/enterprises/personal/models", false},
 		{http.MethodPost, "https://api.cline.bot/api/v1/api-keys", false},

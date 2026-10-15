@@ -283,8 +283,21 @@ func (c *Client) headered(req *http.Request, session string) {
 	// OpenCode 1.18.x 的亲和头族，缺一会降低被识别为官方客户端的概率
 	req.Header.Set("x-session-affinity", session)
 	req.Header.Set("X-Session-Id", session)
-	req.Header.Set("x-opencode-request", randomID("req", 16))
-	req.Header.Set("x-opencode-project", randomID("prj", 12))
+	// 上游 2026-10-14 起收紧伪装头（2026-10-15 实盘消元，逐项验证）：
+	//   - x-opencode-request 一旦出现即 403（本工具 2.7.3 一直在发，是主因之一）；
+	//   - x-opencode-project 必须是**裸 40 位小写 hex**（官方 CLI 自身的形态），
+	//     prj_ 前缀的规范 id 会被拒 403；值本身不校验，只校验形状。
+	// 故这里不发 x-opencode-request，project 由 session 确定性派生 40 位 hex——
+	// 同一会话恒定映射到同一 project，保住上游 prompt cache 亲和。
+	req.Header.Set("x-opencode-project", clientProjectID(session))
+}
+
+// clientProjectID 把会话标识派生成官方 CLI 那种裸 40 位小写 hex 的 project id。
+// 值不被上游校验，只校验「非 prj_ 前缀的 40 位 hex」这一形状；用 sha256 派生
+// 保证同一会话稳定映射到同一 project（prompt cache 亲和）。
+func clientProjectID(session string) string {
+	sum := sha256.Sum256([]byte("opencode-project\x00" + session))
+	return hex.EncodeToString(sum[:20])
 }
 
 // ---------------------------------------------------------------------------
