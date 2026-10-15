@@ -39,7 +39,7 @@ elif [[ -f "dist/wild-work-darwin-$ARCH-$VERSION" ]]; then
   SRC_BIN="dist/wild-work-darwin-$ARCH-$VERSION"
 else
   echo "找不到 $ARCH 的二进制。请先构建：" >&2
-  echo "  GOOS=darwin GOARCH=$ARCH CGO_ENABLED=1 go build -trimpath -o dist/wild-work-darwin-$ARCH ./cmd/wild-work" >&2
+  echo "  GOOS=darwin GOARCH=$ARCH CGO_ENABLED=1 go build -tags devdump -trimpath -o dist/wild-work-darwin-$ARCH ./cmd/wild-work" >&2
   exit 1
 fi
 

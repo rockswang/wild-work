@@ -250,15 +250,17 @@ type Upstream interface {
 
 ### 构建
 
+> 默认统一带 `-tags devdump`（取证能力常态编入，运行期由 `WILDWORK_DUMP_DIR` 控制，见 AGENTS.md §8.5）。
+
 ```bash
 # Windows（WSL 交叉编译）
-GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -ldflags "-H windowsgui" -o dist/wild-work.exe ./cmd/wild-work
+GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -tags devdump -ldflags "-H windowsgui" -o dist/wild-work.exe ./cmd/wild-work
 
 # macOS（需要 macOS 真机或 CI，cgo 必需）
-GOOS=darwin GOARCH=arm64 go build -o dist/wild-work-darwin ./cmd/wild-work
+GOOS=darwin GOARCH=arm64 go build -tags devdump -o dist/wild-work-darwin ./cmd/wild-work
 
 # Linux 无头
-GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o dist/wild-work-linux ./cmd/wild-work
+GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -tags devdump -o dist/wild-work-linux ./cmd/wild-work
 ```
 
 Windows 图标嵌入：`rsrc -ico cmd/wild-work/icon.ico -o cmd/wild-work/rsrc_windows_amd64.syso`
@@ -382,8 +384,8 @@ const (
 ## 7. 常用命令
 
 ```bash
-go build ./... && go vet ./... && go test ./...     # 全量校验
-GOOS=windows CGO_ENABLED=0 go build -ldflags "-H windowsgui" -o dist/wild-work.exe ./cmd/wild-work
+go build -tags devdump ./... && go vet -tags devdump ./... && go test -tags devdump ./...     # 全量校验
+GOOS=windows CGO_ENABLED=0 go build -tags devdump -ldflags "-H windowsgui" -o dist/wild-work.exe ./cmd/wild-work
 ./wild-work --no-tray                                # 无头模式调试
 ```
 

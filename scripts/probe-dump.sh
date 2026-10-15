@@ -6,11 +6,12 @@
 # 随后可用 summarize 子命令汇总每个渠道的 usage 字段，一眼看出谁有缓存数据。
 #
 # 前置条件：
-#   1. daemon 由 **devdump 构建** 启动，且环境变量 WILDWORK_DUMP_DIR 已设置：
+#   1. daemon 由已带 devdump 的构建启动（默认构建即含，见 AGENTS.md §8.5），
+#      且环境变量 WILDWORK_DUMP_DIR 已设置：
 #        export WILDWORK_DUMP_DIR="$PWD/temp/dump"
-#        go build -tags devdump -o dist/wild-work-devdump.exe ./cmd/wild-work
+#        go build -o dist/wild-work-devdump.exe ./cmd/wild-work
 #        WILDWORK_DUMP_DIR="$PWD/temp/dump" ./dist/wild-work-devdump.exe --no-tray
-#      （普通 dist/wild-work.exe 无 dump 能力：发布版该开关恒为惰性）
+#      （不带 -tags devdump 的构建无 dump 能力：该开关恒为惰性）
 #   2. daemon 已加载各渠道账号（auths/ 目录）。
 #
 # 用法：

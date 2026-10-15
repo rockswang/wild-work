@@ -425,21 +425,22 @@ POST /api/quit                     # 退出程序
 
 > ⚠️ **本地构建是日常约束**：任何代码变更后都要重新构建 `dist/wild-work.exe`
 > （见 §6 第 0 条）。CI 不生成该文件，且 `dist/` 不入版本控制。
-> 标准流程：`go build ./... && go vet ./... && go test ./...` 全绿后再构建。
+> 标准流程：`go build -tags devdump ./... && go vet -tags devdump ./... && go test -tags devdump ./...` 全绿后再构建。
+> 默认构建统一带 `-tags devdump`（含 CI / 发版；取证能力常态编入，运行期由 `WILDWORK_DUMP_DIR` 控制，见 §8.5）。
 
 ```bash
 # Windows（本机直接构建，或 WSL 交叉编译）
-GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -ldflags "-H windowsgui" -o dist/wild-work.exe ./cmd/wild-work
+GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -tags devdump -ldflags "-H windowsgui" -o dist/wild-work.exe ./cmd/wild-work
 
 # exe 文件图标来自 cmd/wild-work/rsrc_windows_amd64.syso（已入库，go build 自动链接）。
 # 换 build/windows/icon.ico 后必须重新生成并提交，否则本地 exe 还是旧图标：
 #   go run github.com/akavel/rsrc@latest -ico build/windows/icon.ico -o cmd/wild-work/rsrc_windows_amd64.syso
 
 # macOS（需 macOS 真机或 CI，cgo 必需）
-GOOS=darwin GOARCH=arm64 go build -o dist/wild-work-darwin ./cmd/wild-work
+GOOS=darwin GOARCH=arm64 go build -tags devdump -o dist/wild-work-darwin ./cmd/wild-work
 
 # Linux 无头
-GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o dist/wild-work-linux ./cmd/wild-work
+GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -tags devdump -o dist/wild-work-linux ./cmd/wild-work
 ```
 
 构建后核对版本号已进二进制（防止拿到旧文件）：
@@ -473,10 +474,11 @@ git tag vX.Y.Z && git push origin vX.Y.Z
 
 **两层开关（缺一不可）**：
 
-1. **编译期**：整包被构建标签切成两半——`-tags devdump` 编入真实实现
-   （`devdump_on.go`），无 tag 时替换为**常量桩**（`devdump_off.go`：`Wrap` 原样返回、
-   `Enabled()` 恒 false）。发布版产物中不存在任何 dump 代码（实测
-   `dist/wild-work.exe` 里 `WILDWORK_DUMP_DIR`/`dumpTransport` 字符串计数为 0）。
+1. **编译期**：整包被构建标签切成两半——默认构建（含 CI / 发版，统一带
+   `-tags devdump`）编入真实实现（`devdump_on.go`），不带 tag 构建时替换为
+   **常量桩**（`devdump_off.go`：`Wrap` 原样返回、`Enabled()` 恒 false）。
+   不带 tag 的产物中不存在任何 dump 代码（实测二进制里查不到
+   `WILDWORK_DUMP_DIR` 字样）。
 2. **运行期**：仅当环境变量 `WILDWORK_DUMP_DIR` 非空才真正落盘。
 
 **接线点只有一个**：`cmd/wild-work/transport.go` 的 `wrapDumps`（R57 后唯一统一改 Transport 的地方，
@@ -487,7 +489,7 @@ git tag vX.Y.Z && git push origin vX.Y.Z
 
 ```bash
 export WILDWORK_DUMP_DIR="$PWD/temp/dump"
-go build -tags devdump -o dist/wild-work-devdump.exe ./cmd/wild-work
+go build -o dist/wild-work-devdump.exe ./cmd/wild-work   # 默认构建已带 devdump（见 §6）
 ./dist/wild-work-devdump.exe --no-tray              # 需先停掉常驻实例或改端口
 bash scripts/probe-dump.sh run                      # 逐渠道发一轮真实对话
 bash scripts/probe-dump.sh summarize                # 汇总各渠道 usage 字段

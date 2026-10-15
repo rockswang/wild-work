@@ -1,8 +1,8 @@
 //go:build !devdump
 
-// devdump_off_test.go 发布版契约测试（无 `devdump` 标签）。
+// devdump_off_test.go 无标签构建契约测试（无 `devdump` 标签）。
 //
-// 核心承诺（不变量级）：发布版 Wrap 原样返回入参、不动 Transport、
+// 核心承诺（不变量级）：无标签构建的 Wrap 原样返回入参、不动 Transport、
 // Enable/Refresh 无效——即「dump 代码不在产物中」，而非「靠环境变量管住」。
 // 开发版行为测试见 devdump_on_test.go。
 package devdump

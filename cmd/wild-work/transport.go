@@ -37,7 +37,8 @@ func applyBackupLink(cfg *config.Config) {
 }
 
 // wrapDumps 给各渠道全部出站 client 套上 devdump（开发期上游原文落盘，见 AGENTS.md §8.5）。
-// 发布版 devdump.Wrap 是原样返回的常量实现（构建标签剔除），无任何开销。
+// 默认构建即编入真实实现（统一带 -tags devdump）；不带标签的构建里 devdump.Wrap
+// 是原样返回的常量实现，无任何开销。
 // clients 里可含 nil 项（部分渠道没有 BillingHTTP）。
 func wrapDumps(targets map[string][]*http.Client) {
 	for kind, clients := range targets {

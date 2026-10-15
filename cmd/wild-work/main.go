@@ -330,12 +330,12 @@ func main() {
 	// 长回答会在超时点被掐断且无终止帧（实测 2026-09-27 触发 5 次）。
 	glmUp.HTTP.Timeout = time.Duration(cfg.Upstream.TimeoutSeconds) * time.Second
 
-	// 开发期调试开关：把各渠道出站对话请求的**上游原始响应**落盘（仅 -tags devdump
-	// 构建有效，见 internal/devdump）。这里只做一次启动期读取与提示；真正的接线在
+	// 开发期调试开关：把各渠道出站对话请求的**上游原始响应**落盘（默认构建已统一带
+	// -tags devdump 编入，见 internal/devdump）。这里只做一次启动期读取与提示；真正的接线在
 	// 下方 wrapDumps（R57 起这是唯一统一改 Transport 的地方，且只在启动时做一次）。
 	devdump.Refresh()
 	if devdump.Enabled() {
-		log.Printf("devdump enabled: 上游原始响应落盘至 %s（仅开发构建；含 token，勿外传）", os.Getenv("WILDWORK_DUMP_DIR"))
+		log.Printf("devdump enabled: 上游原始响应落盘至 %s（devdump 构建；含 token，勿外传）", os.Getenv("WILDWORK_DUMP_DIR"))
 	}
 
 	// 备用上游通道（全局单代理，**不参与常规请求**，仅渠道命中地区拒绝时自取）：

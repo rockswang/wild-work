@@ -67,6 +67,8 @@ jobs:
           cp build/windows/icon.ico cmd/wild-work/icon.ico
           rsrc -ico cmd/wild-work/icon.ico -o cmd/wild-work/rsrc_windows_amd64.syso
 
+      # 本仓约定：构建统一带 -tags devdump（devdump 取证能力常态编入；
+      # 运行期仍由 WILDWORK_DUMP_DIR 环境变量控制，未设置时零开销）。
       - name: Build
         env:
           GOOS: ${{ matrix.goos }}
@@ -74,7 +76,7 @@ jobs:
           CGO_ENABLED: ${{ matrix.cgo }}
         run: |
           OUT="dist/wild-work-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.suffix }}"
-          go build -ldflags "${{ matrix.ldflags }}" -o "$OUT" ./cmd/wild-work
+          go build -tags devdump -ldflags "${{ matrix.ldflags }}" -o "$OUT" ./cmd/wild-work
 
       # 前端静态检查（脚本随仓库走，见 scripts/ui-static-check.mjs）：
       # 断言冷却标签/汇总条渲染正确，且顶层函数/常量**不得重复定义**
