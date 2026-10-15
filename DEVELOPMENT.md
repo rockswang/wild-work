@@ -385,6 +385,7 @@ const (
 
 ```bash
 go build -tags devdump ./... && go vet -tags devdump ./... && go test -tags devdump ./...     # 全量校验
+WILDWORK_DUMP_DIR= go test -tags devdump ./...     # 本机设过 dump 目录（常驻实例取证）时用这条：测试进程会继承该变量，把 fixture 请求写进同一目录
 GOOS=windows CGO_ENABLED=0 go build -tags devdump -ldflags "-H windowsgui" -o dist/wild-work.exe ./cmd/wild-work
 ./wild-work --no-tray                                # 无头模式调试
 ```

@@ -426,6 +426,7 @@ POST /api/quit                     # 退出程序
 > ⚠️ **本地构建是日常约束**：任何代码变更后都要重新构建 `dist/wild-work.exe`
 > （见 §6 第 0 条）。CI 不生成该文件，且 `dist/` 不入版本控制。
 > 标准流程：`go build -tags devdump ./... && go vet -tags devdump ./... && go test -tags devdump ./...` 全绿后再构建。
+> 本机设过 `WILDWORK_DUMP_DIR`（常驻实例取证用）时，跑测试要显式清空它——测试进程会继承该变量，把 fixture 请求也 dump 进同一目录（见 §8.5）：`WILDWORK_DUMP_DIR= go test -tags devdump ./...`。
 > 默认构建统一带 `-tags devdump`（含 CI / 发版；取证能力常态编入，运行期由 `WILDWORK_DUMP_DIR` 控制，见 §8.5）。
 
 ```bash
@@ -480,6 +481,11 @@ git tag vX.Y.Z && git push origin vX.Y.Z
    不带 tag 的产物中不存在任何 dump 代码（实测二进制里查不到
    `WILDWORK_DUMP_DIR` 字样）。
 2. **运行期**：仅当环境变量 `WILDWORK_DUMP_DIR` 非空才真正落盘。
+
+> ⚠️ 别让测试继承：`go test` 跑 `internal/server` 的 handler 测试时会落盘自己的合成请求
+> （并发 fixture 单轮 200+ 条：`qoder/model-0..31`、`oczen/big-pickle` 等），`internal/server/dump.go`
+> 的入站/失败对 dump 也吃同一个变量——与真实流量混在同一目录、只能靠时间戳分辨。
+> 跑测试一律显式清空：`WILDWORK_DUMP_DIR= go test -tags devdump ./...`。
 
 **接线点只有一个**：`cmd/wild-work/transport.go` 的 `wrapDumps`（R57 后唯一统一改 Transport 的地方，
 不再涉及代理；启动时一次性包住全部 14 个渠道 client，面板热更新无需再接），
