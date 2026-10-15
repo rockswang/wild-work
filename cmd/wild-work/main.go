@@ -553,12 +553,17 @@ func main() {
 	appInst.SetRootHandler(mux)
 
 	if err := appInst.StartServer(); err != nil {
-		log.Printf("listen %s failed: %v（面板中将提示）", cfg.Listen.Addr(), err)
-	} else {
-		// 地址必须落日志：启动弹窗可能被忽略或关掉，日志里始终留一份。
-		log.Printf("已启动：OpenAI 兼容 API http://%s:%d/v1（Web UI http://%s:%d/）",
-			displayHost(cfg), cfg.Listen.Port, displayHost(cfg), cfg.Listen.Port)
+		// 监听失败必须终止，不能只记日志继续跑：调度器与托盘会照常起来，
+		// 表现为「面板看着一切正常，其实是另一个实例在服务本端口」，
+		// 而两个进程共享同一数据目录（config.json / auths / data），
+		// 会重复签到并互相覆盖刷新出的 token。
+		fatal("监听 %s 失败：%v\n\n该端口可能已被占用，例如已有一个 wild-work 实例在运行。\n"+
+			"请先退出已有实例，或改用 config.json 的 listen.port（也可用环境变量 WILDWORK_LISTEN）。",
+			cfg.Listen.Addr(), err)
 	}
+	// 地址必须落日志：启动弹窗可能被忽略或关掉，日志里始终留一份。
+	log.Printf("已启动：OpenAI 兼容 API http://%s:%d/v1（Web UI http://%s:%d/）",
+		displayHost(cfg), cfg.Listen.Port, displayHost(cfg), cfg.Listen.Port)
 
 	// 调度器后台运行
 	sctx, stop := context.WithCancel(context.Background())
