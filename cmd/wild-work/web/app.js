@@ -1378,6 +1378,132 @@ async function saveReasoningEfforts() {
   } catch (e) { $("effErr").textContent = e.message; }
 }
 
+function formatTokenCount(num) {
+  if (!num) return "—";
+  if (num >= 1000000 && num % 100000 === 0) {
+    const m = num / 1000000;
+    return `${m}M`;
+  }
+  if (num >= 1000 && num % 1000 === 0) {
+    const k = num / 1000;
+    return `${k}k`;
+  }
+  if (num >= 1000000) {
+    return `${(num / 1000000).toFixed(1).replace(/\.0$/, "")}M`;
+  }
+  if (num >= 1000) {
+    return `${(num / 1000).toFixed(1).replace(/\.0$/, "")}k`;
+  }
+  return String(num);
+}
+
+function renderCustomChList() {
+  const cards = editCustomChannels.map((c, i) => {
+    const isOff = c.enabled === false;
+    const offTag = isOff ? '<span class="tag neutral" style="margin-left:auto">已禁用</span>' : '<span class="tag ok" style="margin-left:auto">已启用</span>';
+    const keyMask = c.api_key ? (c.api_key.length > 8 ? c.api_key.slice(0, 3) + "…" + c.api_key.slice(-4) : "••••••") : "无密钥";
+    const models = c.models || [];
+
+    const modelRows = models.map((m, j) => {
+      const mid = typeof m === "string" ? m : m.id;
+      const ctxNum = typeof m === "object" ? parseTokens(m.context_window, 0) : 0;
+      const outNum = typeof m === "object" ? parseTokens(m.max_tokens, 0) : 0;
+      const ctx = ctxNum ? formatTokenCount(ctxNum) : "—";
+      const maxTok = outNum ? formatTokenCount(outNum) : "—";
+      const efforts = typeof m === "object" && m.reasoning_efforts && m.reasoning_efforts.length ? m.reasoning_efforts : [];
+      const defEff = typeof m === "object" && m.default_reasoning_effort ? m.default_reasoning_effort : (efforts[0] || "");
+      const rsnHtml = (typeof m === "object" && (m.supports_reasoning || efforts.length > 0))
+        ? `<span class="tag ok" title="默认: ${esc(defEff)}">${esc(defEff || "开启")}</span> <span class="hint">[${esc(efforts.join(", "))}]</span>`
+        : `<span class="hint">—</span>`;
+      const hasImg = typeof m === "object" && m.supports_images;
+      const hasRsn = typeof m === "object" && (m.supports_reasoning || efforts.length > 0);
+      const hasTools = typeof m === "object" ? m.supports_tools !== false : true;
+      const capTags = [];
+      if (hasImg) capTags.push('<span class="tag">识图</span>');
+      if (hasRsn) capTags.push('<span class="tag">思考</span>');
+      if (hasTools) capTags.push('<span class="tag">工具</span>');
+      const caps = capTags.length > 0 ? capTags.join(" ") : '<span class="hint">—</span>';
+
+      return `<tr>
+        <td><code>${esc(mid)}</code></td>
+        <td>${esc(ctx)}</td>
+        <td>${esc(maxTok)}</td>
+        <td>${rsnHtml}</td>
+        <td>${caps}</td>
+        <td style="text-align:center"><a data-del-model="${i}:${j}" style="cursor:pointer;color:var(--danger);font-weight:bold;font-size:14px" title="移除此模型">×</a></td>
+      </tr>`;
+    }).join("");
+
+    const tableHtml = models.length > 0 ? `
+      <table class="custom-models-table">
+        <colgroup>
+          <col style="width:auto">
+          <col style="width:75px">
+          <col style="width:75px">
+          <col style="width:130px">
+          <col style="width:130px">
+          <col style="width:36px">
+        </colgroup>
+        <thead>
+          <tr>
+            <th>模型 ID</th>
+            <th>上下文</th>
+            <th>最大输出</th>
+            <th>思考等级</th>
+            <th>能力</th>
+            <th style="text-align:center">操作</th>
+          </tr>
+        </thead>
+        <tbody>${modelRows}</tbody>
+      </table>
+    ` : `<div class="hint" style="margin:4px 0 8px">（该渠道尚未配置模型，请在下方添加模型及参数）</div>`;
+
+    return `
+    <div class="custom-ch-card">
+      <div class="custom-ch-header">
+        <span class="badge custom">${esc(c.name)}</span>
+        <span style="font-family:ui-monospace,monospace;font-size:12px;font-weight:600;color:var(--text)">${esc(c.base_url)}</span>
+        <span class="hint" title="${esc(c.api_key || '')}">[${esc(keyMask)}]</span>
+        ${offTag}
+        <button class="btn small" data-test-custom="${i}">测试连通</button>
+        <button class="btn small" data-toggle-custom="${i}">${isOff ? "启用" : "停用"}</button>
+        <button class="icon-btn" data-del-custom="${i}" title="删除该渠道">🗑</button>
+      </div>
+
+      <div class="custom-models-box">
+        ${tableHtml}
+        <div class="custom-model-add-row" style="display:flex;align-items:center;gap:6px;flex-wrap:nowrap">
+          <input class="input" data-m-id="${i}" placeholder="模型 ID" style="flex:1;min-width:110px">
+          <input class="input" data-m-ctx="${i}" placeholder="上下文(如 1M)" style="width:90px;flex-shrink:0" value="1M">
+          <input class="input" data-m-out="${i}" placeholder="输出(如 64k)" style="width:80px;flex-shrink:0" value="64k">
+          <input class="input" data-m-eff="${i}" placeholder="思考档位" style="width:110px;flex-shrink:0">
+          <label class="hint" style="display:inline-flex;align-items:center;gap:2px;cursor:pointer;white-space:nowrap;margin:0 1px"><input type="checkbox" data-m-img="${i}" checked>识图</label>
+          <label class="hint" style="display:inline-flex;align-items:center;gap:2px;cursor:pointer;white-space:nowrap;margin:0 1px"><input type="checkbox" data-m-rsn="${i}" checked>思考</label>
+          <label class="hint" style="display:inline-flex;align-items:center;gap:2px;cursor:pointer;white-space:nowrap;margin:0 1px"><input type="checkbox" data-m-tools="${i}" checked>工具</label>
+          <button class="btn small icon-btn" data-add-model="${i}" style="font-size:15px;width:32px;height:30px;padding:0;display:inline-flex;align-items:center;justify-content:center;flex-shrink:0" title="添加模型">➕</button>
+        </div>
+      </div>
+    </div>`;
+  }).join("");
+
+  $("customChList").innerHTML = cards || `<div class="hint">（暂无自定义渠道，请先在下方输入渠道标识、地址与 API 密钥添加渠道）</div>`;
+  $("customChErr").textContent = "";
+  $("customChOk").textContent = "";
+}
+
+async function saveCustomChannels() {
+  try {
+    await api("/api/config/custom_channels", { channels: editCustomChannels });
+    toast("自定义渠道已保存（热生效）");
+    $("customChErr").textContent = "";
+    $("customChOk").textContent = "渠道及模型配置已成功保存并立即生效";
+    loadState();
+  } catch (e) {
+    $("customChErr").textContent = e.message;
+    $("customChOk").textContent = "";
+  }
+}
+
 // ---------- 设置弹层（统一配置：监听/API-Key/签到/自启/模型路由/备用上游通道） ----------
 // renderBackupProxy 回显全局备用上游通道（单一地址，空 = 关闭）。
 // 定位是**备份链路**而不是全局代理：不参与常规请求，仅渠道命中「上游地区拒绝」

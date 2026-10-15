@@ -460,6 +460,18 @@ body {
 .proxy-row { margin-bottom: 0; }
 .proxy-row .input { font-family: ui-monospace, Consolas, monospace; font-size: 12px; }
 
+/* 自定义渠道层级卡片（R64） */
+.custom-channels-list { display: flex; flex-direction: column; gap: 8px; }
+.custom-ch-card { background: var(--bg, #f8fafc); border: 1px solid var(--line, #e2e8f0); border-radius: 8px; padding: 10px 12px; }
+.custom-ch-header { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding-bottom: 8px; border-bottom: 1px dashed var(--line, #e2e8f0); }
+.custom-models-box { margin-top: 8px; }
+.custom-models-title { font-size: 11px; font-weight: 600; color: var(--muted, #64748b); margin-bottom: 6px; }
+.custom-models-table { width: 100%; border-collapse: collapse; font-size: 12px; margin-bottom: 8px; table-layout: fixed; }
+.custom-models-table th, .custom-models-table td { padding: 5px 6px; vertical-align: middle; }
+.custom-models-table th { text-align: left; font-size: 11px; font-weight: 500; color: var(--muted, #64748b); border-bottom: 1px solid var(--line, #e2e8f0); white-space: nowrap; }
+.custom-models-table td { border-bottom: 1px solid var(--line, #f1f5f9); overflow: hidden; text-overflow: ellipsis; }
+.custom-model-add-row { display: flex; align-items: center; gap: 6px; flex-wrap: nowrap; margin-top: 6px; padding: 6px 8px; background: var(--card, #fff); border-radius: 6px; border: 1px solid var(--line, #e2e8f0); }
+
 /* 账号名可点击编辑 */
 .acct-name.editable { cursor: pointer; border-bottom: 1px dashed transparent; }
 .acct-name.editable:hover { color: var(--primary); border-bottom-color: var(--primary); }
