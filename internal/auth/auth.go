@@ -466,6 +466,15 @@ func LoadLoomyDir(dir string) ([]*Auth, error) {
 	return loadPrefixed(dir, "loomy")
 }
 
+// LoadClineDir 扫描 Cline 凭证（cline-*.json）。
+//
+// 凭据不来自登录编排，而是面板「粘贴官方 API Key」（见 app.SubmitClineKey）。
+// glob 边界已核：现存前缀 workbuddy* / workbuddyai- / trae- / qoder* / qodercn- /
+// qodercom- / qwenwork- / glm- / monkeycode- / raccoon- / loomy- 与 cline- 无包含关系。
+func LoadClineDir(dir string) ([]*Auth, error) {
+	return loadPrefixed(dir, "cline")
+}
+
 // loadPrefixed 按前缀扫描并解析凭证（供无登录编排的「导入型」渠道复用）。
 // 单个文件损坏时跳过而不整体失败——与既有 Load*Dir 的容错口径一致。
 func loadPrefixed(dir, prefix string) ([]*Auth, error) {

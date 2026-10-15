@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"wild-work/internal/auth"
+	"wild-work/internal/loopguard"
 	"wild-work/internal/provider"
 )
 
@@ -491,4 +492,52 @@ func TestRefreshFallsBackToElectronOn404(t *testing.T) {
 	if len(hit) != 2 || hit[0] != want[0] || hit[1] != want[1] {
 		t.Fatalf("回落路径不符：%v", hit)
 	}
+}
+
+// TestStreamReasoningLoopIntercepted 思考链死循环命中：发 error 帧、不补 [DONE]、
+// 返回 *loopguard.Error，且死循环之后的正文不再透传。
+func TestStreamReasoningLoopIntercepted(t *testing.T) {
+	line := "这里是一个足够长的、会被模型机械重复的思考行内容"
+	var in strings.Builder
+	for i := 0; i < 10; i++ {
+		in.WriteString(sseLine(map[string]any{
+			"choices": []any{map[string]any{"index": 0, "delta": map[string]any{"reasoning_content": line + "\n"}}},
+		}))
+	}
+	in.WriteString(sseLine(map[string]any{
+		"choices": []any{map[string]any{"index": 0, "delta": map[string]any{"content": "正文"}}},
+	}))
+	in.WriteString("data: [DONE]\n\n")
+
+	rec := httptest.NewRecorder()
+	_, err := Stream(rec, strings.NewReader(in.String()), "raccoon/x")
+	if err == nil {
+		t.Fatal("期望守卫命中返回错误，实际 nil")
+	}
+	var lge *loopguard.Error
+	if !asLoopGuardErr(err, &lge) {
+		t.Fatalf("期望 *loopguard.Error，得 %T: %v", err, err)
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, `"code":"upstream_reasoning_loop"`) {
+		t.Errorf("缺少错误帧: %q", body)
+	}
+	if strings.Contains(body, "data: [DONE]") {
+		t.Errorf("守卫命中不得补 [DONE]: %q", body)
+	}
+	if strings.Contains(body, "正文") {
+		t.Errorf("死循环之后的正文不应透传: %q", body)
+	}
+}
+
+// asLoopGuardErr errors.As 小工具。
+func asLoopGuardErr(err error, target **loopguard.Error) bool {
+	if err == nil {
+		return false
+	}
+	le, ok := err.(*loopguard.Error)
+	if ok {
+		*target = le
+	}
+	return ok
 }

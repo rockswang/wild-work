@@ -34,6 +34,11 @@
       "gpt-5*": "workbuddy/deepseek-v4-pro"
     }
   },
-  "proxies": {
+  "backup_proxy": "",
+  "reasoning_efforts": {},
+  "model_fallback": [],
+  "custom_channels": [],
+  "features": {
+    "loop_guard": true
   }
 }

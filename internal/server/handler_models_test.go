@@ -97,3 +97,90 @@ func TestModelEntryOmitsEstimatedCapacity(t *testing.T) {
 		t.Errorf("context_options 应透传，得到 %v", entry["context_options"])
 	}
 }
+
+// ---- 思考档位透传（issue #96）----
+// 原则：上游目录声明了档位才输出 reasoning 对象与 supports_reasoning；
+// 未声明时两者都不出现（不编造），保持与 /api/fees 面板同源。
+
+// TestModelEntryReasoning 带档位的模型应输出 reasoning 对象（Buddy2api v2.1.11 形状）。
+func TestModelEntryReasoning(t *testing.T) {
+	cd := true
+	mi := provider.ModelInfo{
+		ID: "glm-5.3", Name: "GLM-5.3", SupportsReasoning: true,
+		ReasoningEfforts: []string{"low", "high", "max"}, DefaultReasoningEffort: "high",
+		CanDisableThinking: &cd,
+	}
+	entry := buildModelEntry(provider.WorkBuddy, mi)
+	// JSON 序列化验证（客户端按 JSON 解析）
+	raw, err := json.Marshal(entry)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var back map[string]any
+	if err := json.Unmarshal(raw, &back); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if back["supports_reasoning"] != true {
+		t.Errorf("supports_reasoning 应为 true，得到 %v", back["supports_reasoning"])
+	}
+	r, ok := back["reasoning"].(map[string]any)
+	if !ok {
+		t.Fatalf("缺少 reasoning 对象: %s", raw)
+	}
+	efforts, ok := r["supported_efforts"].([]any)
+	if !ok || len(efforts) != 3 || efforts[0] != "low" || efforts[2] != "max" {
+		t.Errorf("supported_efforts 应为 [low high max]，得到 %v", r["supported_efforts"])
+	}
+	if r["default_effort"] != "high" {
+		t.Errorf("default_effort 应为 high，得到 %v", r["default_effort"])
+	}
+	if r["can_disable_thinking"] != true {
+		t.Errorf("can_disable_thinking 应为 true，得到 %v", r["can_disable_thinking"])
+	}
+	// id 带渠道前缀（其余字段不受影响）
+	if back["id"] != "workbuddy/glm-5.3" {
+		t.Errorf("id 应带渠道前缀，得到 %v", back["id"])
+	}
+}
+
+// TestModelEntryReasoningAbsent 上游未声明档位时不得输出 reasoning/supports_reasoning。
+func TestModelEntryReasoningAbsent(t *testing.T) {
+	cases := []provider.ModelInfo{
+		{ID: "plain"}, // 全未声明
+		{ID: "bool-only", SupportsReasoning: true}, // 只有 bool（旧数据形状），无档位列表
+	}
+	for _, mi := range cases {
+		entry := buildModelEntry(provider.WorkBuddy, mi)
+		if _, has := entry["reasoning"]; has {
+			t.Errorf("%s 未声明档位时不应输出 reasoning 对象", mi.ID)
+		}
+		// supports_reasoning 由能力位决定（本仓形状）：bool-only 仍应透出。
+		_, has := entry["supports_reasoning"]
+		if want := mi.SupportsReasoning; has != want {
+			t.Errorf("%s supports_reasoning present=%v, want %v", mi.ID, has, want)
+		}
+	}
+}
+
+// TestModelEntryReasoningMinimal 只有默认档没有列表（deepseek 系形状）也应输出。
+func TestModelEntryReasoningMinimal(t *testing.T) {
+	cd := false
+	mi := provider.ModelInfo{ID: "ds", SupportsReasoning: true, DefaultReasoningEffort: "high", CanDisableThinking: &cd}
+	entry := buildModelEntry(provider.WorkBuddy, mi)
+	if entry["supports_reasoning"] != true {
+		t.Fatalf("supports_reasoning 应为 true")
+	}
+	r, ok := entry["reasoning"].(map[string]any)
+	if !ok {
+		t.Fatalf("缺少 reasoning 对象")
+	}
+	if _, has := r["supported_efforts"]; has {
+		t.Errorf("无列表时不应输出 supported_efforts")
+	}
+	if r["default_effort"] != "high" {
+		t.Errorf("default_effort 应为 high，得到 %v", r["default_effort"])
+	}
+	if r["can_disable_thinking"] != false {
+		t.Errorf("can_disable_thinking 应为 false，得到 %v", r["can_disable_thinking"])
+	}
+}

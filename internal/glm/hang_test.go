@@ -62,10 +62,10 @@ func TestStreamHangsUpstreamDoesNotBlockClient(t *testing.T) {
 // TestStreamMalformedFrameDoesNotPanic 畸形帧不得 panic，也不得中断整个流。
 func TestStreamMalformedFrameDoesNotPanic(t *testing.T) {
 	frames := []string{
-		`{这不是 JSON`,                                  // 完全畸形
-		`{"parts":"不是数组"}`,                            // 类型错误
-		`{"parts":[{"content":"不是数组"}]}`,               // 内层类型错误
-		`{"parts":[{"content":[{"type":"text"}]}]}`,     // 缺字段
+		`{这不是 JSON`,                                             // 完全畸形
+		`{"parts":"不是数组"}`,                                      // 类型错误
+		`{"parts":[{"content":"不是数组"}]}`,                        // 内层类型错误
+		`{"parts":[{"content":[{"type":"text"}]}]}`,             // 缺字段
 		`{"conversation_id":"c1","status":"finish","parts":[]}`, // 正常收尾
 	}
 	var sb strings.Builder

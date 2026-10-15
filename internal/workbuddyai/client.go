@@ -418,7 +418,12 @@ func (c *Client) FetchModels(a *auth.Auth) ([]provider.ModelInfo, error) {
 			continue
 		}
 		seen[m.ID] = true
-		out = append(out, provider.ModelInfo{
+		def := m.Reasoning.DefaultEffort
+		if def == "" {
+			def = m.Reasoning.Effort
+		}
+
+		mi := provider.ModelInfo{
 			ID:            m.ID,
 			Name:          m.Name,
 			ContextWindow: m.MaxInputTokens,
@@ -430,9 +435,13 @@ func (c *Client) FetchModels(a *auth.Auth) ([]provider.ModelInfo, error) {
 			SupportsReasoning: m.SupportsReasoning,
 			SupportsTools:     m.SupportsToolCall,
 			// 档位能力（远端权威，缺失时由 internal/reasoning 静态表兜底）
-			SupportedEfforts: m.Reasoning.SupportedEfforts,
-			DefaultEffort:    m.Reasoning.DefaultEffort,
-		})
+			SupportedEfforts:       m.Reasoning.SupportedEfforts,
+			ReasoningEfforts:       provider.CleanEfforts(m.Reasoning.SupportedEfforts),
+			DefaultEffort:          def,
+			ReasoningCanDisable:    m.Reasoning.CanDisableThinking,
+			DefaultReasoningEffort: def,
+		}
+		out = append(out, mi)
 	}
 	// 硬编码补入目录外可用模型
 	for _, m := range extraModels {

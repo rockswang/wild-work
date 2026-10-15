@@ -230,3 +230,83 @@ func TestStreamNormalAnswerNotCooled(t *testing.T) {
 		t.Errorf("正常收尾不得冷却账号（Cooling=true，reason=%s）", st.Reason)
 	}
 }
+
+// TestStreamRateLimitSingleAccountNotCooled 单号渠道（loomy/小浣熊等仅 1 个账号）的
+// 流内限流**不冷却**：冷却 = 整渠道下线（无号可换），客户端已通过 SSE 收到上游原始
+// 限流错误会自行退避重试，透传反而恢复更快（与非流式「单账号不罚账号」口径一致）。
+// 这是二开与官方原版的分歧点，升级合并时必须保留本测试（官方原版此处会冷却）。
+func TestStreamRateLimitSingleAccountNotCooled(t *testing.T) {
+	up := &streamErrUpstream{rateCode: 3004}
+	p := pool.New(t.TempDir() + "/state.json")
+	p.Add(&auth.Auth{Kind: "traework", AccessToken: "at-A", ExpiresAt: 4102444800, UID: "A"})
+	h := NewHandler(Config{
+		Runtimes: map[provider.Kind]*Runtime{
+			provider.TraeWork: {Kind: provider.TraeWork, Pool: p, Upstream: up,
+				StaticModels: []provider.ModelInfo{{ID: "m"}}},
+		},
+		APIKey:       "",
+		HardCooldown: 12 * 3_600_000_000_000,
+		SoftCooldown: 60_000_000_000,
+		ErrThreshold: 3,
+		ErrCooldown:  600_000_000_000,
+	})
+
+	rec1 := httptest.NewRecorder()
+	h.ServeHTTP(rec1, httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(streamBody)))
+	if got := up.lastCall(); got != "A" {
+		t.Fatalf("单号渠道请求应命中唯一账号 A，实际 %q", got)
+	}
+	// 限流 error 帧照常透传给客户端（客户端据此自行退避重试）
+	if !strings.Contains(rec1.Body.String(), "upstream_rate_limited") {
+		t.Errorf("应透传限流 error 帧\nbody=%s", rec1.Body.String())
+	}
+	// 单号渠道：不冷却、不禁用（冷却=整渠道 503 窗口，透传反而能让客户端重试成功）
+	st, _ := p.Status("A")
+	if st.Cooling || st.Disabled {
+		t.Fatalf("单号渠道流内限流不得冷却/禁用唯一账号（Cooling=%v Disabled=%v reason=%s）",
+			st.Cooling, st.Disabled, st.Reason)
+	}
+
+	// 后续请求立即恢复可用（无需等冷却结束）
+	up.mu.Lock()
+	up.rateCode = 0
+	up.mu.Unlock()
+	rec2 := httptest.NewRecorder()
+	h.ServeHTTP(rec2, httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(streamBody)))
+	if got := up.lastCall(); got != "A" {
+		t.Fatalf("请求2 应仍命中 A（未被冷却），实际 %q", got)
+	}
+	if rec2.Code != http.StatusOK || !strings.Contains(rec2.Body.String(), "[DONE]") {
+		t.Errorf("请求2 应正常成功\nbody=%s", rec2.Body.String())
+	}
+}
+
+// TestStreamRateLimitSingleAccountFlagCools SingleAccount 渠道（oczen）官方已有完整豁免
+// 语义（请求期透传）。本仓库的流内运行时单号豁免明确**不覆盖**它：带 SingleAccount
+// 标志的渠道流内限流仍走官方冷却路径，行为与官方 v2.6.3 完全一致——运行时豁免只补
+// 官方 SingleAccount 的盲区，不与已有语义重叠。
+func TestStreamRateLimitSingleAccountFlagCools(t *testing.T) {
+	up := &streamErrUpstream{rateCode: 3004}
+	p := pool.New(t.TempDir() + "/state.json")
+	p.Add(&auth.Auth{Kind: "traework", AccessToken: "at-A", ExpiresAt: 4102444800, UID: "A"})
+	h := NewHandler(Config{
+		Runtimes: map[provider.Kind]*Runtime{
+			provider.TraeWork: {Kind: provider.TraeWork, Pool: p, Upstream: up,
+				SingleAccount: true,
+				StaticModels:  []provider.ModelInfo{{ID: "m"}}},
+		},
+		APIKey:       "",
+		HardCooldown: 12 * 3_600_000_000_000,
+		SoftCooldown: 60_000_000_000,
+		ErrThreshold: 3,
+		ErrCooldown:  600_000_000_000,
+	})
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(streamBody)))
+	st, _ := p.Status("A")
+	if !st.Cooling {
+		t.Fatalf("SingleAccount 单号渠道流内限流应保持官方冷却行为（Cooling=%v reason=%s）",
+			st.Cooling, st.Reason)
+	}
+}

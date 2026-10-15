@@ -70,7 +70,7 @@ func TestStreamTruncationNotDisguisedAsDone(t *testing.T) {
 			if got := strings.Contains(body, "[DONE]"); got != c.wantDone {
 				t.Errorf("[DONE] present=%v, want %v（截断不得伪装成正常收尾）\nbody=%s", got, c.wantDone, body)
 			}
-			if got := (strings.Contains(body, `"code":"upstream_stream_error"`) || strings.Contains(body, `"code":"upstream_timeout"`)); got != c.wantErrFrm {
+			if got := (strings.Contains(body, `"code":"upstream_stream_error"`) || strings.Contains(body, `"code":"upstream_timeout"`) || strings.Contains(body, `"code":"upstream_truncated"`)); got != c.wantErrFrm {
 				t.Errorf("error frame present=%v, want %v\nbody=%s", got, c.wantErrFrm, body)
 			}
 			if !errors.Is(err, errStreamTruncatedSentinel()) && !strings.Contains(err.Error(), "truncated") {

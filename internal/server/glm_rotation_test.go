@@ -46,8 +46,10 @@ func (u *rotatingUpstream) ChatStream(a *auth.Auth, _ []byte) (io.ReadCloser, in
 func (u *rotatingUpstream) FetchModels(*auth.Auth) ([]provider.ModelInfo, error) {
 	return []provider.ModelInfo{{ID: "m"}}, nil
 }
-func (u *rotatingUpstream) FetchModelPricing(*auth.Auth) ([]provider.ModelPricing, error) { return nil, nil }
-func (u *rotatingUpstream) UserResource(*auth.Auth) (int64, error)                        { return 0, nil }
+func (u *rotatingUpstream) FetchModelPricing(*auth.Auth) ([]provider.ModelPricing, error) {
+	return nil, nil
+}
+func (u *rotatingUpstream) UserResource(*auth.Auth) (int64, error) { return 0, nil }
 func (u *rotatingUpstream) UserResourceDetail(*auth.Auth) (int64, []provider.ResourceItem, error) {
 	return 0, nil, nil
 }
@@ -65,14 +67,15 @@ func (u *rotatingUpstream) Aggregate(r io.Reader, _ string) (map[string]any, err
 	return map[string]any{"choices": []any{}}, nil
 }
 
-// TestMultiAccountDisablesAndSwitchesOnNextRequest 非单账号渠道的**真实**轮换语义：
+// TestMultiAccountDisablesAndSwitchesOnNextRequest 非单账号渠道的轮换语义（收上游换号重试）：
 //
-//	请求 1：粘性路由选中 A → A 返回 401(session_dead) → A 被 Disable，401 透传
-//	请求 2：A 已禁用 → 粘性降级 Pick() → 选中 B → 成功
+//	请求 1：粘性路由选中 A → A 返回 401(session_dead) → A 被 Disable，
+//	        且该错误属账号级（Rotatable）→ 同请求内换号到 B → 成功
+//	请求 2：A 已禁用 → 直接选中 B → 成功
 //
-// ⚠️ 注意：wild-work 的既定语义是「HTTP >=400 直接透传、**不在同一请求内重试下一个账号**」
-// （见 handler.go 的 status>=400 分支）。只有**传输层错误**才在同一请求内 continue 换号。
-// 这是全渠道统一行为，本测试锁定它、不擅自更改。
+// ⚠️ 语义说明：账号级错误（限流/欠费/登录态死/404/5xx/账号故障）现在会在**同一请求内**
+// 换下一个账号重试；全部候选耗尽后才把最后一个上游错误透传给客户端。
+// 请求级错误（内容拦截/上下文超限/参数非法等）仍单次透传、不换号。
 func TestMultiAccountDisablesAndSwitchesOnNextRequest(t *testing.T) {
 	up := &rotatingUpstream{failUID: "A"}
 
@@ -109,8 +112,8 @@ func TestMultiAccountDisablesAndSwitchesOnNextRequest(t *testing.T) {
 	// --- 请求 1：命中 A，失败透传 ---
 	rec1 := httptest.NewRecorder()
 	h.ServeHTTP(rec1, httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body)))
-	if rec1.Code != http.StatusUnauthorized {
-		t.Errorf("请求1 状态码 = %d, want 401（既定语义：4xx 透传，不在同请求内换号）", rec1.Code)
+	if rec1.Code != http.StatusOK {
+		t.Errorf("请求1 状态码 = %d, want 200（账号级 401 应在同请求内换号到 B 后成功）", rec1.Code)
 	}
 
 	// A 必须被禁用（这是「下次会换号」的前提）
@@ -142,7 +145,7 @@ func TestMultiAccountDisablesAndSwitchesOnNextRequest(t *testing.T) {
 	if got := calls[len(calls)-1]; got != "B" {
 		t.Errorf("请求2 调用了 %q, want B（A 已禁用应换号）—— 多账号轮换失效", got)
 	}
-	t.Logf("✅ 真实语义确认：请求1 用 A 失败透传并禁用 A；请求2 自动换到 B 成功。调用序列 %v", calls)
+	t.Logf("✅ 语义确认：请求1 用 A 失败后同请求换到 B 成功并禁用 A；请求2 直接走 B。调用序列 %v", calls)
 }
 
 // TestSingleAccountDoesNotRotate 单账号渠道（oczen 语义）：

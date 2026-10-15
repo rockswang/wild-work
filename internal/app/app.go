@@ -10,7 +10,6 @@ import (
 	"log"
 	"net"
 	"net/http"
-	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
@@ -20,7 +19,10 @@ import (
 	"time"
 
 	"wild-work/internal/auth"
+	"wild-work/internal/backuplink"
+	"wild-work/internal/cline"
 	"wild-work/internal/config"
+	"wild-work/internal/custom"
 	"wild-work/internal/ledger"
 	"wild-work/internal/login"
 	"wild-work/internal/login_glm"
@@ -31,6 +33,7 @@ import (
 	loginraccoon "wild-work/internal/login_raccoon"
 	logintrae "wild-work/internal/login_trae"
 	"wild-work/internal/login_wbai"
+	"wild-work/internal/loopguard"
 	"wild-work/internal/oczen"
 	"wild-work/internal/platform"
 	"wild-work/internal/pool"
@@ -43,12 +46,13 @@ import (
 	"wild-work/internal/reasoning"
 	"wild-work/internal/scheduler"
 	"wild-work/internal/server"
+	statsEngine "wild-work/internal/stats"
 	"wild-work/internal/systray"
 	"wild-work/internal/upstream"
 )
 
 // Version 版本号。
-const Version = "2.6.3"
+const Version = "2.7.3"
 
 const (
 	loginTimeout   = 5 * time.Minute
@@ -67,6 +71,9 @@ type Runtime struct {
 	// uid → 账号反查）必须跳过别名渠道，否则同一账号会被计入两次（见 issue #36）。
 	// 别名渠道仍保留独立的模型/费率抓取（各自 upstream 的 function 不同）。
 	Alias bool
+
+	// Custom 标记该渠道为用户自定义 OpenAI 兼容第三方渠道（R66）。
+	Custom bool
 }
 
 // Options 构建 App 的依赖。
@@ -81,11 +88,19 @@ type Options struct {
 
 // App 应用编排。
 type App struct {
-	cfgPath  string
-	cfg      *config.Config
-	runtimes map[provider.Kind]*Runtime
-	handler  *server.Handler // 内层（保留强类型，用于 SetAPIKey/ChannelModels 等）
-	httpRoot http.Handler    // 对外暴露的根 handler，可能为外层兼容层 mux（见 SetRootHandler）
+	cfgPath string
+	cfg     *config.Config
+	// runtimes 渠道运行时表。启动时装配完成，此后仅在「面板保存自定义渠道」时
+	// 经 UpdateCustomRuntimes 增删（R66）——这是唯一一处 post-init 写。
+	// 读写一律经 runtimesMu 保护：后台统计喂入器（30s ticker）与 /api/state 轮询
+	// 都会遍历此表，若不加锁，与保存操作重叠时即 Go 的
+	// `fatal error: concurrent map read and map write`（不可 recover，daemon 直接死）。
+	runtimes   map[provider.Kind]*Runtime
+	runtimesMu sync.RWMutex
+	handler    *server.Handler    // 内层（保留强类型，用于 SetAPIKey/ChannelModels 等）
+	stats      *statsEngine.Stats // 运行统计引擎（data/stats.json）；nil = 未启用
+	statsStop  chan struct{}
+	httpRoot   http.Handler // 对外暴露的根 handler，可能为外层兼容层 mux（见 SetRootHandler）
 
 	mu         sync.Mutex // 保护 httpSrv / cfg 修改
 	httpSrv    *http.Server
@@ -114,13 +129,21 @@ type App struct {
 	// 由 main.go 注入；nil 时仅写配置不热更（下次启动生效）。
 	compatSyncer func(defaultChannel string, maxTokensCap int, modelMap map[string]string, reasoningSummary string)
 
-	// proxySyncer 面板保存 proxies 后重新套各渠道 HTTP client（热更新代理）。
-	// 由 main.go 注入；nil 时仅写配置不热更。
-	proxySyncer func(proxies map[string]string)
-
 	// oczenSyncer 面板保存 oczen key 后写入渠道 client（热更新凭证）。
 	// 由 main.go 注入；nil 时仅写配置不热更。
 	oczenSyncer func(key string)
+
+	// fbSyncer 面板保存模型降级链后推给 server.Handler（热更新降级路由）。
+	// 由 main.go 注入；nil 时仅写配置不热更。
+	fbSyncer func(rules []config.ModelFallbackRule)
+
+	// efSyncer 面板保存思考强度映射后推给 server.Handler（热更新注入表）。
+	// 由 main.go 注入；nil 时仅写配置不热更。
+	efSyncer func(efforts map[string]string)
+
+	// customSyncer 面板保存自定义渠道后热更新（R66）。
+	// 由 main.go 注入；nil 时仅写配置不热更。
+	customSyncer func(channels []custom.ChannelConfig)
 
 	refreshMu  sync.Mutex // 防并发刷新积分
 	refreshing bool
@@ -161,6 +184,15 @@ func New(opts Options) (*App, error) {
 		go a.ledger.AutoFlush(a.ledgerStop)
 	}
 
+	// 运行统计引擎（data/stats.json）：初始化失败不致命——端点回 disabled、插桩/喂入全判 nil
+	if st, err := statsEngine.New(filepath.Dir(opts.Config.StateFile), log.Printf); err == nil {
+		a.stats = st
+		a.statsStop = make(chan struct{})
+		go st.RunFlusher(a.statsStop)
+	} else {
+		log.Printf("stats init failed（运行统计不可用）: %v", err)
+	}
+
 	// 日志文件 data/app.log
 	logFP := filepath.Join(filepath.Dir(opts.Config.StateFile), "app.log")
 	if err := os.MkdirAll(filepath.Dir(logFP), 0o755); err == nil {
@@ -175,6 +207,9 @@ func New(opts Options) (*App, error) {
 	a.healRaccoonProtocol()
 	return a, nil
 }
+
+// Stats 返回运行统计引擎（nil = 未启用）。
+func (a *App) Stats() *statsEngine.Stats { return a.stats }
 
 // stateDir 数据目录（loginStateFP / pricingFP 都在这里）。
 func (a *App) stateDir() string { return filepath.Dir(a.cfg.StateFile) }
@@ -222,10 +257,24 @@ func (a *App) Close() {
 func (a *App) Ledger() *ledger.Ledger { return a.ledger }
 
 func (a *App) runtime(kind provider.Kind) *Runtime {
+	a.runtimesMu.RLock()
+	defer a.runtimesMu.RUnlock()
 	if a.runtimes == nil {
 		return nil
 	}
 	return a.runtimes[kind]
+}
+
+// runtimesSnapshot 返回运行时表的浅拷贝（调用方据此遍历，期间不受热更新影响）。
+// 热更新只增删 map 键、不修改 Runtime 本体，故拷贝元素指针安全。
+func (a *App) runtimesSnapshot() []*Runtime {
+	a.runtimesMu.RLock()
+	defer a.runtimesMu.RUnlock()
+	out := make([]*Runtime, 0, len(a.runtimes))
+	for _, rt := range a.runtimes {
+		out = append(out, rt)
+	}
+	return out
 }
 
 func (a *App) firstRuntime() *Runtime {
@@ -248,8 +297,9 @@ func (a *App) firstRuntime() *Runtime {
 // 注意：模型/费率等「渠道维度」的遍历不走此函数——TraeCode 有独立 Upstream
 // （function=solo_agent）与独立模型集，需各自拉取。
 func (a *App) uniqueRuntimes() []*Runtime {
-	out := make([]*Runtime, 0, len(a.runtimes))
-	for _, rt := range a.runtimes {
+	snap := a.runtimesSnapshot()
+	out := make([]*Runtime, 0, len(snap))
+	for _, rt := range snap {
 		if rt == nil || rt.Pool == nil || rt.Alias {
 			continue
 		}
@@ -303,7 +353,10 @@ var channelOrder = map[provider.Kind]int{
 var feeChannelOrder = []provider.Kind{
 	provider.Oczen, provider.WorkBuddy, provider.WorkBuddyAI, provider.QoderCN,
 	provider.QoderCOM, provider.TraeWork, provider.TraeCode, provider.QwenWork, provider.GLM,
-	provider.Raccoon, provider.Loomy, provider.MonkeyCode,
+	provider.Cline, // 漏在此表 = 面板永远不出该渠道 tab（buildFeesChannels 只遍历本表）
+	provider.MonkeyCode,
+	provider.Raccoon,
+	provider.Loomy,
 }
 
 // channelRank 渠道排序键：未知渠道排最后。
@@ -319,27 +372,90 @@ func sortChannelsByOrder[T any](items []T, kindOf func(T) provider.Kind) {
 	sort.SliceStable(items, func(i, j int) bool { return channelRank(kindOf(items[i])) < channelRank(kindOf(items[j])) })
 }
 
-// noExplicitCheckinKinds 不支持显式签到（手动按钮）的渠道。
-// Qoder 无签到活动（DailyCheckin 直接报错）；
+// creditsNAKind 判定该渠道的「积分」概念是否不适用（面板显示「不适用」而不是 0）。
+//
+// 两种成因不同，但 UI 处理一致：
+//   - oczen：匆名通道，根本没有账号/余额概念；
+//   - cline：上游**确无余额端点**（/credits /usage /billing /quota /me 等 12 个候选实测全 404），
+//     属于「查不到」。把这种情况显示成 0 会被误读成「额度已用光」，故同样走 NA。
+//   - 自定义渠道（R66）：无积分与额度接口，同样走 NA。
+func (a *App) creditsNAKind(group string) bool {
+	if group == provider.Oczen.String() || group == provider.Cline.String() {
+		return true
+	}
+	return a.isCustomChannel(group)
+}
+
+// isCustomChannel 报告该分组名是否是自定义渠道。先查运行时表（热更新后的权威态），
+// 再回退查配置（供应器未装配/已停用的渠道）。
+// 两把锁分开取：runtimesMu 只管运行时表，a.mu 只管 cfg——不可与外层已持 a.mu 的调用嵌套。
+func (a *App) isCustomChannel(group string) bool {
+	a.runtimesMu.RLock()
+	rt := a.runtimes[provider.Kind(group)]
+	a.runtimesMu.RUnlock()
+	if rt != nil && rt.Custom {
+		return true
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	for _, cc := range a.cfg.CustomChannels {
+		if strings.EqualFold(cc.Name, group) {
+			return true
+		}
+	}
+	return false
+}
+
+// UpdateCustomRuntimes 热更新 app 持有的自定义渠道运行时（R66）。
+// 只碰 runtimes 表（不读 cfg），故用 runtimesMu 而非 a.mu。
+func (a *App) UpdateCustomRuntimes(customRts map[provider.Kind]*Runtime) {
+	a.runtimesMu.Lock()
+	defer a.runtimesMu.Unlock()
+	for k, rt := range a.runtimes {
+		if rt != nil && rt.Custom {
+			delete(a.runtimes, k)
+		}
+	}
+	for k, rt := range customRts {
+		rt.Custom = true
+		a.runtimes[k] = rt
+	}
+}
+
+// SetCustomChannelsSyncer 注入自定义渠道热更新回调。
+func (a *App) SetCustomChannelsSyncer(fn func(channels []custom.ChannelConfig)) {
+	a.customSyncer = fn
+}
+
+// noExplicitCheckin 不支持显式签到（手动按钮）的渠道。
 // WorkBuddy 国际版改为定时自动对话保活并领取日活奖励（详见 workbuddyai.DailyCheckin），
 // 无需用户手动触发，故也不提供手动签到入口；
 // 千问办公无签到活动且每日积分服务端被动发放，无需领取/保活。
 // QoderCN / QoderCOM 已实现签到（campaigns 主路径），支持手动按钮。
 // 智谱清言已实现 activity-api 每日签到，支持手动按钮。
-// 小浣熊 / Loomy / MonkeyCode 一期也不提供手动签到：上游未提供额度或签到端点
-// （Loomy 有 /pet-work 每日任务但语义待评估，见计划 D1）。
+// 小浣熊已实现 setting_info 触发每日积分落账（见 internal/raccoon/checkin.go，R65），支持手动按钮。
+// MonkeyCode 一期也不提供手动签到：上游未提供额度或签到端点。
+// Loomy 一期也不提供手动签到：上游未提供额度或签到端点。
+// Cline 走官方 API Key：无签到活动、Key 不过期 ⇒ 既不需手动签到也不需保活。
 // OpenCodeZen 匿名通道无账号概念，既无签到也无积分。
+// noExplicitCheckin 不支持显式签到（手动按钮）的渠道。
+// 自定义渠道无签到活动（R66）；内建名单固定，故抽成无状态的包级函数（可脱离 App 断言），
+// 方法体仅补上「是否自定义渠道」这一动态判定。
 func noExplicitCheckin(k provider.Kind) bool {
-	return k == provider.Qoder || k == provider.WorkBuddyAI || k == provider.QwenWork ||
-		k == provider.Raccoon || k == provider.Loomy || k == provider.MonkeyCode || k == provider.Oczen
+	return k == provider.WorkBuddyAI || k == provider.QwenWork || k == provider.MonkeyCode || k == provider.Loomy || k == provider.Oczen || k == provider.Cline
+}
+
+func (a *App) noExplicitCheckinKind(k provider.Kind) bool {
+	return noExplicitCheckin(k) || a.isCustomChannel(k.String())
 }
 
 func (a *App) findRuntimeAuth(uid string) (*Runtime, *auth.Auth) {
-	// 走 uniqueRuntimes 而非直接遍历 runtimes：共享池账号（TraeWork/TraeCode）
-	// 必须稳定归属主渠道。否则 map 遍历顺序随机，同一个 trae 账号可能落到
-	// TraeCode 上——它没有 Scheduler（手动签到直接失败），Upstream 的 function
-	// 也不同（额度查询口径不一致），且 accountGroup 会误报 traecode。
-	for _, rt := range a.uniqueRuntimes() {
+	for _, rt := range a.runtimesSnapshot() {
+		// 跳过别名渠道：map 遍历无序，若命中 TraeCode 会拿到错误 upstream（function=solo_agent），
+		// 且 accountGroup 会误报 traecode；账号级操作一律归主渠道（TraeWork）。
+		if rt == nil || rt.Pool == nil || rt.Alias {
+			continue
+		}
 		if au := rt.Pool.AuthByUID(uid); au != nil {
 			return rt, au
 		}
@@ -711,7 +827,8 @@ func (a *App) pollLogin(ctx context.Context) {
 // completeRaccoonLogin 小浣熊网页版登录成功：把捕获并换取的 token 落成本工具凭据。
 // 凭据形态与「从本机客户端导入」完全一致（两者拿到的是同一个上游账号）：
 // uid 取 access_token 的 JWT name claim，domain/apiHost 对齐 internal/raccoon 的调用前缀。
-// 小浣熊无签到活动，故不做首次签到；access_token 约 1h，靠 refresh_token 续期。
+// access_token 约 1h，靠 refresh_token 续期；签到走 setting_info 触发每日积分落账
+// （见 internal/raccoon/checkin.go），故登录后立即签到一次，让当日积分马上落账。
 func (a *App) completeRaccoonLogin(r loginraccoon.Result) {
 	uid := strings.TrimSpace(jwtClaim(r.AccessToken, "name"))
 	if uid == "" {
@@ -749,6 +866,27 @@ func (a *App) completeRaccoonLogin(r loginraccoon.Result) {
 	a.reloadAccounts()
 	a.finishLogin()
 	a.afterAccountAdded(provider.Raccoon)
+	// 首次签到（对齐 workbuddy/traework）：setting_info 触发当日每日积分落账，
+	// 不签到的话新账号要等下一个签到时刻才会把当天该给的 300 分记上。
+	a.safeGo(func() { a.firstCheckinRaccoon(uid) })
+}
+
+// firstCheckinRaccoon 新账号首次签到 + 积分兜底（幂等：已领过时上游返回空 popups）。
+func (a *App) firstCheckinRaccoon(uid string) {
+	rt := a.runtime(provider.Raccoon)
+	if rt == nil || rt.Scheduler == nil {
+		return
+	}
+	if res, err := rt.Scheduler.CheckinAccount(uid); err != nil {
+		log.Printf("raccoon 新账号签到失败 %s: %v", uid, err)
+	} else {
+		log.Printf("raccoon 新账号签到完成 %s：%s", uid, res.Msg)
+	}
+	// 积分兜底：签到路径失败（余额查询失败/签到异常）时 pool 内 credits 仍为 0，
+	// 独立刷一次保证新账号首屏正确（幂等：多刷无害）。
+	if _, err := a.RefreshCredits(uid); err != nil {
+		log.Printf("raccoon 新账号积分兜底失败 %s: %v", uid, err)
+	}
 }
 
 // completeLogin 登录成功：写 auth 文件、重载账号池，异步签到。
@@ -985,6 +1123,71 @@ func (a *App) SubmitGLMToken(refreshToken string) (string, error) {
 	return r.UID, nil
 }
 
+// SubmitClineKey 提交用户粘贴的 Cline 官方 API Key（sk_…）：验证 → 落盘 → 重载账号池。
+//
+// 验证只调 GET /api/v1/api-keys —— **零 token 消耗**，避免「添加账号即烧额度」。
+// uid 取该端点中 key_prefix 与本 Key 相符那条的 apk- id（实测 key_prefix = Key 前 10 字符）。
+//
+// 第二个返回值是**告警**（非错误，账号照样保存）：官方配额字段名是 `…UsageCostUSDPerUser`，
+// 即上限按 Cline **账号**计 ⇒ 同一账号的多把 Key 共享一份额度。
+// 由于 api-keys 返回的是本账号**全部** Key，可据此发现「两把 Key 同属一个账号」并提醒
+// 用户去注册独立账号，而不是误以为多 Key 等于多额度。
+func (a *App) SubmitClineKey(apiKey string) (string, string, error) {
+	key := strings.TrimSpace(apiKey)
+	res, err := cline.ValidateKey(key)
+	if err != nil {
+		return "", "", err
+	}
+
+	// 同账号检测：新 Key 所在账号的 Key 列表 ∩ 已入库账号的 Key 前缀
+	warn := ""
+	if existing, lerr := auth.LoadClineDir(a.cfg.AuthDir); lerr == nil {
+		family := append([]string{res.KeyPrefix}, res.SiblingKeys...)
+		for _, e := range existing {
+			p := e.AccessTokenValue()
+			if len(p) > cline.KeyPrefixLen {
+				p = p[:cline.KeyPrefixLen]
+			}
+			if p == "" {
+				continue
+			}
+			for _, kp := range family {
+				if kp == p {
+					warn = fmt.Sprintf("这把 Key 与已添加的账号 %s 同属一个 Cline 账号，共享同一份额度"+
+						"（官方按账号计），不会增加可用额度。请注册独立 Cline 账号并各自建 Key。", e.UID)
+					break
+				}
+			}
+			if warn != "" {
+				break
+			}
+		}
+	}
+
+	name := res.AccountName
+	if name == "" {
+		name = "API Key " + res.KeyPrefix
+	}
+	_ = os.MkdirAll(a.cfg.AuthDir, 0o755)
+	ca := &auth.Auth{
+		Kind:        "cline",
+		UID:         res.UID,
+		Nickname:    name,
+		AccessToken: key,
+		// Key 无过期概念：ExpiresAt 必须远期，0 会让 NeedsRefresh 恒真（不变量 21 同款陷阱）
+		ExpiresAt: cline.FarFutureExpiry(),
+		FilePath:  filepath.Join(a.cfg.AuthDir, "cline-"+res.UID+".json"),
+	}
+	if err := ca.SaveAtomic(); err != nil {
+		return "", "", fmt.Errorf("保存 Cline 凭据失败：%w", err)
+	}
+	// 日志零 token（不变量 2）：只打 uid 与展示名，绝不打完整 Key
+	log.Printf("cline 账号已添加（粘贴 Key）uid=%s name=%s 同账号告警=%v", res.UID, name, warn != "")
+	a.reloadAccounts()
+	a.afterAccountAdded(provider.Cline)
+	return res.UID, warn, nil
+}
+
 // StartGLMAutoLogin 发起智谱清言自动登录：拉起独立 profile 的浏览器，
 // 用户在真实浏览器里登录，后台经 CDP 自动捕获 Cookie。
 //
@@ -1206,6 +1409,15 @@ func (a *App) reloadAccounts() {
 			rt.Pool.SyncToDir(auths)
 		}
 	}
+	// Cline：一把官方 API Key = 一个账号，凭据由面板「粘贴 API Key」写入。
+	if rt := a.runtime(provider.Cline); rt != nil && rt.Pool != nil {
+		auths, err := auth.LoadClineDir(a.cfg.AuthDir)
+		if err != nil {
+			log.Printf("reload cline accounts: %v", err)
+		} else {
+			rt.Pool.SyncToDir(auths)
+		}
+	}
 }
 
 // CheckinAccount 单个账号立即签到。
@@ -1214,7 +1426,7 @@ func (a *App) CheckinAccount(uid string) (scheduler.CheckinResult, error) {
 	if rt == nil || rt.Scheduler == nil {
 		return scheduler.CheckinResult{}, fmt.Errorf("unknown account %s", uid)
 	}
-	if noExplicitCheckin(rt.Kind) {
+	if a.noExplicitCheckinKind(rt.Kind) {
 		if rt.Kind == provider.WorkBuddyAI {
 			return scheduler.CheckinResult{}, fmt.Errorf("workbuddyai 渠道无需手动签到，已定时自动领取日活奖励")
 		}
@@ -1232,12 +1444,12 @@ func (a *App) CheckinAccount(uid string) (scheduler.CheckinResult, error) {
 // CheckinAll 全部账号立即签到。
 func (a *App) CheckinAll() []scheduler.CheckinResult {
 	results := make([]scheduler.CheckinResult, 0)
-	for _, rt := range a.runtimes {
+	for _, rt := range a.runtimesSnapshot() {
 		// 别名渠道复用同一 Pool 且无独立 Scheduler：计入会重复签到同一批账号。
 		if rt == nil || rt.Pool == nil || rt.Scheduler == nil || rt.Alias {
 			continue
 		}
-		if noExplicitCheckin(rt.Kind) { // 无签到活动渠道，跳过
+		if a.noExplicitCheckinKind(rt.Kind) { // 无签到活动渠道，跳过
 			continue
 		}
 		for _, st := range rt.Pool.List() {
@@ -1332,9 +1544,15 @@ func (a *App) creditSnapshot(rt *Runtime, au *auth.Auth) (remain int64, items []
 	return remain, items, expiring, unusable, nil
 }
 
+// creditTotals 取三口径小计（不含 items），并在同一响应上喂入运行统计的最近临期。
 func (a *App) creditTotals(rt *Runtime, au *auth.Auth) (usable, expiring, unusable int64, err error) {
-	usable, _, expiring, unusable, err = a.creditSnapshot(rt, au)
-	return usable, expiring, unusable, err
+	remain, items, expiring, unusable, err := a.creditSnapshot(rt, au)
+	if err != nil {
+		return 0, 0, 0, err
+	}
+	// 运行统计：账号最近临期喂入（复用同一响应的 items，免二次上游调用）
+	a.applyExpiryFromItems(au.UID, items)
+	return remain, expiring, unusable, nil
 }
 
 // StartCreditAutoRefresh 后台定期刷新指定渠道的账号积分。
@@ -1488,10 +1706,9 @@ func (a *App) RefreshAll() RefreshSummary {
 		a.refreshMu.Unlock()
 	}()
 	sum := RefreshSummary{Platforms: map[string]PlatformSummary{}}
-	// 账号维度：共享池（TraeWork/TraeCode）只刷一次——否则同一账号被刷两遍、
-	// 汇总里出现两个同名平台、Total 虚高。
-	for _, rt := range a.uniqueRuntimes() {
-		if rt.Upstream == nil {
+	for _, rt := range a.runtimesSnapshot() {
+		// 别名渠道复用同一 Pool：计入会重复刷新同一批账号。
+		if rt == nil || rt.Pool == nil || rt.Upstream == nil || rt.Alias {
 			continue
 		}
 		// oczen 无积分可刷：纳入只会产生一条无意义的「无积分」失败记录。
@@ -1560,6 +1777,15 @@ func (a *App) RemoveAccount(uid string) error {
 	if rt.Kind == provider.Oczen {
 		return fmt.Errorf("OpenCodeZen 匿名通道账号不可删除")
 	}
+	if rt.Custom {
+		var next []custom.ChannelConfig
+		for _, cc := range a.cfg.CustomChannels {
+			if !strings.EqualFold(cc.Name, rt.Kind.String()) {
+				next = append(next, cc)
+			}
+		}
+		return a.SetCustomChannels(next)
+	}
 	if au.FilePath != "" {
 		_ = os.Remove(au.FilePath)
 	}
@@ -1578,6 +1804,17 @@ func (a *App) DisableAccount(uid string, disabled bool) error {
 	}
 	if rt.Kind == provider.Oczen {
 		return fmt.Errorf("OpenCodeZen 匿名通道账号不可停用/启用")
+	}
+	if rt.Custom {
+		var next []custom.ChannelConfig
+		for _, cc := range a.cfg.CustomChannels {
+			if strings.EqualFold(cc.Name, rt.Kind.String()) {
+				en := !disabled
+				cc.Enabled = &en
+			}
+			next = append(next, cc)
+		}
+		return a.SetCustomChannels(next)
 	}
 	rt.Pool.SetDisabled(uid, disabled)
 	if disabled {
@@ -1629,7 +1866,7 @@ func (a *App) SetCheckinTimes(times []string) error {
 	if err != nil {
 		return err
 	}
-	for _, rt := range a.runtimes {
+	for _, rt := range a.runtimesSnapshot() {
 		if rt != nil && rt.Scheduler != nil {
 			rt.Scheduler.SetCheckinMinutes(clean)
 		}
@@ -1655,6 +1892,22 @@ func (a *App) SetExpiringDays(days int) error {
 		return err
 	}
 	log.Printf("临期阈值已更新：%d 天", days)
+	return nil
+}
+
+// SetLoopGuard 更新思考链死循环检测（发癫拦截）开关：保存配置并即时生效。
+// 生效机制：loopguard 的全局 atomic 开关，各渠道 Stream 在每次请求时读取，
+// 热切换无需重启（下一个流式请求即按新值）。
+func (a *App) SetLoopGuard(on bool) error {
+	a.mu.Lock()
+	a.cfg.Features.LoopGuard = on
+	err := config.Save(a.cfg, a.cfgPath)
+	a.mu.Unlock()
+	if err != nil {
+		return err
+	}
+	loopguard.SetEnabled(on)
+	log.Printf("思考链死循环检测已%s", map[bool]string{true: "开启", false: "关闭"}[on])
 	return nil
 }
 
@@ -1839,13 +2092,191 @@ func (a *App) ApplyContextWindows() {
 	qoder.SetContextWindows(byKind[provider.Qoder])
 }
 
+// feeChannelOrderWithDynamic 返回费率表渠道顺序：静态 feeChannelOrder + 未登记的动态渠道
+// （自定义渠道，R66）追加到末尾（按名排序）。仅当 modelsByKind 里确有该渠道的模型时
+// 才追加，避免空渠道占位。
+func feeChannelOrderWithDynamic(modelsByKind map[provider.Kind][]provider.ModelInfo) []provider.Kind {
+	seen := make(map[provider.Kind]bool, len(feeChannelOrder))
+	for _, k := range feeChannelOrder {
+		seen[k] = true
+	}
+	var extra []provider.Kind
+	for k, infos := range modelsByKind {
+		if !seen[k] && len(infos) > 0 {
+			extra = append(extra, k)
+		}
+	}
+	if len(extra) == 0 {
+		return feeChannelOrder
+	}
+	sort.Slice(extra, func(i, j int) bool { return extra[i] < extra[j] })
+	return append(append([]provider.Kind{}, feeChannelOrder...), extra...)
+}
+
+// SetCustomChannels 保存并热更新自定义渠道配置（R66）。
+//
+// api_key 脱敏回写处理（同 oczen key）：面板回显的是脱敏值（含 …）。
+// 用户没改动过某个渠道的 key 时，提交回来的仍是脱敏串——若原样落盘，
+// 就会把真实密钥换成「sk-abc…wxyz」这种废值。故此处对每个渠道：
+// 提交值含 「…」 则视为未修改，从现有配置按渠道名找回真实密钥。
+func (a *App) SetCustomChannels(channels []custom.ChannelConfig) error {
+	seen := map[string]bool{}
+	for i := range channels {
+		if strings.Contains(channels[i].APIKey, "…") { // 脱敏形态 = 未改动，保留现值
+			channels[i].APIKey = ""
+		}
+		if err := channels[i].Validate(); err != nil {
+			return err
+		}
+		if seen[channels[i].Name] {
+			return fmt.Errorf("重复的渠道标识 %q", channels[i].Name)
+		}
+		seen[channels[i].Name] = true
+	}
+	a.mu.Lock()
+	// 找回被提交为脱敏形态的密钥（按渠道名匹配现值）
+	prev := map[string]string{}
+	for _, cc := range a.cfg.CustomChannels {
+		prev[strings.ToLower(cc.Name)] = cc.APIKey
+	}
+	for i := range channels {
+		if channels[i].APIKey == "" {
+			if k := prev[channels[i].Name]; k != "" {
+				channels[i].APIKey = k
+			}
+		}
+	}
+	a.cfg.CustomChannels = channels
+	err := config.Save(a.cfg, a.cfgPath)
+	syncer := a.customSyncer
+	a.mu.Unlock()
+	if err != nil {
+		return fmt.Errorf("保存配置失败：%w", err)
+	}
+	if syncer != nil {
+		syncer(channels)
+	}
+	log.Printf("自定义渠道配置已更新：共 %d 个渠道", len(channels))
+	return nil
+}
+
+// resolveCustomKey 按渠道名取真实 api_key（供脱敏回显时的测试与保存路径使用）。
+// 名称为空（面板新增渠道时只填了 URL/Key）则返回空串，交由调用方自行处理。
+func (a *App) resolveCustomKey(name string) string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	for _, cc := range a.cfg.CustomChannels {
+		if strings.EqualFold(cc.Name, name) {
+			return cc.APIKey
+		}
+	}
+	return ""
+}
+
+// maskCustomChannels 返回配置的深拷贝，并将 api_key 脱敏（非空时仅露首 3 + 尾 4）。
+// 脱敏串保留 「…」 标记，供 SetCustomChannels 识别「未改动」。
+func maskCustomChannels(in []custom.ChannelConfig) []custom.ChannelConfig {
+	out := make([]custom.ChannelConfig, 0, len(in))
+	for _, cc := range in {
+		if cc.APIKey != "" {
+			cc.APIKey = maskKey(cc.APIKey)
+		}
+		if cc.Models != nil {
+			cc.Models = append([]custom.ModelConfig(nil), cc.Models...)
+		}
+		out = append(out, cc)
+	}
+	return out
+}
+
 // SetCompatSyncer 注入 compat 热更新回调（由 main.go 注入，指向 gateway.SetCompat）。
 func (a *App) SetCompatSyncer(fn func(defaultChannel string, maxTokensCap int, modelMap map[string]string, reasoningSummary string)) {
 	a.compatSyncer = fn
 }
 
-// SetProxySyncer 注入代理热更新回调（由 main.go 注入：重新套各渠道 HTTP client）。
-func (a *App) SetProxySyncer(fn func(proxies map[string]string)) { a.proxySyncer = fn }
+// SetModelFallbackSyncer 注入模型降级链热更新回调（由 main.go 注入：推给 server.Handler）。
+func (a *App) SetModelFallbackSyncer(fn func(rules []config.ModelFallbackRule)) { a.fbSyncer = fn }
+
+// SetModelFallback 保存模型降级链（设置面板可视化编辑）。
+// 校验：From/To 均须 "channel/model" 全路径；From 全局唯一；每链 To 至少一项、
+// 不含 From 自身（不自环）；空规则列表 = 清空禁用。保存即热生效（fbSyncer）。
+func (a *App) SetModelFallback(rules []config.ModelFallbackRule) error {
+	seen := map[string]bool{}
+	for i := range rules {
+		r := &rules[i]
+		r.From = strings.TrimSpace(r.From)
+		if strings.Index(r.From, "/") <= 0 {
+			return fmt.Errorf("规则 %d 的主模型 %q 需为 channel/model 形式", i+1, r.From)
+		}
+		if seen[r.From] {
+			return fmt.Errorf("主模型 %q 重复（每个主模型只允许一条规则）", r.From)
+		}
+		seen[r.From] = true
+		tos := make([]string, 0, len(r.To))
+		for _, to := range r.To {
+			to = strings.TrimSpace(to)
+			if to == "" {
+				continue
+			}
+			if strings.Index(to, "/") <= 0 {
+				return fmt.Errorf("主模型 %q 的备胎 %q 需为 channel/model 形式", r.From, to)
+			}
+			if to == r.From {
+				return fmt.Errorf("主模型 %q 的备胎不能是它自己", r.From)
+			}
+			tos = append(tos, to)
+		}
+		if len(tos) == 0 {
+			return fmt.Errorf("主模型 %q 的降级链为空（至少填一个备胎模型）", r.From)
+		}
+		r.To = tos
+	}
+	a.mu.Lock()
+	a.cfg.ModelFallback = rules
+	err := config.Save(a.cfg, a.cfgPath)
+	a.mu.Unlock()
+	if err != nil {
+		return err
+	}
+	if a.fbSyncer != nil {
+		a.fbSyncer(rules)
+	}
+	log.Printf("模型降级链已更新（%d 条规则，保存即热生效）", len(rules))
+	return nil
+}
+
+// SetReasoningEffortsSyncer 注入思考强度映射热更新回调（由 main.go 注入：推给 server.Handler）。
+func (a *App) SetReasoningEffortsSyncer(fn func(efforts map[string]string)) { a.efSyncer = fn }
+
+// SetReasoningEfforts 保存思考强度注入映射（设置面板可视化编辑）。
+// 校验：键（模型 ID，含 `*` 全局默认）与值（档位）trim 后均非空；删除 = 键缺席；
+// 空 map = 清空禁用。哑管道：不校验档位取值合法性，上游吃什么档位由渠道模型自己说了算。
+// 保存即热生效（efSyncer）。
+func (a *App) SetReasoningEfforts(efforts map[string]string) error {
+	clean := make(map[string]string, len(efforts))
+	for k, v := range efforts {
+		k, v = strings.TrimSpace(k), strings.TrimSpace(v)
+		if k == "" {
+			return fmt.Errorf("模型 ID 不能为空（`*` 为合法的全局默认键）")
+		}
+		if v == "" {
+			return fmt.Errorf("模型 %q 的思考档位不能为空", k)
+		}
+		clean[k] = v
+	}
+	a.mu.Lock()
+	a.cfg.ReasoningEfforts = clean
+	err := config.Save(a.cfg, a.cfgPath)
+	a.mu.Unlock()
+	if err != nil {
+		return err
+	}
+	if a.efSyncer != nil {
+		a.efSyncer(clean)
+	}
+	log.Printf("思考强度映射已更新（%d 条，保存即热生效）", len(clean))
+	return nil
+}
 
 // SetOczenSyncer 注入 oczen key 热更新回调（由 main.go 注入：写入渠道 client）。
 func (a *App) SetOczenSyncer(fn func(key string)) { a.oczenSyncer = fn }
@@ -1853,24 +2284,28 @@ func (a *App) SetOczenSyncer(fn func(key string)) { a.oczenSyncer = fn }
 // TestOczenKey 验证 OpenCodeZen 凭证可用性（设置面板「测试」按钮）。
 // apiKey 非空时先用该 key 临时写入渠道 client（测试后恢复原值），空则直接测当前生效凭证。
 // 判定：200/429 均 return ok（200=配额正常，429=连通但限流，对匿名 key 属正常现象）。
-func (a *App) TestOczenKey(apiKey string) (int, string, error) {
+//
+// 测试后经同一个 backuplink.Replay 编排（与真实对话同源，见 issue #117）：直连被上游按地区
+// 拒绝时机内自动改走备用通道；viaBackup 报告答复是否来自备用出口，面板据此如实展示——
+// 原先只看 403 是看不出「代理到底有没有被用上」的。
+func (a *App) TestOczenKey(apiKey string) (int, string, bool, error) {
 	rt := a.runtime(provider.Oczen)
 	if rt == nil {
-		return 0, "", fmt.Errorf("oczen 渠道未启用")
+		return 0, "", false, fmt.Errorf("oczen 渠道未启用")
 	}
 	c, ok := rt.Upstream.(*oczen.Client)
 	if !ok {
-		return 0, "", fmt.Errorf("oczen 渠道类型异常")
+		return 0, "", false, fmt.Errorf("oczen 渠道类型异常")
 	}
 	// 临时写入候选 key（含空串 = 测匿名）；结束后恢复配置值，保证面板「取消」不残留半生效状态
 	orig := a.cfg.OczenAPIKey
 	c.SetAPIKey(apiKey)
 	defer c.SetAPIKey(orig)
-	status, body, err := c.TestKey()
+	status, body, via, err := c.TestKey()
 	if err != nil {
-		return 0, body, fmt.Errorf("无法连接 OpenCodeZen（检查网络/代理）：%v", err)
+		return 0, body, via, fmt.Errorf("无法连接 OpenCodeZen（检查网络/代理）：%v", err)
 	}
-	return status, body, nil
+	return status, body, via, nil
 }
 
 // maskKey 脱敏 API key：保留前 5 后 4，中间以 … 代替；空串原样返回。
@@ -1885,32 +2320,20 @@ func maskKey(key string) string {
 	return string(r[:5]) + "…" + string(r[len(r)-4:])
 }
 
-// SetProxies 保存单渠道上游代理配置（空串 = 直连）并热更新。
-// key 为渠道 kind，value 为 http(s)://host:port 或 socks5://host:port。
+// SetBackupProxy 保存全局**备用上游通道**（单一代理地址，空串 = 关闭）并即时生效。
 // 同时接收 oczenKey：设置 OpenCodeZen 自定义 API key（空 = 回匿名凭证）。
-func (a *App) SetProxies(proxies map[string]string, oczenKey string) error {
-	clean := make(map[string]string, len(proxies))
-	for k, v := range proxies {
-		k, v = strings.TrimSpace(k), strings.TrimSpace(v)
-		if k == "" {
-			return fmt.Errorf("渠道名不能为空")
-		}
-		if v == "" {
-			continue // 空串 = 删除该渠道代理（直连）
-		}
-		u, err := url.Parse(v)
-		if err != nil || u.Scheme == "" || u.Host == "" {
-			return fmt.Errorf("渠道 %s 代理地址无效 %q（应为 http://host:port 或 socks5://host:port）", k, v)
-		}
-		switch u.Scheme {
-		case "http", "https", "socks5":
-			clean[k] = v
-		default:
-			return fmt.Errorf("渠道 %s 代理协议 %q 不支持（仅 http/https/socks5）", k, u.Scheme)
-		}
+//
+// 生效方式与旧的「每渠道代理」根本不同：此处**不重建任何渠道 Transport**，
+// 只换 backuplink 内部的快照指针（决议 R57）——备用通道不参与常规请求，
+// 渠道在命中地区拒绝时自己按需取用，因此没有「热更新接线表」可漏（旧实现
+// 启动表 13 个渠道、热更新表只 10 个，traecode 两个表都没进）。
+func (a *App) SetBackupProxy(raw, oczenKey string) error {
+	raw = strings.TrimSpace(raw)
+	if _, err := backuplink.Parse(raw); err != nil { // 空串合法（= 关闭）
+		return err
 	}
 	a.mu.Lock()
-	a.cfg.Proxies = clean
+	a.cfg.BackupProxy = raw
 	if oczenKey != "\u0000unset\u0000" { // 哨兵：请求未携带该字段时不改动现有 key
 		a.cfg.OczenAPIKey = strings.TrimSpace(oczenKey)
 	}
@@ -1919,21 +2342,16 @@ func (a *App) SetProxies(proxies map[string]string, oczenKey string) error {
 	if err != nil {
 		return err
 	}
-	if a.proxySyncer != nil {
-		a.proxySyncer(clean)
+	if err := backuplink.Set(raw); err != nil { // 已校验过，这里不应再失败
+		return err
 	}
 	if a.oczenSyncer != nil {
 		a.oczenSyncer(a.cfg.OczenAPIKey)
 	}
-	if len(clean) == 0 {
-		log.Printf("上游代理已清空（全部直连）")
+	if raw == "" {
+		log.Printf("备用上游通道已关闭（所有请求直连；上游回地区拒绝将原样透传）")
 	} else {
-		ks := make([]string, 0, len(clean))
-		for k := range clean {
-			ks = append(ks, k)
-		}
-		sort.Strings(ks)
-		log.Printf("上游代理已更新：%s", strings.Join(ks, ", "))
+		log.Printf("备用上游通道已配置：%s（仅渠道命中地区拒绝时自动取用，不影响常规请求）", raw)
 	}
 	return nil
 }
@@ -2064,11 +2482,28 @@ type State struct {
 		Channels       []string         `json:"channels"` // 可用渠道列表（供 UI 下拉）
 	} `json:"compat"`
 
-	// Proxies 单渠道上游代理（只读，保存走 POST /api/config/proxies）。
-	Proxies map[string]string `json:"proxies"`
+	// BackupProxy 全局备用上游通道（只读，保存走 POST /api/config/proxy）。
+	// 注意：它**不参与常规请求**，仅当渠道自行判定上游按地区拒绝时在同请求内重放一次（R57）。
+	BackupProxy string `json:"backup_proxy"`
+
+	// BackupProxyActive 备用通道是否已生效（与 BackupProxy 非空等价，分开回显
+	// 是为了让面板能区分「地址合法但进程内未生效」这种理论上不应存在的状态）。
+	BackupProxyActive bool `json:"backup_proxy_active"`
 
 	// OczenAPIKey OpenCodeZen 自定义 API key（只读脱敏回显：sk-xxx…尾4位；保存走同端点）。
 	OczenAPIKey string `json:"oczen_api_key"`
+
+	// LoopGuard 思考链死循环检测（发癫拦截）是否开启（只读，保存走 POST /api/config/loop_guard）。
+	LoopGuard bool `json:"loop_guard"`
+
+	// ModelFallback 模型降级链（保存走 POST /api/config/model_fallback）。
+	ModelFallback []config.ModelFallbackRule `json:"model_fallback"`
+
+	// ReasoningEfforts 思考强度注入映射（键=模型 ID 或 `*` 全局默认；保存走 POST /api/config/reasoning_efforts）。
+	ReasoningEfforts map[string]string `json:"reasoning_efforts"`
+
+	// CustomChannels 自定义第三方渠道列表（保存走 POST /api/config/custom_channels，R66）。
+	CustomChannels []custom.ChannelConfig `json:"custom_channels"`
 }
 
 // GetState 返回面板初始数据。
@@ -2099,6 +2534,12 @@ func (a *App) GetState() State {
 		Running:        a.ServerRunning(),
 		LanIP:          lanIP(),
 		ExpiringDays:   int(a.cfg.ExpiringThresholdDur / (24 * time.Hour)),
+		LoopGuard:      a.cfg.Features.LoopGuard,
+	}
+	st.ModelFallback = a.cfg.ModelFallback
+	st.ReasoningEfforts = a.cfg.ReasoningEfforts
+	if st.ReasoningEfforts == nil {
+		st.ReasoningEfforts = map[string]string{}
 	}
 	st.Compat.DefaultChannel = a.cfg.Compat.DefaultChannel
 	st.Compat.MaxTokensCap = a.cfg.Compat.MaxTokensCap
@@ -2114,16 +2555,19 @@ func (a *App) GetState() State {
 	if st.Compat.ModelMap == nil {
 		st.Compat.ModelMap = map[string]string{}
 	}
-	for k := range a.runtimes {
-		st.Compat.Channels = append(st.Compat.Channels, k.String())
+	for _, rt := range a.runtimesSnapshot() {
+		if rt != nil {
+			st.Compat.Channels = append(st.Compat.Channels, rt.Kind.String())
+		}
 	}
 	sort.Strings(st.Compat.Channels)
-	st.Proxies = map[string]string{}
-	for k, v := range a.cfg.Proxies {
-		st.Proxies[k] = v
-	}
+	st.BackupProxy = a.cfg.BackupProxy
+	st.BackupProxyActive = backuplink.Enabled()
 	// oczen key 脱敏回显：仅露首 5 + 尾 4（空则原样空串）
 	st.OczenAPIKey = maskKey(a.cfg.OczenAPIKey)
+	// 自定义渠道路由的 api_key 同样脱敏回显（不把上游密钥明文送进面板载荷）。
+	// 返回深拷贝而非配置引用，避免调用方意外改写配置。
+	st.CustomChannels = maskCustomChannels(a.cfg.CustomChannels)
 	st.Accounts = a.accountViews()
 	return st
 }
@@ -2141,8 +2585,8 @@ func (a *App) accountViews() []AccountView {
 			ExpiringCredits: s.ExpiringCredits,
 			UnusableCredits: s.UnusableCredits,
 			CreditsStale:    s.CreditsStale,
-			// 匿名渠道无积分：前端据此显示「不适用」
-			CreditsNA:      group == provider.Oczen.String(),
+			// 匿名与自定义渠道无积分：前端据此显示「不适用」
+			CreditsNA:      a.creditsNAKind(group),
 			Cooling:        s.Cooling,
 			Until:          fmtTime(s.Until),
 			Reason:         s.Reason,
@@ -2357,6 +2801,22 @@ func (a *App) HandleAPI(mux *http.ServeMux) {
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "uid": uid})
 	})
+	mux.HandleFunc("POST /api/login/cline_key", func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			APIKey string `json:"api_key"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			apiError(w, http.StatusBadRequest, "请求体解析失败")
+			return
+		}
+		uid, warn, err := a.SubmitClineKey(req.APIKey)
+		if err != nil {
+			apiError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "uid": uid, "warning": warn})
+	})
+
 	mux.HandleFunc("POST /api/account/checkin", func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
 			UID string `json:"uid"`
@@ -2455,6 +2915,17 @@ func (a *App) HandleAPI(mux *http.ServeMux) {
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 	})
+	mux.HandleFunc("POST /api/config/loop_guard", func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			On bool `json:"on"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		if err := a.SetLoopGuard(req.On); err != nil {
+			apiError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+	})
 	mux.HandleFunc("POST /api/config/listen", func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
 			Host      string  `json:"host"`
@@ -2521,6 +2992,28 @@ func (a *App) HandleAPI(mux *http.ServeMux) {
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 	})
+	mux.HandleFunc("POST /api/config/model_fallback", func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Rules []config.ModelFallbackRule `json:"rules"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		if err := a.SetModelFallback(req.Rules); err != nil {
+			apiError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+	})
+	mux.HandleFunc("POST /api/config/reasoning_efforts", func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Efforts map[string]string `json:"efforts"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		if err := a.SetReasoningEfforts(req.Efforts); err != nil {
+			apiError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+	})
 	mux.HandleFunc("POST /api/config/compat", func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
 			DefaultChannel            string            `json:"default_channel"`
@@ -2547,17 +3040,17 @@ func (a *App) HandleAPI(mux *http.ServeMux) {
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 	})
-	mux.HandleFunc("POST /api/config/proxies", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("POST /api/config/proxy", func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
-			Proxies     map[string]string `json:"proxies"`
-			OczenAPIKey *string           `json:"oczen_api_key"` // 指针：区分「未携带」与「显式清空」
+			Proxy       string  `json:"proxy"`         // 备用上游通道地址（空串 = 关闭）
+			OczenAPIKey *string `json:"oczen_api_key"` // 指针：区分「未携带」与「显式清空」
 		}
 		_ = json.NewDecoder(r.Body).Decode(&req)
 		key := "\u0000unset\u0000"
 		if req.OczenAPIKey != nil {
 			key = *req.OczenAPIKey
 		}
-		if err := a.SetProxies(req.Proxies, key); err != nil {
+		if err := a.SetBackupProxy(req.Proxy, key); err != nil {
 			apiError(w, http.StatusBadRequest, err.Error())
 			return
 		}
@@ -2568,12 +3061,49 @@ func (a *App) HandleAPI(mux *http.ServeMux) {
 			APIKey string `json:"api_key"` // 空 = 用当前生效凭证（配置中的 key 或匿名）
 		}
 		_ = json.NewDecoder(r.Body).Decode(&req)
-		status, body, err := a.TestOczenKey(req.APIKey)
+		status, body, via, err := a.TestOczenKey(req.APIKey)
 		if err != nil {
 			writeJSON(w, http.StatusOK, map[string]any{"ok": false, "status": 0, "error": err.Error()})
 			return
 		}
-		writeJSON(w, http.StatusOK, map[string]any{"ok": status == 200 || status == 429, "status": status, "body": body})
+		writeJSON(w, http.StatusOK, map[string]any{"ok": status == 200 || status == 429, "status": status, "body": body, "via_backup": via})
+	})
+	mux.HandleFunc("POST /api/config/custom_channels", func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Channels []custom.ChannelConfig `json:"channels"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			apiError(w, http.StatusBadRequest, "解析请求失败："+err.Error())
+			return
+		}
+		if err := a.SetCustomChannels(req.Channels); err != nil {
+			apiError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "channels": a.cfg.CustomChannels})
+	})
+	mux.HandleFunc("POST /api/config/custom_channel_test", func(w http.ResponseWriter, r *http.Request) {
+		var req custom.ChannelConfig
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			apiError(w, http.StatusBadRequest, "解析请求失败："+err.Error())
+			return
+		}
+		if req.BaseURL == "" {
+			apiError(w, http.StatusBadRequest, "base_url 不能为空")
+			return
+		}
+		// 面板回显的 api_key 是脱敏值（含 …）：测试未改动过的渠道时必须用真实密钥，
+		// 否则测试恒报 401（与 #117 的「探针没走同一条链路」同类）。
+		if strings.Contains(req.APIKey, "…") {
+			req.APIKey = a.resolveCustomKey(req.Name)
+		}
+		client := custom.New(req)
+		models, err := client.TestConnection()
+		if err != nil {
+			writeJSON(w, http.StatusOK, map[string]any{"ok": false, "error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "models": models})
 	})
 	mux.HandleFunc("POST /api/account/nickname", func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
@@ -2606,9 +3136,10 @@ func (a *App) HandleAPI(mux *http.ServeMux) {
 		// enrich：uid → 昵称/渠道（查 pool 状态，仅一次遍历）
 		nameOf := map[string]string{}
 		chOf := map[string]string{}
-		// 账号维度去重：否则共享池渠道（TraeWork/TraeCode）会让账务里的渠道名
-		// 随 map 遍历顺序在两者间漂移。
-		for _, rt := range a.uniqueRuntimes() {
+		for _, rt := range a.runtimesSnapshot() {
+			if rt == nil || rt.Pool == nil || rt.Alias {
+				continue
+			}
 			for _, st := range rt.Pool.List() {
 				nameOf[st.UID] = st.Nickname
 				chOf[st.UID] = rt.Kind.String()
@@ -2689,6 +3220,11 @@ type feesChannel struct {
 // feesModelRow 一行模型：来自渠道 models 列表，尽可能配上费率。
 type feesModelRow struct {
 	Model string `json:"model"`
+	// ID 是客户端实际要填的完整模型 ID（与 /v1/models 的 id、provider.PublicModelID 同源）：
+	// 普通渠道为 `<渠道>/<模型>`，上游 ID 自带命名空间的渠道（cline 的 cline-free/*）
+	// 直接就是上游 ID（R59）。面板一律拿它做复制，不在前端再拼前缀（R52 的教训：
+	// 拼接规则散在多处必漏）。
+	ID string `json:"id"`
 	// Priced 表示上游费率接口对该模型返回了可用的倍率值。
 	// 注意：credits 字段缺失（如 CN 的 auto 调度器）也算未定价，
 	// 不能把「缺字段解析出的 0」当成免费。
@@ -2698,11 +3234,14 @@ type feesModelRow struct {
 	Note   string  `json:"note,omitempty"` // 促销/标签说明（已剔除颜色）
 	// Color 为促销标签颜色（形如 "#FF0000"），无则空。
 	Color string `json:"color,omitempty"`
-	// HasContext 标记该模型的上下文窗口/最大输出是否来自上游接口。
-	// false 表示无可靠数据（硬编码估算或上游不返回），前端提示「未知」而非展示数字。
+	// HasContext 标记该模型的上下文窗口/最大输出是否可展示：
+	// 上游接口真实返回（ContextFromAPI）或本工具手工实测（HandMeasured）均置 true。
+	// false 表示无可靠数据（硬编码估算或上游不返回且未实测），前端提示「未知」而非展示数字。
 	HasContext    bool  `json:"has_context"`
 	ContextWindow int64 `json:"context_window,omitempty"`
 	MaxTokens     int64 `json:"max_tokens,omitempty"`
+	// HandMeasured 标记上述上下文值是**本工具实测**（非上游声明），前端据此加「实测」标注。
+	HandMeasured bool `json:"hand_measured,omitempty"`
 	// 能力标记（与 /v1/models 同源），供 UI 在模型 ID 后展示图标。
 	SupportsImages    bool `json:"supports_images"`
 	SupportsReasoning bool `json:"supports_reasoning"`
@@ -2751,10 +3290,14 @@ func buildFeesChannels(modelsByKind map[provider.Kind][]provider.ModelInfo,
 		for _, mi := range infos {
 			row := feesModelRow{
 				Model:         mi.ID,
+				ID:            provider.PublicModelID(k, mi.ID),
 				ContextWindow: mi.ContextWindow,
 				MaxTokens:     mi.MaxTokens,
 				// 仅上游接口返回的上下文可信；硬编码估算值不展示数字。
-				HasContext: mi.ContextFromAPI,
+				// 上游声明（API）或本工具手工实测均视为「有上下文可展示」；
+				// 前端据 hand_measured 区分并加「实测」标注，不把实测冒充成官方值。
+				HasContext:   mi.ContextFromAPI || mi.HandMeasured,
+				HandMeasured: mi.HandMeasured,
 				// 能力标记与 /v1/models 同源，保证 UI 图标与接口声明一致。
 				SupportsImages:    mi.SupportsImages,
 				SupportsReasoning: mi.SupportsReasoning,
@@ -2869,7 +3412,7 @@ func (a *App) RefreshPricing() {
 	allPricing := make([]provider.ModelPricing, 0)
 	var errs []string
 
-	for _, rt := range a.runtimes {
+	for _, rt := range a.runtimesSnapshot() {
 		// 旧 Qoder 渠道已从界面下线：不再自动刷新其模型/费率（也避免无谓的 token refresh 报错日志）
 		if rt == nil || rt.Pool == nil || rt.Upstream == nil || rt.Kind == provider.Qoder || len(rt.Pool.List()) == 0 {
 			continue

@@ -38,10 +38,17 @@ type catalogModel struct {
 
 // modelReasoningMeta 与国内版同形（字段名以国际版目录实测返回为准）。
 type modelReasoningMeta struct {
-	Effort           string   `json:"effort"`
-	Summary          string   `json:"summary"`
-	DefaultEffort    string   `json:"defaultEffort"`
-	SupportedEfforts []string `json:"supportedEfforts"`
+	Effort             string   `json:"effort"`
+	Summary            string   `json:"summary"`
+	DefaultEffort      string   `json:"defaultEffort"`
+	SupportedEfforts   []string `json:"supportedEfforts"`
+	CanDisableThinking bool     `json:"canDisableThinking"`
+}
+
+// hasReasoningMeta 报告 reasoning 对象是否带任何档位信息（全空 = 视为未声明）。
+func (r modelReasoningMeta) hasReasoningMeta() bool {
+	return len(provider.CleanEfforts(r.SupportedEfforts)) > 0 ||
+		strings.TrimSpace(r.DefaultEffort) != "" || strings.TrimSpace(r.Effort) != ""
 }
 
 // imageOK 判定该模型可否接收图像输入：
@@ -83,8 +90,8 @@ type catalogCache struct {
 	colors  map[string]string
 	fetched time.Time
 
-	v3      []catalogModel // /v3/config 全量模型面（不过滤）
-	v3OK    bool           // v3 探测是否成功过（失败不写缓存，避免负缓存住坏结果）
+	v3        []catalogModel // /v3/config 全量模型面（不过滤）
+	v3OK      bool           // v3 探测是否成功过（失败不写缓存，避免负缓存住坏结果）
 	v3Fetched time.Time
 }
 
@@ -265,6 +272,10 @@ func mergeV3(v2 []catalogModel, v3 []catalogModel) ([]catalogModel, map[string]s
 			}
 			m.SupportsImages = vm.SupportsImages || m.SupportsImages
 			m.SupportsToolCall = vm.SupportsToolCall || m.SupportsToolCall
+			// 思考档位：v3 带则覆盖，v3 无则保留 v2（同「非空者优先」口径）
+			if vm.Reasoning.hasReasoningMeta() {
+				m.Reasoning = vm.Reasoning
+			}
 		}
 		if m.ID == "" || seen[m.ID] {
 			continue
@@ -468,7 +479,8 @@ func Classify(status int, body string) provider.ErrKind {
 			return provider.ErrHardCredit
 		}
 	}
-	// 非 429 但 body 含限流文案 → 软限流
+	// 非 429 但 body 含限流文案 → 软限流（含「switch to the other models」的模型级
+	// 限额同此：handler 走 CooldownModel 冷却到重置点，不罚账号）。
 	if strings.Contains(lower, "rate limit") || strings.Contains(lower, "too many requests") ||
 		strings.Contains(lower, "usage limit") || strings.Contains(lower, "请求过于频繁") {
 		return provider.ErrSoftRate

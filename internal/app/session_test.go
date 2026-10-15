@@ -102,9 +102,9 @@ func TestPanelRequiresSession(t *testing.T) {
 	if !st.AuthEnabled || st.AuthSession != "" || !st.AuthRequired {
 		t.Errorf("探针状态错误：enabled=%v session=%q required=%v", st.AuthEnabled, st.AuthSession, st.AuthRequired)
 	}
-	// 探针不得回传已鉴权内容：响应里连 api_key / accounts 字段都不应出现
+	// 探针不得回传已鉴权内容：响应里连 api_key / accounts / 代理配置都不应出现
 	body := probe.Body.String()
-	if strings.Contains(body, "api_key") || strings.Contains(body, "accounts") || strings.Contains(body, "proxies") {
+	if strings.Contains(body, "api_key") || strings.Contains(body, "accounts") || strings.Contains(body, "backup_proxy") {
 		t.Errorf("未登录探针不得泄露面板内容：%s", body)
 	}
 

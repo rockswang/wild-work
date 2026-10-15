@@ -71,11 +71,16 @@ body {
 .pa-left .btn { white-space: nowrap; align-self: flex-start; }
 .pa-right {
   display: grid;
-  grid-template-columns: repeat(5, auto);
-  gap: 8px 12px;
+  grid-template-columns: repeat(6, auto);
+  gap: 8px 10px;
 }
 .pa-right .btn { justify-self: stretch; white-space: nowrap; }
-.panel-actions-wrap .btn { font-size: 13px; padding: 7px 12px; } /* 比标准按钮小一号 */
+/* 摆位与列配对由 DOM 顺序（行主序）决定：同列上下 = 同渠道的国内/国际版
+   （WorkBuddyCN/WorkBuddyAI、QoderCN/QoderCOM），Cline 占第一行末位、
+   第二行第 6 列留空（见 index.html 内注释与 ui-static-check 的顺序断言）。 */
+/* 紧凑档：比标准按钮小两号（14px/8px14px → 12px/6px10px），
+   PC 默认宽度下一行能放下 6 个渠道按钮（实测阈值见下方媒体查询注释）。 */
+.panel-actions-wrap .btn { font-size: 12px; padding: 6px 10px; }
 
 /* 按钮 */
 .btn { border: 1px solid var(--border); background: var(--card); color: var(--text); padding: 8px 14px; border-radius: 8px; cursor: pointer; font-size: 14px; transition: all .15s; }
@@ -181,6 +186,7 @@ body {
 .badge.qoder { background: #7c3aed; }
 .badge.qodercn { background: #6d28d9; }
 .badge.qodercom { background: #b45309; }
+.badge.custom { background: #6366f1; }
 
 .tag { font-size: 10px; padding: 2px 7px; border-radius: 10px; white-space: nowrap; }
 .tag.bad { background: #fee2e2; color: var(--danger); }
@@ -234,6 +240,10 @@ body {
 .input:focus { border-color: var(--primary); }
 .input.port { width: 80px; }
 .input.grow { flex: 1; min-width: 120px; }
+/* 弹层里独立成行的输入框（不套在 .row 弹性容器里）：.grow 的 flex:1 不生效，
+   浏览器会按默认 size 属性渲染成一个窄框（就是 Cline 的 API-Key 输入框过短的原因）。
+   凡是直接位于 .cfg-section 下的 .input.grow 一律撑满宽度。 */
+.cfg-section > .input.grow { flex: none; width: 100%; box-sizing: border-box; }
 .select { border: 1px solid var(--border); border-radius: 8px; padding: 7px 10px; font-size: 14px; background: var(--card); outline: none; }
 .muted { color: var(--muted); }
 .hint { font-size: 12px; color: var(--muted); margin-top: 6px; }
@@ -356,6 +366,16 @@ body {
 .fees code.fee-model-copy:hover { background: #eff6ff; color: var(--primary); }
 .fees code.fee-model-copy:focus-visible { outline: 2px solid var(--primary); outline-offset: 1px; }
 .fees td.dim { color: var(--muted); font-size: 12px; }
+/* Cline 弹层的「免费模型参数」实测表：紧凑排版（与弹层其它表格一致） */
+.cline-caps { font-size: 12.5px; }
+.cline-caps th, .cline-caps td { padding: 5px 8px; }
+.cline-caps code { font-size: 11.5px; }
+.cline-caps td.dim { color: var(--muted); font-size: 11.5px; }
+@media (max-width: 700px) {
+  /* 窄屏：备注列折行，不让表格溢出弹层 */
+  .cline-caps { word-break: break-all; }
+  .cline-caps th, .cline-caps td { padding: 5px 5px; }
+}
 /* 倍率显示：Free 高亮 / 已定价 / 未知（带 tooltip） */
 .fees .rate-free {
   display: inline-block; padding: 1px 8px; border-radius: 999px;
@@ -383,6 +403,17 @@ body {
   font-variant-numeric: tabular-nums; cursor: help;
 }
 .fees code + .ctx-tag { vertical-align: baseline; }
+/* 本工具实测值（带 *）：用警示色区分，避免与上游官方声明混淆 */
+.fees .ctx-tag.hand { color: var(--warn); border-bottom: 1px dotted var(--warn); }
+
+/* 思考档位标记（issue #96）：模型 ID 后的 [low·high·max] 小字标 */
+.fees .effort-tag {
+  font-size: 11px; color: #7c3aed; margin-left: 2px;
+  font-family: ui-monospace, monospace; cursor: help;
+}
+.fees code + .effort-tag { vertical-align: baseline; }
+/* 模型搜索框同款（复用紫色区分于上下文灰字） */
+.ms-eff { color: #7c3aed; font-family: ui-monospace, monospace; cursor: help; }
 
 /* 完整模型ID：费率表每行模型下方显示「渠道/模型」，点击即复制（客户端该填的模型名） */
 .fees .mcell { display: flex; flex-direction: column; gap: 3px; align-items: flex-start; }
@@ -425,10 +456,22 @@ body {
 .cfg-heading { font-size: 13px; font-weight: 600; color: var(--text); margin-bottom: 10px; }
 .lbl.wide { width: 90px; flex-shrink: 0; white-space: nowrap; }
 
-/* 渠道代理行 */
+/* 配置行列表（备用上游通道 / 模型降级链共用） */
 .proxy-list { display: flex; flex-direction: column; gap: 6px; }
 .proxy-row { margin-bottom: 0; }
 .proxy-row .input { font-family: ui-monospace, Consolas, monospace; font-size: 12px; }
+
+/* 自定义渠道层级卡片（R64） */
+.custom-channels-list { display: flex; flex-direction: column; gap: 8px; }
+.custom-ch-card { background: var(--bg, #f8fafc); border: 1px solid var(--line, #e2e8f0); border-radius: 8px; padding: 10px 12px; }
+.custom-ch-header { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding-bottom: 8px; border-bottom: 1px dashed var(--line, #e2e8f0); }
+.custom-models-box { margin-top: 8px; }
+.custom-models-title { font-size: 11px; font-weight: 600; color: var(--muted, #64748b); margin-bottom: 6px; }
+.custom-models-table { width: 100%; border-collapse: collapse; font-size: 12px; margin-bottom: 8px; table-layout: fixed; }
+.custom-models-table th, .custom-models-table td { padding: 5px 6px; vertical-align: middle; }
+.custom-models-table th { text-align: left; font-size: 11px; font-weight: 500; color: var(--muted, #64748b); border-bottom: 1px solid var(--line, #e2e8f0); white-space: nowrap; }
+.custom-models-table td { border-bottom: 1px solid var(--line, #f1f5f9); overflow: hidden; text-overflow: ellipsis; }
+.custom-model-add-row { display: flex; align-items: center; gap: 6px; flex-wrap: nowrap; margin-top: 6px; padding: 6px 8px; background: var(--card, #fff); border-radius: 6px; border: 1px solid var(--line, #e2e8f0); }
 
 /* 账号名可点击编辑 */
 .acct-name.editable { cursor: pointer; border-bottom: 1px dashed transparent; }
@@ -446,28 +489,38 @@ body {
 /* toast */
 .toast { position: fixed; bottom: 28px; left: 50%; transform: translateX(-50%); background: rgba(31,35,41,.92); color: #fff; padding: 10px 18px; border-radius: 8px; font-size: 14px; z-index: 200; box-shadow: 0 4px 16px rgba(0,0,0,.2); max-width: 80vw; }
 
-/* 积分明细浮层 */
+/* 积分明细浮层：点击积分标签打开，✕ / 点击浮层外 / Esc 关闭（桌面与触屏同一套交互）。
+   为什么不再用 hover：① 浮窗开着时后台 loadState() 会重建卡片 DOM，被替换的元素不再派发
+   mouseleave ⇒ 浮窗残留关不掉；② 触屏没有 mouseenter/mouseleave，手机上根本关不掉。
+   位置固定（水平居中、距顶 12vh）而不贴被点卡片：重渲染/滚动都不会飘走。 */
 .credit-tip {
   position: fixed; display: none; z-index: 150;
+  left: 50%; top: 12vh; transform: translateX(-50%);
+  width: min(420px, calc(100vw - 24px)); /* 窄屏自适应：手机竖屏不再溢出屏幕 */
+  max-height: 72vh; overflow-y: auto;
   background: var(--card); border: 1px solid var(--border);
   border-radius: var(--radius); padding: 10px 12px;
   box-shadow: 0 4px 16px rgba(0,0,0,.15); font-size: 12px;
-  min-width: 300px; max-width: 420px;
-}
-.credit-tip {
-  position: fixed; display: none; z-index: 150;
-  background: var(--card); border: 1px solid var(--border);
-  border-radius: var(--radius); padding: 10px 12px;
-  box-shadow: 0 4px 16px rgba(0,0,0,.15); font-size: 12px;
-  width: 380px; /* 固定宽度：翻页时浮窗不再变形/宽度跳动 */
   box-sizing: border-box;
 }
 .credit-tip .detail-head {
-  display: grid; grid-template-columns: 1fr auto 1fr; align-items: center;
-  margin-bottom: 6px;
+  display: grid; grid-template-columns: 1fr auto 1fr auto; align-items: center;
+  gap: 6px; margin-bottom: 6px;
 }
 .credit-tip .detail-title { font-weight: 600; text-align: right; }
 .credit-tip .detail-count { font-weight: 400; color: var(--muted); font-size: 11px; }
+/* 关闭按钮：固定最右一列，与顶部翻页器互不干扰 */
+.credit-tip .detail-close {
+  width: 24px; height: 24px; border: 1px solid var(--border); border-radius: 6px;
+  background: var(--card); color: var(--muted); cursor: pointer;
+  display: inline-flex; align-items: center; justify-content: center;
+  font-size: 13px; line-height: 1; padding: 0;
+}
+.credit-tip .detail-close:hover { color: var(--danger); border-color: var(--danger); background: #fef2f2; }
+/* 积分标签变成点击入口：给出可点暗示 */
+.acct-card .acct-credits.clickable { cursor: pointer; }
+.acct-card .acct-credits.clickable:hover { text-decoration: underline dotted; text-underline-offset: 3px; }
+.acct-card .acct-credits.clickable:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
 /* 翻页器在浮窗顶部居中：鼠标从卡片过来路径最短，不跨出浮窗 */
 .detail-pager { display: inline-flex; align-items: center; gap: 6px; user-select: none; }
 .detail-pg {
@@ -507,12 +560,11 @@ body {
 
 .footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 24px; }
 
+/* 顶栏/账号卡片的窄屏规则已上移到 779/679 两个断点块（与按钮断点统一），
+   此处只保留与顶栏无关的设置项两列布局。 */
 @media (max-width: 640px) {
-  .topbar { flex-wrap: wrap; }
-  .top-info { order: 3; width: 100%; }
   .config-grid { grid-template-columns: 1fr; }
   .config-right { padding-left: 0; border-left: none; border-top: 1px solid var(--border); padding-top: 14px; }
-  .acct-grid { grid-template-columns: 1fr; }
 }
 /* qwenwork 千问办公渠道色（与 qoder 紫系区分，用青蓝） */
 .btn.primary.alt.qwenwork { background: #0e7490; border-color: #0e7490; }
@@ -571,9 +623,9 @@ body {
 .seg-btn + .seg-btn { border-left: 1px solid var(--border); }
 .seg-btn.active { background: var(--primary); color: #fff; }
 
-.usage-cards { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin-bottom: 12px; }
-.ucard { background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 10px 14px; }
-.ucard-label { font-size: 11px; color: var(--muted); }
+.usage-cards { display: grid; grid-template-columns: repeat(5, 1fr); gap: 10px; margin-bottom: 12px; }
+.ucard { background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 10px 14px; min-width: 0; }
+.ucard-label { font-size: 11px; color: var(--muted); white-space: nowrap; }
 .ucard-value { font-size: 20px; font-weight: 700; margin-top: 2px; }
 .ucard-value.ok { color: var(--ok); }
 .ucard-value.warn { color: var(--warn); }
@@ -960,3 +1012,99 @@ body {
   #mtabStats .st-ex-row { grid-template-columns: 24px 88px 120px 96px 88px 1fr; font-size: 11px; }
   #mtabStats .st-ab-row { grid-template-columns: 24px 64px 88px 110px 1fr 76px 64px; font-size: 11px; }
 }
+
+/* cline：Cline 免费池渠道（深绿，与既有紫/青/蓝系均不冲突） */
+.btn.primary.alt.cline { background: #15803d; border-color: #15803d; }
+.btn.primary.alt.cline:hover { background: #166534; }
+.badge.cline { background: #15803d; }
+.fees .ch-header.cline td { color: #15803d; }
+
+/* ==========================================================================
+   响应式适配（手机/平板竖屏）
+   —— 原实现只有「卡片改单列 / 使用卡 2 列」两条窄屏规则，其余区块在手机竖屏
+   都会水平溢出（实测 390px 视口下 scrollWidth=711px）。溢出除本身难看外还有个
+   隐蔽后果：.overlay{position:fixed;inset:0} 的包含块是 ICB（=scrollWidth），
+   页面一溢出，所有弹层（设置/帮助/添加账号）都会整体偏移到屏外。
+   原则：所有新规则都关在 max-width 媒体查询里，≥900px 完全走原桌面样式。
+   ========================================================================== */
+
+/* 1) 账号管理按钮区 + 顶栏：≤779px 改上下两段/换行
+   —— 渠道按钮早期是 repeat(5,auto) + 内联 grid-column:1..5，390px 下宽 598px、溢出 321px；
+   现为 6 列（摆位全归 CSS）+ 紧凑档字号，6 列需视口 ≥ 约 780px。
+   顶栏同期问题：.top-info 的 1fr 隐含下界是 min-content（接口地址/API-Key 文本不收缩），
+   实测 650–750px 区间顶栏图标被推出视口（最大 102px），而换行断点原先是 640 太低。
+   两者统一卡在 779：≤779 顶栏换行（品牌+图标一行、接口信息独占一行）、按钮改自适应列。 */
+@media (max-width: 779px) {
+  .topbar { flex-wrap: wrap; row-gap: 8px; }
+  .brand { order: 1; }
+  .top-icons { order: 2; margin-left: auto; }
+  .top-info { order: 3; flex: none; width: 100%; }
+  .panel-actions-wrap { flex-direction: column; align-items: stretch; gap: 8px; }
+  .pa-spacer { display: none; }
+  .pa-left { flex-direction: row; flex-wrap: wrap; }
+  .pa-right { grid-template-columns: repeat(auto-fit, minmax(118px, 1fr)); width: 100%; }
+  .pa-right .btn { justify-self: stretch; padding: 8px 10px; }
+}
+
+/* 2) 顶栏接口信息：≤479px 单列。两列时 1fr 的 min-content 下界仍会撑破
+   （接口地址/API-Key 文本不收缩），minmax(0,1fr) 解除后单元格可收缩、长文本走 ellipsis。 */
+@media (max-width: 479px) {
+  .top-info { grid-template-columns: minmax(0, 1fr); }
+}
+
+/* 3) 账号卡片：1fr 轨道的 min 是 min-content，操作按钮行（4×28px ≈ 365px）
+   在窄屏会撑破卡片并被 .panel 裁掉（实测 660px 视口溢出 16px）。 */
+@media (max-width: 679px) {
+  .acct-grid { grid-template-columns: minmax(0, 1fr); }
+  .acct-card { min-width: 0; }
+  .acct-card .acct-top,
+  .acct-card .acct-mid { flex-wrap: wrap; }
+}
+
+/* 4) 费率表：4 列（模型|倍率|模型|倍率）必然溢出（390px 下 634px）。
+   实测 700px 时残余 4px、720px 已为 0，故 719px 以下只留「模型|倍率」两列。 */
+@media (max-width: 719px) {
+  .fees table th:nth-child(n+3),
+  .fees table td:nth-child(n+3) { display: none; }
+  .fees .full-id { white-space: normal; word-break: break-all; }
+}
+
+/* 5) 运行统计：平台表/临期表/异常表是固定 N 列 grid。平台表实测最小内容宽度 790px
+   （区块可用宽 = 视口 − 65），实测 vw ≤ 880 时单元格越出卡片被裁、vw ≥ 900 时恰好为 0
+   （由于页面本身在更窄处就有滚动，且单元格会被 .panel 裁掉，所以这是「直接视口看不出来」
+   的隐蔽截断）。≤899px 给容器横向滚动；≥900px 走原样，保持与旧版逐像素一致。
+   统计列都有信息量，横向滚动比隐藏列更可接受。 */
+@media (max-width: 899px) {
+  #mtabStats .st-plat,
+  #mtabStats .st-ex-scroll,
+  #mtabStats .st-ab-scroll,
+  #mtabStats .st-scroll { max-width: 100%; overflow-x: auto; }
+}
+
+/* 6) 用量与流水：模型表压缩内边距（列内文字可折行），流水行宽度写死会在窄屏被裁。 */
+@media (max-width: 640px) {
+  .table th, .table td { padding: 7px 6px; }
+  #tabToken { overflow-x: auto; }
+  .rline { flex-wrap: wrap; }
+  .rline .rtime,
+  .rline .ramount,
+  .rline .rname { width: auto; max-width: none; }
+}
+
+/* 7) 触控目标：图标按钮 28×28、图标链 32×32 都低于 44px 的触控建议值。
+   只在「无 hover + 粗指针」设备放大，桌面鼠标设备不受影响。 */
+@media (hover: none) and (pointer: coarse) {
+  .icon-op { width: 34px; height: 34px; font-size: 15px; }
+  .icon-link { width: 38px; height: 38px; }
+  .fees-tab { padding: 7px 12px; }
+  .credit-tip .detail-close { width: 30px; height: 30px; }
+}
+
+/* 缓存利用率单元格（用量与流水 / 运行统计）：三态渲染见 app.js 的 cacheCell。
+   有样本 → 等宽数字便于纵向比对；无样本 → 沿用 .muted 的「—」低对比显示。 */
+.cache-pct { font-variant-numeric: tabular-nums; }
+
+/* ---------- 降级记录（运行统计区块）：进行中事件高亮 + 实时计时 ---------- */
+.st-fbs tr.fb-active { background: #fffbeb; }
+.st-fbs .fb-live { color: var(--warn); font-weight: 600; white-space: nowrap; }
+.st-fbs .fb-arrow { color: var(--muted, #94a3b8); text-align: center; padding: 0 6px; }

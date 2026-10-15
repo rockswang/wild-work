@@ -395,10 +395,11 @@ type ModelInfo = provider.ModelInfo
 // 未下发（零值）时回落静态兜底表。注意 supportedEfforts 为空 ≠ 不支持思考，
 // 而是「该模型没有可选档位」，因此不能据此判定能力。
 type modelReasoningMeta struct {
-	Effort           string   `json:"effort"`
-	Summary          string   `json:"summary"`
-	DefaultEffort    string   `json:"defaultEffort"`
-	SupportedEfforts []string `json:"supportedEfforts"`
+	Effort             string   `json:"effort"`
+	Summary            string   `json:"summary"`
+	DefaultEffort      string   `json:"defaultEffort"`
+	SupportedEfforts   []string `json:"supportedEfforts"`
+	CanDisableThinking bool     `json:"canDisableThinking"`
 }
 
 // catalogModel 目录接口的原始模型条目（含能力字段）。
@@ -487,7 +488,12 @@ func (c *Client) FetchModels(a *auth.Auth) ([]ModelInfo, error) {
 		if !ok || m.Disabled {
 			continue
 		}
-		out = append(out, ModelInfo{
+		def := m.Reasoning.DefaultEffort
+		if def == "" {
+			def = m.Reasoning.Effort
+		}
+
+		mi := ModelInfo{
 			ID:             m.ID,
 			Name:           m.Name,
 			ContextWindow:  m.MaxInputTokens,
@@ -498,14 +504,37 @@ func (c *Client) FetchModels(a *auth.Auth) ([]ModelInfo, error) {
 			SupportsReasoning: m.SupportsReasoning,
 			SupportsTools:     m.SupportsToolCall,
 			// 档位能力（远端权威，缺失时由 internal/reasoning 静态表兜底）
-			SupportedEfforts: m.Reasoning.SupportedEfforts,
-			DefaultEffort:    m.Reasoning.DefaultEffort,
-		})
+			SupportedEfforts:       m.Reasoning.SupportedEfforts,
+			ReasoningEfforts:       provider.CleanEfforts(m.Reasoning.SupportedEfforts),
+			DefaultEffort:          m.Reasoning.DefaultEffort,
+			ReasoningCanDisable:    m.Reasoning.CanDisableThinking,
+			DefaultReasoningEffort: def,
+		}
+		out = append(out, mi)
 	}
 	if len(out) == 0 {
 		return nil, fmt.Errorf("models api returned empty list")
 	}
 	return out, nil
+}
+
+// applyCatalogReasoning 把目录 reasoning 对象投影进 ModelInfo（供任一渠道复用，
+// 字段形状对齐 Buddy2api model_reasoning.py / dsh-connect upstream.ts 实测）。
+// 全部字段缺失时不留任何痕迹（nil/空串），消费方不得把「未声明」当「不支持」。
+func applyCatalogReasoning(m *catalogModel) (efforts []string, def string, canDisable *bool) {
+	if m == nil {
+		return nil, "", nil
+	}
+	r := m.Reasoning
+	efforts = provider.CleanEfforts(r.SupportedEfforts)
+	def = strings.TrimSpace(r.DefaultEffort)
+	if def == "" {
+		def = strings.TrimSpace(r.Effort) // 老式默认档字段回退
+	}
+	if efforts == nil && def == "" {
+		return nil, "", nil // reasoning 对象存在但无任何档位信息：整体视为未声明
+	}
+	return efforts, def, nil
 }
 
 // UserResource 查询账号当前可花费积分余额（所有套餐 CycleCapacity 聚合，负值钳 0）。

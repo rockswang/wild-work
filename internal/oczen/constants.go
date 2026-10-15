@@ -3,7 +3,10 @@
 // 渠道特性（2026-09 实测）：
 //   - 匿名凭证是字面量 "public"（Authorization: Bearer public），无需登录、无 token 轮换；
 //   - 上游免费档有三道校验，缺一即 403 FreeTierError：
-//     ① 会话头须匹配官方客户端格式 ses_<12位小写hex><14位Base62>；
+//     ① 会话头不仅须匹配官方客户端外形 ses_<12位小写hex><14位Base62>，其 12 位
+//     hex 时间戳段还须是官方 Identifier.descending() 编码（~(unix_ms<<12|counter)
+//     取低 48 位，故末三位为 0xFFF-counter，实测只接受 counter 1–63）；
+//     摘要段/升序 ID 即便外形正确也被拒（2026-10-13 实盘）。
 //     ② 请求体须为「智能体形态」：stream=true 且 tools 内同时含 bash 与 read 两个 function；
 //     ③ 伪装头齐套（User-Agent / x-opencode-client / x-session-affinity / x-opencode-request / x-opencode-project）。
 //   - 匿名通道未观测到请求数配额（1900+ 次、峰值 230 req/min、64 并发均无 429），

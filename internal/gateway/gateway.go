@@ -203,7 +203,14 @@ func (g *Gateway) callChat(w http.ResponseWriter, r *http.Request, req chatReque
 	if err != nil {
 		return nil, err
 	}
-	return g.call(r.Context(), "/v1/chat/completions", body, g.key())
+	res, err := g.call(r.Context(), "/v1/chat/completions", body, g.key())
+	if err != nil {
+		return nil, err
+	}
+	if v := res.Header.Get("X-Model-Fallback"); v != "" {
+		w.Header().Set("X-Model-Fallback", v)
+	}
+	return res, nil
 }
 
 // readChatResponse 读取内层非流式响应，返回 (状态码, 原始 body)。

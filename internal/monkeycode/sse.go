@@ -37,6 +37,10 @@ type anthropicStreamReader struct {
 
 	inTokens  int64
 	outTokens int64
+	// 缓存命中（上游 input_tokens_details.cached_tokens；cacheReported 区分
+	// 「命中 0」与「未上报」，见 cacheusage.go）。
+	cachedTokens  int64
+	cacheReported bool
 
 	finished bool // 已下发收尾帧
 	done     bool // 已吐出 [DONE]
@@ -146,6 +150,7 @@ func (s *anthropicStreamReader) convertMessageJSON(raw []byte) []byte {
 	if u, ok := msg["usage"].(map[string]any); ok {
 		s.inTokens += intField(u, "input_tokens")
 		s.outTokens += intField(u, "output_tokens")
+		s.captureCached(u)
 	}
 
 	var buf bytes.Buffer
@@ -222,6 +227,7 @@ func (s *anthropicStreamReader) convertLine(line []byte) []byte {
 			}
 			if u, ok := msg["usage"].(map[string]any); ok {
 				s.inTokens += intField(u, "input_tokens")
+				s.captureCached(u)
 			}
 		}
 		return s.firstChunk()
@@ -358,9 +364,10 @@ func (s *anthropicStreamReader) finish(reason string) []byte {
 			"finish_reason": reason,
 		}},
 		"usage": map[string]any{
-			"prompt_tokens":     s.inTokens,
-			"completion_tokens": s.outTokens,
-			"total_tokens":      s.inTokens + s.outTokens,
+			"prompt_tokens":         s.inTokens,
+			"completion_tokens":     s.outTokens,
+			"total_tokens":          s.inTokens + s.outTokens,
+			"prompt_tokens_details": s.cacheDetails(),
 		},
 	}
 	out := s.encode(frame)

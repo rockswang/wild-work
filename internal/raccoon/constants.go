@@ -33,6 +33,15 @@ const (
 	// 另需合法 `type`；暂无必要，保留备查）。
 	EpPointsBills = "/api/web/points/v1/bills"
 
+	// EpOfficeSettingInfo 工作台设置（配额/空间/功能开关），也是**每日积分落账的触发点**。
+	//
+	// 2026-10-15 实测：每日 300 积分名义上 00:00 记账（bills 的 grant_at），
+	// 实际要等账号当天第一次访问「工作台业务接口」才落账（created_at = 该次访问时刻）。
+	// 三账号对照：调本接口 → 各入账 300（point_grant_popups 非空）；
+	// 纯对话 / 只读余额 / auth/v1 的 user_info 与 iam/confirm → 均不入账。
+	// 网页端打开工作台首页时自己就会调它，故调它 ≈ 打开一次网页（见 checkin.go）。
+	EpOfficeSettingInfo = "/api/web/office/v3/setting_info"
+
 	// EpAuthRefresh 桌面端旧前缀（客户端 env: NEXT_PUBLIC_AUTH_API_PREFIX = /api/electron/auth/v1）。
 	// 2026-10-10 实测该前缀的 /refresh 已 **404**（上游下线），仅作历史兑底保留。
 	EpAuthRefresh = "/api/electron/auth/v1/refresh"

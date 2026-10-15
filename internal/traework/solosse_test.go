@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"wild-work/internal/loopguard"
 	"wild-work/internal/provider"
 )
 
@@ -203,4 +204,80 @@ func asSOLOError(err error, target **SOLOStreamError) bool {
 		*target = se
 	}
 	return ok
+}
+
+// TestStreamReasoningLoopIntercepted 思考链死循环（发癫）命中：发 error 帧
+// （code=upstream_reasoning_loop）、不补 [DONE]、返回 *loopguard.Error，
+// 且死循环之后的正文不再透传。SOLO 的 reasoning 走 output 事件的 reasoning_content。
+func TestStreamReasoningLoopIntercepted(t *testing.T) {
+	line := "这里是一个足够长的、会被模型机械重复的思考行内容"
+	var body strings.Builder
+	for i := 0; i < 10; i++ {
+		body.WriteString(soloFrame("output", `{"response":"","reasoning_content":"`+line+`\n"}`))
+	}
+	body.WriteString(soloFrame("output", `{"response":"正文","reasoning_content":""}`))
+	body.WriteString(soloFrame("done", `{"finish_reason":"stop"}`))
+
+	w := httptest.NewRecorder()
+	_, err := streamOpts(w, strings.NewReader(body.String()), nil, "m", nil)
+	if err == nil {
+		t.Fatal("期望守卫命中返回错误，实际 nil")
+	}
+	var lge *loopguard.Error
+	if !asLoopGuardError(err, &lge) {
+		t.Fatalf("期望 *loopguard.Error，得 %T: %v", err, err)
+	}
+	out := w.Body.String()
+	if !strings.Contains(out, `"code":"upstream_reasoning_loop"`) {
+		t.Errorf("缺少 upstream_reasoning_loop 错误帧: %q", out)
+	}
+	if strings.Contains(out, "data: [DONE]") {
+		t.Errorf("守卫命中不得补 [DONE]: %q", out)
+	}
+	if strings.Contains(out, "正文") {
+		t.Errorf("死循环之后的正文不应透传: %q", out)
+	}
+}
+
+// TestStreamNormalReasoningPasses 正常各不相同的思考行不应触发（零误伤），正常收尾。
+func TestStreamNormalReasoningPasses(t *testing.T) {
+	var body strings.Builder
+	for i := 0; i < 30; i++ {
+		body.WriteString(soloFrame("output", `{"response":"","reasoning_content":"第 `+itoa(i)+` 步思考内容各不相同\n"}`))
+	}
+	body.WriteString(soloFrame("done", `{"finish_reason":"stop"}`))
+
+	w := httptest.NewRecorder()
+	_, err := streamOpts(w, strings.NewReader(body.String()), nil, "m", nil)
+	if err != nil {
+		t.Fatalf("正常推理不应报错：%v", err)
+	}
+	if !strings.Contains(w.Body.String(), "data: [DONE]") {
+		t.Errorf("正常推理应正常收尾: %q", w.Body.String())
+	}
+}
+
+// asLoopGuardError errors.As 小工具。
+func asLoopGuardError(err error, target **loopguard.Error) bool {
+	if err == nil {
+		return false
+	}
+	le, ok := err.(*loopguard.Error)
+	if ok {
+		*target = le
+	}
+	return ok
+}
+
+// itoa 简易整数转字符串（避免为测试引 strconv）。
+func itoa(i int) string {
+	if i == 0 {
+		return "0"
+	}
+	var d []byte
+	for i > 0 {
+		d = append([]byte{byte('0' + i%10)}, d...)
+		i /= 10
+	}
+	return string(d)
 }

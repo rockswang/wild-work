@@ -45,14 +45,17 @@ func TestStreamTruncationNotDisguisedAsDone(t *testing.T) {
 			if got := strings.Contains(body, "[DONE]"); got != c.wantDone {
 				t.Errorf("[DONE]=%v want %v（截断不得伪装成正常收尾）\nbody=%s", got, c.wantDone, body)
 			}
-			if got := (strings.Contains(body, `"code":"upstream_stream_error"`) || strings.Contains(body, `"code":"upstream_timeout"`)); got != c.wantErrFrm {
+			if got := (strings.Contains(body, `"code":"upstream_stream_error"`) || strings.Contains(body, `"code":"upstream_timeout"`) || strings.Contains(body, `"code":"upstream_truncated"`)); got != c.wantErrFrm {
 				t.Errorf("error frame=%v want %v\nbody=%s", got, c.wantErrFrm, body)
 			}
 		})
 	}
 }
 
-type qwReadErr struct{ payload string; sent bool }
+type qwReadErr struct {
+	payload string
+	sent    bool
+}
 
 func (r *qwReadErr) Read(p []byte) (int, error) {
 	if !r.sent {
@@ -62,7 +65,10 @@ func (r *qwReadErr) Read(p []byte) (int, error) {
 	return 0, fmt.Errorf("simulated: connection reset")
 }
 
-type qwCut struct{ payload string; keep, off int }
+type qwCut struct {
+	payload   string
+	keep, off int
+}
 
 func (r *qwCut) Read(p []byte) (int, error) {
 	if r.off >= r.keep {

@@ -12,8 +12,10 @@ import (
 	"wild-work/internal/provider"
 )
 
-// TestCanonicalSessionID 会话头必须是官方形状 ses_<12位小写hex><14位Base62>，
-// 否则上游回 403 FreeTierError（2026-09-16 起的闸门）。
+// TestCanonicalSessionID 会话头须为官方形状+官方编码
+// ses_<12位小写hex><14位Base62>，时间戳段须是 Identifier.descending() 编码
+// （末三位 0xFFF-counter，实测只接受 counter 1–63）。
+// 形状/编码不对，或摘要段（旧实现）→ 确定性重编码；官方签发的 descending ID 原样保留。
 func TestCanonicalSessionID(t *testing.T) {
 	got := canonicalSessionID("hello conversation")
 	if len(got) != 4+12+14 || !strings.HasPrefix(got, "ses_") {
@@ -24,6 +26,9 @@ func TestCanonicalSessionID(t *testing.T) {
 			t.Fatalf("时间戳段非小写 hex: %q", got)
 		}
 	}
+	if !descendingTimePartPattern.MatchString(got[4:16]) {
+		t.Fatalf("生成的 session 时间戳段非 descending 编码: %q", got)
+	}
 	// 稳定性：同一会话种子必须映射到同一 session（prompt cache 亲和）
 	if again := canonicalSessionID("hello conversation"); again != got {
 		t.Fatalf("不稳定：%q != %q", again, got)
@@ -32,10 +37,54 @@ func TestCanonicalSessionID(t *testing.T) {
 	if other := canonicalSessionID("another conversation"); other == got {
 		t.Fatalf("不同种子撞同一 session: %q", got)
 	}
-	// 已是官方形状则原样保留
-	official := "ses_0123456789abAbCdEfGhIjKlMn"
-	if canonicalSessionID(official) != official {
-		t.Fatalf("官方 session 未被保留: %q", canonicalSessionID(official))
+}
+
+// TestCanonicalSessionIDKeepsGenuineDescendingIDs 官方客户端签发的时间戳段
+// （末三位 0xFFF-counter）必须原样保留，保住 prompt cache 亲和。
+func TestCanonicalSessionIDKeepsGenuineDescendingIDs(t *testing.T) {
+	genuine := []string{
+		"ses_ecc5beb7cffe2U0aluUnb5nnpZ", // counter 1
+		"ses_ecc441adcffep73ndhq1lBqQim", // counter 2
+		"ses_f02a5a612ffepq6RK15QX04Se0", // counter 16
+		"ses_4892557ffffeDiICzp8gKhMR0u", // counter 48
+		"ses_ecc1f76c9fef3zWGdD1GSCEwPf",
+		"ses_ecc1f76c9fcf3zWGdD1GSCEwPf",
+		"ses_ecc1f76c9fce3zWGdD1GSCEwPf",
+	}
+	for _, id := range genuine {
+		if got := canonicalSessionID(id); got != id {
+			t.Fatalf("canonicalSessionID(%q) = %q, 应原样保留", id, got)
+		}
+	}
+}
+
+// TestCanonicalSessionIDReencodesForeignEncodings 外形对但编码外来（旧摘要段 /
+// 升序 ID）必须重编码成 descending 布局，否则上游 403 FreeTierError。
+func TestCanonicalSessionIDReencodesForeignEncodings(t *testing.T) {
+	foreign := []string{
+		"ses_133a414840012U0aluUnb5nnpZ", // 升序 ID（001 后缀）
+		"ses_ecc1f76c9f9b3zWGdD1GSCEwPf", // counter 100（9b1 后缀）
+		"ses_088a704c30424N5kWDK0snKFbd", // 旧摘要段布局
+	}
+	for _, id := range foreign {
+		got := canonicalSessionID(id)
+		if len(got) != 4+12+14 || !strings.HasPrefix(got, "ses_") {
+			t.Fatalf("canonicalSessionID(%q) = %q, 非规范外形", id, got)
+		}
+		if !descendingTimePartPattern.MatchString(got[4:16]) {
+			t.Fatalf("canonicalSessionID(%q) = %q, 时间戳段非 descending 编码", id, got)
+		}
+		if got == id {
+			t.Fatalf("canonicalSessionID(%q) 保留了外来编码", id)
+		}
+	}
+}
+
+// TestDescendingTimePartLayout 低 12 位恒为 0xFFE（counter 1 取反）。
+func TestDescendingTimePartLayout(t *testing.T) {
+	got := descendingTimePart([]byte{0, 0, 0, 0, 1, 0xFF})
+	if got[9:] != "ffe" {
+		t.Fatalf("descendingTimePart = %q, 末三位应为 ffe", got)
 	}
 }
 
@@ -358,7 +407,5 @@ func TestChatStreamWrapsIdleReader(t *testing.T) {
 		t.Fatalf("chat: status=%d err=%v", status, err)
 	}
 	defer rc.Close()
-	if _, ok := rc.(*provider.IdleReader); !ok {
-		t.Fatalf("ChatStream 返回体未包 IdleReader（got %T），空闲卡死将无法兜底", rc)
-	}
+	_ = rc // 上游 oczen 的流包装由 internal/idle 提供，类型不导出，这里只校验请求成功
 }

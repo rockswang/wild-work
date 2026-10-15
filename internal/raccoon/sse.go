@@ -6,11 +6,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"sort"
 	"strings"
 	"time"
 
+	"wild-work/internal/loopguard"
 	"wild-work/internal/provider"
 )
 
@@ -43,6 +45,11 @@ func Stream(w http.ResponseWriter, r io.Reader, model string) (map[string]any, e
 			fl.Flush()
 		}
 	}
+	// 思考链死循环守卫：仅在全局启用时创建。命中即中断、不罚账号。
+	var guard *loopguard.Guard
+	if loopguard.Enabled() {
+		guard = loopguard.NewDefault()
+	}
 
 	sc := newSSEScanner(r)
 	for sc.Scan() {
@@ -64,6 +71,20 @@ func Stream(w http.ResponseWriter, r io.Reader, model string) (map[string]any, e
 			}
 			flush()
 			continue
+		}
+		// 思考链死循环守卫：只在 reasoning_content 非空时喂入。命中即中断。
+		if guard != nil {
+			if rc := loopguard.ReasoningDeltaOf(chunk); rc != "" {
+				if hit := guard.Push(rc); hit != nil {
+					gerr := &loopguard.Error{Hit: *hit}
+					if _, werr := io.WriteString(w, "data: "+loopguard.ErrorFrameJSON(hit)+"\n\n"); werr != nil {
+						log.Printf("raccoon reasoning loop error frame write failed: %v", werr)
+					} else {
+						flush()
+					}
+					return usage, gerr
+				}
+			}
 		}
 		// usage 捕获：末帧覆盖前面（OpenAI 语义末帧才是全量），并照常透传
 		if u, ok := chunk["usage"].(map[string]any); ok && len(u) > 0 {

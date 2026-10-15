@@ -35,9 +35,112 @@ const (
 	TraeCode   Kind = "traecode" // Trae 代码版：与 TraeWork 同一上游、共用账号，function=solo_agent
 	Oczen      Kind = "oczen"    // OpenCodeZen 匿名免费通道（opencode.ai/zen，无账号、凭证固定 public）
 	GLM        Kind = "glm"      // 智谱清言（chatglm.cn 网页版私有接口，凭据为 chatglm_refresh_token）
+	// Cline 免费池（api.cline.bot）：凭据是**官方文档化的 sk_ API Key**（非 OAuth），
+	// 一个账号一把 Key；Key 不轮换 ⇒ 无 RefreshToken、无保活、无签到；
+	// 只暴露 Cline 官方免费池，定位是多账号免费额度调度器 + 反代（见决议 R46）。
+	Cline Kind = "cline"
 )
 
 func (k Kind) String() string { return string(k) }
+
+// BuiltinKinds 本仓内建渠道集合（R66）。
+//
+// 用于拒绝自定义渠道占用内建渠道名：两者同名时两层会指向不同 Runtime
+// （server 侧 getRuntime 内建优先，而 app 侧 UpdateCustomRuntimes 无条件覆盖），
+// 表现为「面板/账号操作打到自定义池、对话请求走内建渠道」——不报错但静默出错。
+// 同时排除 ModelNamespaces 里的上游命名空间（如 cline-free），以免路由歧义。
+func BuiltinKinds() map[string]bool {
+	m := map[string]bool{}
+	for _, k := range []Kind{WorkBuddy, WorkBuddyAI, TraeWork, Qoder, QoderCN, QoderCOM,
+		QwenWork, MonkeyCode, Raccoon, Loomy, TraeCode, Oczen, GLM, Cline} {
+		m[k.String()] = true
+	}
+	for ns := range ModelNamespaces {
+		m[ns] = true
+	}
+	return m
+}
+
+// ModelNamespaces 声明「上游 ID 自带命名空间」的渠道：命名空间前缀 → 渠道 kind。
+//
+// 这类渠道对客户端**直接透传上游 ID**，不再拼 `<kind>/` 前缀（决议 R59，首例为 cline 免费档：
+// 上游 free[] 的 ID 就是 `cline-free/*`）。路由时该前缀映射回渠道，且**整串**即上游模型名。
+// 同时旧的 `<kind>/<上游ID>` 双层写法（如 `cline/cline-free/*`）继续有效 —— 老配置/老客户端
+// 里的映射表与降级链都是那种写法，不能失效。
+var ModelNamespaces = map[string]Kind{
+	"cline-free": Cline,
+}
+
+// PublicModelID 返回客户端应填写的模型 ID（面板复制 / `/v1/models` / 报错提示同源）。
+// 上游 ID 自带命名空间时直接透传上游 ID；其余渠道拼 `<kind>/<上游ID>`。
+func PublicModelID(k Kind, upstreamID string) string {
+	up := strings.TrimSpace(upstreamID)
+	if i := strings.IndexByte(up, '/'); i > 0 {
+		if kk, ok := ModelNamespaces[up[:i]]; ok && kk == k {
+			return up
+		}
+	}
+	return k.String() + "/" + up
+}
+
+// SplitModelID 把客户端模型 ID 解析为 (渠道, 上游模型名)。
+// 两种形态均接受，第二个返回值恒为「应该发给上游的模型名」：
+//
+//	① `cline-free/mimo-v2.6-flash`      → (cline, 整串)            ← 上游命名空间直通（R59）
+//	② `cline/cline-free/mimo-v2.6-flash` → (cline, 去掉 cline/ 后的串) ← 旧写法兼容
+//	③ `workbuddy/glm-5.2`               → (workbuddy, glm-5.2)
+//
+// 无 `/`、或首段空、或尾段空的串一律返回 ok=false（由调用方报错）。
+func SplitModelID(model string) (Kind, string, bool) {
+	m := strings.TrimSpace(model)
+	i := strings.IndexByte(m, '/')
+	if i <= 0 || i == len(m)-1 {
+		return "", "", false
+	}
+	if k, ok := ModelNamespaces[m[:i]]; ok {
+		return k, m, true // 上游命名空间：整串就是上游模型名
+	}
+	return Kind(m[:i]), m[i+1:], true
+}
+
+// UpstreamModelOf 把客户端模型 ID 归一为**发给上游的模型名**（账务/统计用：新旧写法必须落同一行）。
+// 无前缀的裸名原样返回（compat 层按 default_channel/model_map 映射，此处不做猜测）。
+func UpstreamModelOf(model string) string {
+	if _, up, ok := SplitModelID(model); ok {
+		return up
+	}
+	return strings.TrimSpace(model)
+}
+
+// CanonicalModelID 把客户端模型 ID 归一为**规范对外 ID**：同一模型的新旧两种写法归一到同一串。
+// 例：`cline-free/x` 与 `cline/cline-free/x` 均 → `cline-free/x`；`workbuddy/glm-5.2` 不变。
+// 用于运行统计/日志归行（同一个模型不能因客户端写法不同而在榜单上裂成两行）；裸名原样返回。
+func CanonicalModelID(model string) string {
+	if k, up, ok := SplitModelID(model); ok {
+		return PublicModelID(k, up)
+	}
+	return strings.TrimSpace(model)
+}
+
+// ModelIDPrefix 返回该渠道对外模型 ID 的**首选前缀**（compat 层的 default_channel 兜底拼接用）：
+// 上游命名空间渠道（cline）返回命名空间（`cline-free`），其余返回 kind 本身。
+func ModelIDPrefix(k Kind) string {
+	if ns, ok := kindNamespace[k]; ok {
+		return ns
+	}
+	return k.String()
+}
+
+// kindNamespace 是 ModelNamespaces 的反查表（包初始化时构建，避免地图遍历序不确定）。
+var kindNamespace = func() map[Kind]string {
+	m := make(map[Kind]string, len(ModelNamespaces))
+	for ns, k := range ModelNamespaces {
+		if _, dup := m[k]; !dup {
+			m[k] = ns
+		}
+	}
+	return m
+}()
 
 // ErrKind 错误分类，驱动 pool 冷却状态机。
 // 只存在于运行时：state.json 落盘的是冷却原因文案（pool.Cool*）而不是 ErrKind 数值，
@@ -94,6 +197,19 @@ func (k ErrKind) String() string {
 		return "passthrough"
 	default:
 		return "none"
+	}
+}
+
+// Rotatable 报告该错误是否应换下一个账号重试本请求（账号级错误）。
+// 账号有问题的（限流/欠费/登录态死/偶发 404/上游 5xx/账号故障）：换号有价值；
+// 请求内容有问题的（内容拦截/上下文超限/模型不存在）：换号必然复现，透传原文结束；
+// ErrClient（其他 4xx 业务错误）默认可换一次——部分渠道业务错误挂在账号权益上。
+func (k ErrKind) Rotatable() bool {
+	switch k {
+	case ErrSoftRate, ErrHardCredit, ErrSessionDead, ErrNotFound, ErrServer, ErrAccountFault, ErrClient:
+		return true
+	default:
+		return false
 	}
 }
 
@@ -206,6 +322,16 @@ type ModelInfo struct {
 	// 前者是上游允许选的全部档位（Qoder 的 context_config）。
 	// 空表示上游未声明可选档位。
 	ContextOptions []int64
+	// HandMeasured 标记 ContextWindow/能力字段是**本工具手工实测**得出的（非上游下发、
+	// 也非拍脑袋估算）。首例：cline 的 `measuredCaps` —— 上游 recommended-models
+	// 完全不返回上下文/能力字段，只能逐个实测（三暗号回忆验证排除静默截断）。
+	//
+	// 与 ContextFromAPI 的关系：两者互斥，同置时以 ContextFromAPI 为准。
+	// 为什么单独一个标志而不是直接置 ContextFromAPI=true：口径不同——
+	// 实测值不是「上游声明」，面板展示时必须能如实标注来源（否则就是把实测
+	// 冒充成官方值，违反 R46/issue #40 的「不把缺失信息当成确定结论」原则）。
+	// 消费方约定：has_context = ContextFromAPI || HandMeasured。
+	HandMeasured bool
 	// 以下能力字段均为「已确认为 true」才置 true；数据缺失时保持 false（未知）。
 	// 未知与「明确不支持」在语义上不同，但对消费方（/v1/models 声明、UI 图标）
 	// 的处理一致：不声明该能力。需要区分时由各渠道自行记录来源。
@@ -221,6 +347,16 @@ type ModelInfo struct {
 	// thinking_config.disabled 节点）。false 表示未知或不可关闭：
 	// 投影时「客户端要求关闭」不能当成可满足的请求（见 internal/qoder）。
 	ReasoningCanDisable bool
+	// 思考档位（issue #96）：上游目录显式声明的可选档位表。nil = 上游未声明，
+	// 消费方不得自行编造（对齐 ContextFromAPI 哲学；参考 Buddy2api v2.1.11 的
+	// 「never invent effort lists」原则）。典型值 low/medium/high/xhigh/max。
+	ReasoningEfforts []string
+	// DefaultReasoningEffort 上游声明的默认档位；空 = 未声明。
+	DefaultReasoningEffort string
+	// CanDisableThinking 该模型思考是否可关闭；nil = 上游未声明。
+	// 上游只对显式 true 语义不同（false 可能是「不可关闭」也可能是「未声明」，
+	// 由各渠道解析时保留原始三态）。
+	CanDisableThinking *bool
 }
 
 // InputModalities 按 OpenAI 生态惯例给出输入模态列表（OpenRouter/llama.cpp 的
@@ -238,6 +374,24 @@ func (m ModelInfo) Modality() string {
 		return "text+image->text"
 	}
 	return "text->text"
+}
+
+// CleanEfforts 规范化上游声明档位表：去空白、去重、丢空串；全部无效时返回 nil
+// （「上游没给合法列表就不编档」，Buddy2api model_reasoning.py 同款语义）。
+func CleanEfforts(raw []string) []string {
+	out := make([]string, 0, len(raw))
+	seen := make(map[string]bool, len(raw))
+	for _, s := range raw {
+		if s = strings.TrimSpace(s); s == "" || seen[s] {
+			continue
+		}
+		seen[s] = true
+		out = append(out, s)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 // ModelPricing 模型积分定价（从上游 API 拉取）。

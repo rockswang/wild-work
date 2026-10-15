@@ -364,6 +364,35 @@ func TestModelResolution(t *testing.T) {
 	}
 }
 
+// Cline 的对外模型 ID 直接用上游命名空间（决议 R59）：
+//   - 已经是完整上游 ID（cline-free/*）⇒ 路由层原样放行（不把它当未知渠道名而报错）；
+//   - 旧的双层写法（cline/cline-free/*）⇒ 仍然放行（老配置兼容）；
+//   - default_channel=cline 且客户端发裸名 ⇒ 拼命名空间前缀（而非 cline/），
+//     否则裸名会被拼成 cline/<name>，而 cline 上游只认 cline-free/<name>。
+func TestModelResolutionClineNamespace(t *testing.T) {
+	rt := Router{Default: "cline", Channels: []string{"cline"}}
+	cases := []struct{ in, want string }{
+		{"cline-free/mimo-v2.6-flash", "cline-free/mimo-v2.6-flash"},
+		{"cline/cline-free/mimo-v2.6-flash", "cline/cline-free/mimo-v2.6-flash"},
+		{"mimo-v2.6-flash", "cline-free/mimo-v2.6-flash"},
+	}
+	for _, c := range cases {
+		got, err := rt.Resolve(c.in)
+		if err != nil || got != c.want {
+			t.Errorf("Resolve(%q) = %q, %v; want %q", c.in, got, err, c.want)
+		}
+	}
+	// 上游命名空间前缀不是渠道名：不应出现在报错的「已知渠道」里误导用户，但必须放行
+	if _, err := rt.Resolve("cline-free/x"); err != nil {
+		t.Errorf("上游命名空间前缀应放行：%v", err)
+	}
+	// model_map 目标同样接受上游命名空间（用户可从面板复制新形态的 ID 填进去）
+	rt2 := Router{Map: map[string]string{"claude-*": "cline-free/mimo-v2.6-flash"}, Channels: []string{"workbuddy", "cline"}}
+	if got, err := rt2.Resolve("claude-sonnet-4"); err != nil || got != "cline-free/mimo-v2.6-flash" {
+		t.Errorf("model_map 目标应接受上游命名空间：%q, %v", got, err)
+	}
+}
+
 // TestResponsesRejectsPreviousResponseID 无状态实现必须明确拒绝 previous_response_id。
 func TestResponsesRejectsPreviousResponseID(t *testing.T) {
 	_, mux := newTestGateway(&scriptedHandler{})

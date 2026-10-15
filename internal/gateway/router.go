@@ -10,6 +10,8 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+
+	"wild-work/internal/provider"
 )
 
 // Router 模型名解析规则。零值 Router 仅接受带前缀的模型名。
@@ -26,13 +28,13 @@ func (rt *Router) Resolve(model string) (string, error) {
 		return "", fmt.Errorf("model is required")
 	}
 
-	// 已带前缀：前缀必须是已知渠道
+	// 已带前缀：前缀必须已知（渠道名，或上游命名空间如 cline-free）
 	if i := strings.Index(m, "/"); i > 0 {
 		prefix, rest := m[:i], m[i+1:]
 		if rest == "" {
 			return "", fmt.Errorf("model %q has empty name after channel prefix", m)
 		}
-		if rt.isChannel(prefix) {
+		if rt.isChannel(prefix) || isNamespace(prefix) {
 			return m, nil
 		}
 		return "", fmt.Errorf("unknown channel %q in model %q; known channels: %s",
@@ -48,26 +50,34 @@ func (rt *Router) Resolve(model string) (string, error) {
 		return rt.resolveMapped(m, strings.TrimSpace(rt.Map[wildcard]))
 	}
 
-	// 兜底渠道
+	// 兜底渠道：前缀取该渠道对外 ID 前缀（上游命名空间渠道用命名空间，如 cline-free，
+	// 否则裸名会被拼成 cline/<name> —— cline 上游只认 cline-free/<name>，见 R59）。
 	if rt.Default != "" {
-		return rt.Default + "/" + m, nil
+		return provider.ModelIDPrefix(provider.Kind(rt.Default)) + "/" + m, nil
 	}
 	return "", fmt.Errorf("model %q needs an explicit channel prefix (e.g. %s/%s); "+
 		"or set compat.default_channel / compat.model_map in config.json",
 		m, firstOr(rt.Channels, "workbuddy"), m)
 }
 
-// resolveMapped 校验映射目标：必须带已知渠道前缀，否则视为配置错误。
+// resolveMapped 校验映射目标：必须带已知渠道前缀或上游命名空间前缀，否则视为配置错误。
 func (rt *Router) resolveMapped(orig, target string) (string, error) {
 	i := strings.Index(target, "/")
 	if i <= 0 || strings.TrimSpace(target[i+1:]) == "" {
 		return "", fmt.Errorf("compat.model_map[%q] = %q 必须是 \"channel/model\" 形式", orig, target)
 	}
-	if prefix := target[:i]; !rt.isChannel(prefix) {
+	if prefix := target[:i]; !rt.isChannel(prefix) && !isNamespace(prefix) {
 		return "", fmt.Errorf("compat.model_map[%q] = %q 的渠道 %q 未知；已知渠道: %s",
 			orig, target, prefix, strings.Join(rt.Channels, ", "))
 	}
 	return target, nil
+}
+
+// isNamespace 报告 prefix 是否是某个渠道的上游 ID 命名空间（如 cline 的 cline-free）。
+// 这类 ID 已经是完整的上游模型名，路由层原样放行，由内层 handler 解析渠道（见 R59）。
+func isNamespace(prefix string) bool {
+	_, ok := provider.ModelNamespaces[prefix]
+	return ok
 }
 
 // longestWildcardKey 返回最长的匹配通配 key（无则空串）。

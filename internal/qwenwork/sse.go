@@ -9,15 +9,27 @@ package qwenwork
 import (
 	"bufio"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"strings"
 	"time"
 
+	"wild-work/internal/loopguard"
 	"wild-work/internal/provider"
 )
+
+// sseError 流内业务错误（envelope 内嵌 HTTP 状态码）。实现 provider.StreamErrorClassifier，
+// 使 handler 的流内/聚合错误分类分支能够识别（如 402 权益不足 → 模型级冷却 → 降级链顶替），
+// 而不是当作裸错误放行。文案保持「upstream <status>: <msg>」原样（客户端可见错误与日志沿用）。
+type sseError struct {
+	status int
+	msg    string
+}
+
+func (e *sseError) Error() string          { return fmt.Sprintf("upstream %d: %s", e.status, e.msg) }
+func (e *sseError) Kind() provider.ErrKind { return Classify(e.status, e.msg) }
 
 // envelope SSE 外层信封。
 type envelope struct {
@@ -104,7 +116,7 @@ func parseNestedSSE(r io.Reader, onChunk func(map[string]any) error, truncated *
 			outerOK := json.Unmarshal([]byte(payload), &env) == nil
 			if outerOK && env.StatusCodeValue != 0 {
 				if msg := env.errText(); msg != "" {
-					return fmt.Errorf("upstream %d: %s", env.StatusCodeValue, msg)
+					return &sseError{status: env.StatusCodeValue, msg: msg}
 				}
 			}
 			if outerOK {
@@ -289,7 +301,29 @@ func sortInts(a []int) {
 func streamAsOpenAI(w io.Writer, r io.Reader, model string, flush func()) (map[string]any, error) {
 	var usage map[string]any
 	truncated := false
+	// 思考链死循环守卫：仅在全局启用时创建。命中即中断、不罚账号。
+	var guard *loopguard.Guard
+	if loopguard.Enabled() {
+		guard = loopguard.NewDefault()
+	}
 	err := parseNestedSSE(r, func(chunk map[string]any) error {
+		// 思考链死循环守卫：只在 reasoning_content 非空时喂入（无思维链的模型/配置
+		// 不经过守卫，零开销零误伤）。命中即中断。
+		if guard != nil {
+			if rc := loopguard.ReasoningDeltaOf(chunk); rc != "" {
+				if hit := guard.Push(rc); hit != nil {
+					gerr := &loopguard.Error{Hit: *hit}
+					if _, werr := io.WriteString(w, "data: "+loopguard.ErrorFrameJSON(hit)+"\n\n"); werr != nil {
+						log.Printf("qwenwork reasoning loop error frame write failed: %v", werr)
+						return gerr
+					}
+					if flush != nil {
+						flush()
+					}
+					return gerr
+				}
+			}
+		}
 		// usage 捕获：末帧覆盖前面（OpenAI 语义末帧才是全量），并照常透传
 		if u, ok := chunk["usage"].(map[string]any); ok && len(u) > 0 {
 			usage = u
@@ -306,12 +340,19 @@ func streamAsOpenAI(w io.Writer, r io.Reader, model string, flush func()) (map[s
 	}, &truncated)
 	// 截断优先于 err：读错误（连接中断/超时）本身就体现为 err != nil，必须先把
 	// 已透传的半截流的收尾处理掉（发 error 帧、不补 [DONE]），再报错给调用方。
+	//
+	// 出口帧与错误文本都**保留原始原因**（R58）：此前无论什么原因都只报固定串
+	// "upstream stream truncated"，err 被丢弃 ⇒ 生产上分不清「空闲看门狗掐的」
+	// （连续无字节，疑似上游排队/卡死）与「上游主动断连 / 读到半个帧」。
+	// 空闲超时另给 code=upstream_timeout，其余仍为 upstream_truncated。
 	if truncated {
-		provider.WriteTruncationFrames(w, err)
+		if werr := provider.WriteTruncationFrame(w, err); werr != nil {
+			return usage, werr
+		}
 		if flush != nil {
 			flush()
 		}
-		return usage, errors.New("upstream stream truncated")
+		return usage, provider.TruncationError(err)
 	}
 	if err != nil {
 		return usage, err

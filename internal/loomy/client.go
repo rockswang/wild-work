@@ -33,7 +33,7 @@ type Client struct {
 	// 客户端表现为「突然无响应」。空闲兜底改由 IdleReader 承担。
 	StreamHTTP *http.Client
 	// IdleTimeout 流式空闲超时：连续该时长读不到任何字节即判上游卡死。
-	// 0 = 用 DefaultIdleTimeout。由 main 装配时注入 config.upstream.stream_idle_seconds。
+	// 0 = 用 DefaultIdleTimeout。⚠️ 目前**没有配置项**（main 不注入），实际恒为默认值。
 	IdleTimeout time.Duration
 
 	// liveMu 保护 liveIDs（动态目录缓存）——与 raccoon 同款缺陷的修复：
@@ -403,17 +403,19 @@ func (c *Client) FetchModels(a *auth.Auth) ([]provider.ModelInfo, error) {
 			name = id
 		}
 		info := provider.ModelInfo{
-			ID:                  id,
-			Name:                name,
-			ContextWindow:       m.ContextLength,
-			MaxTokens:           m.MaxOutputTokens,
-			ContextFromAPI:      m.ContextLength > 0,
-			SupportsImages:      m.Capabilities.Vision,
-			SupportsReasoning:   m.Capabilities.Reasoning,
-			SupportsTools:       m.Capabilities.FunctionCalling,
-			SupportedEfforts:    append([]string{}, m.ReasoningEfforts...),
-			DefaultEffort:       strings.TrimSpace(m.DefaultReasoningEffort),
-			ReasoningCanDisable: false, // 实测该系列"强制思考"，最低档仍会产生思考
+			ID:                     id,
+			Name:                   name,
+			ContextWindow:          m.ContextLength,
+			MaxTokens:              m.MaxOutputTokens,
+			ContextFromAPI:         m.ContextLength > 0,
+			SupportsImages:         m.Capabilities.Vision,
+			SupportsReasoning:      m.Capabilities.Reasoning,
+			SupportsTools:          m.Capabilities.FunctionCalling,
+			SupportedEfforts:       append([]string{}, m.ReasoningEfforts...),
+			ReasoningEfforts:       provider.CleanEfforts(m.ReasoningEfforts),
+			DefaultEffort:          strings.TrimSpace(m.DefaultReasoningEffort),
+			DefaultReasoningEffort: strings.TrimSpace(m.DefaultReasoningEffort),
+			ReasoningCanDisable:    false, // 实测该系列"强制思考"，最低档仍会产生思考
 		}
 		out = append(out, info)
 	}

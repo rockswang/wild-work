@@ -213,7 +213,10 @@ func (c *Client) FetchModels(a *auth.Auth) ([]provider.ModelInfo, error) {
 	return toModelInfos(dyn), nil
 }
 
-// toModelInfos 动态表 → provider.ModelInfo（含 context_config 解析与 max_output 推导）。
+// toModelInfos 动态表 → provider.ModelInfo（含 context_config 解析）。
+// 旧注释声称的「max_output 推导」系遗留失实：上游模型接口从不下发输出上限字段
+// （2026-10-13 COSY 实测 9 场景全部条目仅有 max_input_tokens，无任何 max_output 类键），
+// 故 MaxTokens 恒为 0——这是「不编造」原则下的正确行为，非缺陷。
 func toModelInfos(dyn []ModelEntry) []provider.ModelInfo {
 	mm := make(map[string]string, len(dyn))
 	out := make([]provider.ModelInfo, 0, len(dyn))
@@ -236,7 +239,9 @@ func toModelInfos(dyn []ModelEntry) []provider.ModelInfo {
 		// 的 RealmQoderCOM 面（见 server.publishEffortCaps），与 Qoder / QoderCN 互不干扰。
 		caps := reasoning.ParseThinkingConfig(m.ThinkingConfig)
 		if len(caps.Efforts) > 0 {
+			mi.ReasoningEfforts = provider.CleanEfforts(caps.Efforts)
 			mi.SupportedEfforts = caps.Efforts
+			mi.DefaultReasoningEffort = caps.DefaultEffort
 			mi.DefaultEffort = caps.DefaultEffort
 		}
 		mi.ReasoningCanDisable = caps.SupportsDisable

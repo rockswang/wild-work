@@ -273,7 +273,9 @@ func (c *Client) FetchModels(a *auth.Auth) ([]provider.ModelInfo, error) {
 		// 档位能力只在上游明确声明时透出：本地不猜 Qoder 的 ladder
 		// （各模型 ladder 不同，猜错会发非法档位）。
 		if len(caps.Efforts) > 0 {
+			mi.ReasoningEfforts = provider.CleanEfforts(caps.Efforts)
 			mi.SupportedEfforts = caps.Efforts
+			mi.DefaultReasoningEffort = caps.DefaultEffort
 			mi.DefaultEffort = caps.DefaultEffort
 		}
 		mi.ReasoningCanDisable = caps.SupportsDisable

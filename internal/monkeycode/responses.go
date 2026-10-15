@@ -327,6 +327,9 @@ type responsesStreamReader struct {
 
 	inTokens  int64
 	outTokens int64
+	// 缓存命中（同 sse.go 的 anthropicStreamReader，见 cacheusage.go）。
+	cachedTokens  int64
+	cacheReported bool
 
 	finished bool
 	done     bool
@@ -528,6 +531,7 @@ func (s *responsesStreamReader) captureUsage(resp map[string]any) {
 	}
 	s.inTokens += intField(u, "input_tokens")
 	s.outTokens += intField(u, "output_tokens")
+	s.captureCached(u)
 }
 
 // finishReason 由 Responses 的 status / incomplete_details 推 OpenAI finish_reason。
@@ -665,9 +669,10 @@ func (s *responsesStreamReader) finish(reason string) []byte {
 			"finish_reason": reason,
 		}},
 		"usage": map[string]any{
-			"prompt_tokens":     s.inTokens,
-			"completion_tokens": s.outTokens,
-			"total_tokens":      s.inTokens + s.outTokens,
+			"prompt_tokens":         s.inTokens,
+			"completion_tokens":     s.outTokens,
+			"total_tokens":          s.inTokens + s.outTokens,
+			"prompt_tokens_details": s.cacheDetails(),
 		},
 	}
 	out := s.encode(frame)

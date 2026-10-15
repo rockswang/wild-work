@@ -1293,6 +1293,15 @@ WorkBuddy 每日签到包落在「明日到期」的资源 key 上且提前一�
 
 ---
 
+### UI 打磨（PR #121，R66 延续）
+
+- **上下文/输出支持 k、M 单位**：配置可写 `"1M"`、`"64k"`、`128k` 或纯数字，面板表格按 `1M`/`64k` 展示。
+- **补齐「工具」能力**：模型可声明 `supports_tools`（缺省 = 支持），`/v1/models` 如实下发。
+- **紧凑单行布局**：模型表格固定列宽对齐、➕ 图标按钮、任一输入框回车即可添加。
+- **合并期修复三条**：① 字符串形态模型（`["m"]`，最常用简写）的 `SupportsTools` 原会落成 `false`，
+  `/v1/models` 静默不带 `supports_tools`；② 显式 `"supports_tools": false` 因 `bool`+`omitempty` 落盘即丢
+  （读回变 true）；③ 单位串写错（如 `"1OO"`）原先静默落 0，现改为报错指出渠道与字段。
+
 ## 🐛 修复清单（对照 issue）
 
 | Issue | 问题 | 状态 |
@@ -1416,3 +1425,597 @@ WorkBuddy 每日签到包落在「明日到期」的资源 key 上且提前一�
 | #88 | ledger 测试每月固定红 | ✅ 本版修复（社区 PR） |
 | #86 | CDP 挂死断言必然失败 | ✅ 本版修复（社区 PR） |
 | — | 小浣熊登录仅 Windows 可用、需装客户端、与客户端抢注册表 | ✅ 本版修复（登录改用网页版 CDP 捕获，跨平台） |
+---
+
+# wild-work v2.7.0 — Cline 免费模型渠道 + 模型思考档位透传 + 缓存利用率 + 面板易用性
+
+> 发布主题：**新增 Cline 渠道**（官方 `sk_` API Key 免费池，issue #62）、**模型思考档位透传**
+> （上游声明才展示，issue #96）、**Token 用量缓存利用率列**（区分「命中 0%」与「未知」）、
+> 以及**积分明细同源回写快照**、**空壳 assistant 消息修复**等一批修复与易用性改进，
+> 并完成**手机竖屏响应式 UI**。
+> 上次 tag v2.6.3 之后累积 19 个提交 + 3 个合并 PR（#92/#93/#94，来自
+> [@bertchiangchiang](https://github.com/bertchiangchiang) 与 [@xxhhlk](https://github.com/xxhhlk)）。
+
+---
+
+## 🆕 新渠道：Cline 免费池（`cline/*`，修复 #62）
+
+新增 **Cline 渠道**：粘贴官方 **API Key** 即用，无需在本机安装 Cline 客户端、零登录编排。
+
+- **凭据**：官方文档化的 `sk_` API Key（`app.cline.bot` → 注册账号 → `Account / API Keys` →
+  `Create API Key`）。Key 不过期、不轮换、不与浏览器/客户端互踢。一个 Cline 账号一把 Key。
+- **额度按账号计**：官方字段 `…UsageCostUSDPerUser`，同账号多把 Key 共享一份额度。面板会自动识别
+  同账号多把 Key 并告警。上游确无余额/额度端点（12 个候选实测全 404），故积分位显示「不适用」，
+  实际花费来自逐请求 `usage.cost`（入 ledger）。
+- **只调度免费模型**：绑死上游 `recommended-models` 的 `free[]` 数组原样透传（ID 保留 `cline-free/*`
+  别名不改写），本地不设任何静态表/假设。本地校验集 = 暴露集，冷启动放行。
+- **模型实测能力表**：上游 `free[]` 不返回上下文/能力字段，本渠道维护 `measuredCaps` 实测表——
+  上下文按实测向上取一档（mimo/muse/step-5 报 1M、solar 报 512K），图像能力实测标注，tool_calls 实测通过。
+- **关键实现约束**：出站必带非空 `X-CLIENT-TYPE` 头（缺失 ⇒ 全部免费模型 403 且不报错）；
+  发往上游的 body 强制 `stream:true`（否则非流式请求 502 并冷却整条渠道）；地区限制模型归
+  `ErrPassthrough` 不罚号；429 分两类处置（OpenRouter 共享出口上限不软化账号、账号级才冷却换号）；
+  `max_tokens` 缺省不传、<64 抬到 64、>200000 压到 200000。
+- 面板 Cline 添加弹层展示实测的免费模型上下文/能力表，并订正开卡路径话术（入口是
+  `Account / API Keys` 而非 Settings）。
+
+## 🧠 模型思考档位透传（issue #96）
+
+**只透传上游声明，绝不编造**：上游模型目录里声明了可调档位才展示，未声明时整个 reasoning 对象不出现。
+
+- `provider.ModelInfo` 新增 `ReasoningEfforts` / `DefaultReasoningEffort` / `CanDisableThinking`；
+  `/v1/models` 新加 `supports_reasoning` + `reasoning{supported_efforts,default_effort,can_disable_thinking}`，
+  `/api/fees` 新加 `reasoning_efforts` / `default_reasoning_effort`。
+- 接线渠道：WorkBuddyCN、WorkBuddyAI（国际版）、Loomy（上游 `reasoning_efforts` 权威）。
+  deepseek 系只有老式 `effort` 默认档时回退取它；mergeV3 非空者优先。
+- **清洗**：`provider.CleanEfforts` 去空白/去重/丢空串，全部无效归 nil（上游实测下发过
+  `"max","max",""` 这种脏列表）。
+- 面板费率表模型 ID 后的 `[low·high·max]` 紫色小字标 + 模型搜索框同款，tooltip 标注默认档；
+  客户端传 `reasoning_effort` 即可调档。
+- qoder 系 / qwenwork / glm / raccoon / oczen / cline / monkeycode 上游无档位声明，不参与。
+
+## 🗂 积分明细同源回写 pool 快照（R45，PR #94）
+
+面板「同屏两个数字对不上」——账号卡片/汇总条的积分与 hover 明细弹层的数字时不时的差一点。
+根因是**时差**：pool 快照只被「刷新事件」更新，明细是 hover 时的实时值，两者必然相差区间内消耗量。
+
+- `creditSnapshot` 取数成功即 `SetCreditDetail` + ledger 差分（`creditTotals` 与 `ResourceDetail` 共用，
+  删掉三处各自回写）；`/api/account/resource_detail` 新增 `expiring_remain`。
+- 前端 `showCreditDetail` 用响应回写卡片与汇总条，签到/刷新成功后清 `detailCache`。
+
+## 🧹 空壳 assistant 消息补 content（R48，PR #95）
+
+CodeBuddy 在「思考中途被打断」时会存下 `{"role":"assistant","reasoning":…}` 的空壳消息；
+留在历史里会让 traecode/SOLO 对**每一发**请求都回流内 `event:error` `4001 the param is invalid`
+（重启客户端也不恢复，只能新建会话）。本版：`normalizeToolTurnContent` 对 `assistant`/`tool` 一律补
+`content:""`（不再以 tool_calls 为前提），reasoning 字段保留不误删。
+
+## 📱 手机竖屏响应式 UI
+
+- 移动端竖屏响应式布局：账号卡片、费率表、渠道按钮等组件在窄屏下自动重排，不再溢出；
+  触控目标仅在粗指针设备放大（桌面鼠标不吃这套）。
+- 顶栏 `1fr` 下界解除（`minmax(0,1fr)`）、账号卡片允许收缩、费率表窄屏隐藏第 3/4 列、
+  运行统计宽表给横向滚动容器。
+- 积分明细浮窗改为**点击式**（X / Esc / 点外关闭），手机不再依赖 hover。
+- 渠道按钮 6 列两行 + 紧凑档字号（Cline 移到第一行末位、保留列配对）；修复顶栏 650–750px 溢出带。
+
+## 🛡 其它合并（PR #92 / #93 / #94）
+
+- **#92 stream passthrough single account**：单账号渠道流透传（stream passthrough）。
+- **#93 import macos**：macOS 客户端导入路径补全。
+- **#94 credit detail snapshot sync**：见上行「积分明细同源回写快照」。
+
+---
+
+## ✨ 新功能：「缓存利用率」列（原 v2.6.4 草稿内容）
+
+「用量与流水 → Token 用量」的模型表新增**缓存**列，并在汇总卡区新增**缓存利用率**卡片；
+「运行统计 → 模型消耗」表同步新增该列。数值口径为
+
+```
+缓存利用率 = 缓存命中 token ÷ 「上报了缓存字段」的请求的 prompt token   （加总口径）
+```
+
+**为什么是加总而不是逐请求平均**：逐请求平均会让「一个 100k prompt 命中 95%」与
+「十个 100 token 全部未命中」等权，与用户真正关心的「省了多少 token」不符。
+
+**哪些渠道有数**（2026-10-12 逐渠道实测，24 份真实上游快照）：
+
+| 状态 | 渠道 | 上游字段 |
+|---|---|---|
+| ✅ 有数 | WorkBuddyCN / WorkBuddyAI | `prompt_cache_hit_tokens`（实测命中 1218/1283 ≈ 94.9%） |
+| ✅ 有数 | TraeWork / TraeCode | `cache_read_input_tokens` |
+| ✅ 有数 | QoderCN / QoderCOM / 千问办公 / Cline / OpenCodeZen | `prompt_tokens_details.cached_tokens` |
+| ✅ 有数 | MonkeyCode | `input_tokens_details.cached_tokens`（本版修复：此前转换时被丢弃） |
+| ➖ 显示「—」 | 小浣熊 / 智谱清言 / Loomy | 上游不下发该维度 |
+
+## 🎯 不支持的渠道如何降级（本版的设计重点）
+
+**核心原则：把「命中率为零」与「不知道」严格区分开**——两者混同会误导用户去优化一个
+上游根本不回报的指标。实现上有两层：
+
+1. **取数层**（`internal/server/cacheusage.go`）把「字段存在但为 0」与「字段不存在」
+   判成两种结果。特别地，小浣熊下发的是**空对象** `prompt_tokens_details:{}`，
+   即「没这个维度」而非「命中 0」——若只判「有 details 对象就算上报」，面板会给它
+   恒显 0%。
+2. **展示层**（`app.js` 的 `cacheCell`）三态渲染：有上报样本 → 百分比（允许 0.00%，
+   那是真未命中）；无上报样本或字段整体缺失（老流水）→ **「—」**，且不带任何百分比。
+
+**统计本身完全降级**：未上报的请求**整条不进缓存列的分母**，不影响它原有的 token
+统计与流水。故新列对任何渠道都不会「显示错数」，最坏情况只是「—」。
+
+## 🔧 顺带修复
+
+- **MonkeyCode 缓存字段被丢弃**：本渠道是唯一「重建 usage」的渠道（只拼
+  prompt/completion/total），上游给的 `input_tokens_details.cached_tokens` 在网关内部
+  就没了。现已显式搬运并回填为 OpenAI 形状的 `prompt_tokens_details.cached_tokens`。
+- **Cline 非流式请求会冷却整条渠道**：本渠道把客户端 body 原样转发，客户端发
+  `stream:false` 时上游回非流式 JSON，而 handler 对上游响应一律按 SSE 解析 ⇒ 502
+  `upstream_parse` ⇒ 被当作账号连续错误冷却整条渠道约 60 秒。现已强制上游
+  `stream:true`（非流式客户端由本地 Aggregate 聚合，与 OpenCodeZen/MonkeyCode 同款）。
+
+## 🛠 开发期上游取证工具（devdump）
+
+新增 `internal/devdump`：把各渠道出站对话请求的**上游原始响应**落盘，供离线分析
+上游到底回了哪些 usage 字段。**两层开关确保发布版零开销**：整包被构建标签切成两半
+（无 `-tags devdump` 时退化为常量桩），且需同时设置环境变量 `WILDWORK_DUMP_DIR`
+才真正落盘。检验方式：发布版二进制里 `WILDWORK_DUMP_DIR` / `dumpTransport` 字符串计数为 0。
+
+```bash
+export WILDWORK_DUMP_DIR="$PWD/temp/dump"
+go build -tags devdump -o dist/wild-work-devdump.exe ./cmd/wild-work
+./dist/wild-work-devdump.exe --no-tray
+bash scripts/probe-dump.sh run && bash scripts/probe-dump.sh summarize
+```
+
+快照含 access token 等敏感头，仅限本机分析。
+
+## ⬆️ 升级说明
+
+- **无需迁移**：流水新增的 `cr`/`cr_cov` 字段均为 omitempty，未上报时不写出——
+  与旧版本产出的行**逐字节相同**，旧流水读出来即「未上报」，面板显示「—」。
+- **历史数据**：缓存列只统计升级后的新请求（老流水没有缓存字段，无数据可算）。
+
+---
+
+## 🐛 修复清单（对照 issue）
+
+| Issue/PR | 问题 | 状态 |
+|---|---|---|
+| #62 | 希望把 Cline 合入项目（新增渠道） | ✅ 本版新增（Cline 免费 API Key 池） |
+| #96 | 模型列表希望显示模型支持的思考等级 | ✅ 本版新增（思考档位透传） |
+| #94 | 明细与刷新路径不同源、面板同屏两个数字对不上 | ✅ 本版修复（积分明细回写快照） |
+| #95 | 空壳 assistant 消息致 traecode/SOLO 4001 | ✅ 本版修复（补 content:""） |
+| #92 | 单账号渠道流透传 | ✅ 本版合并（PR #92） |
+| #93 | macOS 客户端导入路径 | ✅ 本版合并（PR #93） |
+| — | Token 用量表缺缓存利用率维度、MonkeyCode 缓存字段被丢弃 | ✅ 本版修复（缓存列 + devdump 取证） |
+| — | Cline 非流式请求 502 冷却整条渠道 / 漏 X-CLIENT-TYPE / 地区限制误罚号 | ✅ 本版修复（forceStream + 头强制 + 分类豁免） |
+
+# wild-work v2.7.1 — 思考链死循环检测（防癫拦截）+ trae 系 usage 缓存修复 + 面板改进
+
+> 发布主题：**思考链死循环（发癫）检测**——deepseek v4.1 flash 等模型偶发思维链复读/空转，
+> 单块思考几十万字符、烧光额度。本版在抽象层**实时逐帧检测**推理增量，命中即中断 SSE、
+> 向客户端返回错误，由下游 AI 客户端（Claude Code / Codex 等）自行重试恢复。
+> 同时合入四个社区 PR：**OpenRouter 系思考字段归一化**（修 Cline 免费池思考被静默丢弃，
+> 兼修同渠道防癫守卫失效）、**面板四项易用性改进**（费率独立 tab / 用量平均速度列 /
+> 区间记忆 / 五卡同行）、**费率完整 ID 双层路径修复**（修 Cline 免费档复制出的 ID 不可用）、
+> 以及 **TDZ 回归修复**（修 PR #101 引入的面板空白），分别来自
+> [@jianzhangg](https://github.com/jianzhangg) 与 [@bertchiangchiang](https://github.com/bertchiangchiang)
+> （含 PR #105 统计重启缓存丢失修复）。
+>
+> 本版另有**两项自行修复**：**trae 系 usage 缓存字段归一化**（issue #104，
+> 修下游命中率恒 0%、费用高估约 50 倍）与**防癫检测误伤修复**（agent 在思维链里
+> 正常写代码被误杀）。
+>
+> ⚠️ 本版为**同版本重发**（v2.7.1），已知旧包不含后续修复。
+
+---
+
+## 🔧 已入库的社区 PR（来自 [@jianzhangg](https://github.com/jianzhangg) 与 [@bertchiangchiang](https://github.com/bertchiangchiang)）
+
+| PR | 内容 |
+| --- | --- |
+| #100 | **OpenRouter 系思考字段归一化**：Cline 免费池（`cline/*`，上游 Cline→OpenRouter→Meta）实测思考增量的字段名是 `delta.reasoning` / `delta.reasoning_details`，**不是**本仓库历史唯一形态 `delta.reasoning_content`。旧白名单只认后者 ⇒ 思考文本被**静默丢弃**（客户端看不到思考、`usage.reasoning_tokens` 却非零），且**同渠道防癫守卫永远喂不进**（判据只读 `reasoning_content`）——同一根因的两面。新增 `upstream.reasoningDeltaOf` 归一化到 `reasoning_content` 单字段（优先级 `reasoning_content` > `reasoning` > `reasoning_details`，`encrypted` 密文不取），接线流式逐帧 + 非流式聚合两路；`loopguard.ReasoningDeltaOf` 同步兼容三字段 |
+| #101 | **面板四项易用性改进**：① 模型列表和费率升为**第四个主 tab**（原独立区块移入）；② Token 用量表新增**平均速度**列（tok/s · TTFB，取自运行统计引擎同源数据）；③ 用量区间（今日/7日）**localStorage 记忆**，刷新不再重置；④ 用量汇总五卡片**同一行**显示 |
+| #102 | **费率完整模型 ID 一律补渠道前缀**：上游 ID 自带命名空间（如 Cline 免费档的 `cline-free/*`）时，旧逻辑把「ID 含 `/`」误当「已带渠道前缀」，复制出来的是 `cline-free/mimo-v2.6-flash`——服务端按第一个 `/` 拆渠道 ⇒ `provider "cline-free" is not configured`。改为**一律补前缀**（仅当已以渠道前缀开头时原样保留，防重复），与 `/v1/models` 口径对齐，得到可用双层路径 `cline/cline-free/*` |
+| #103 | **修 PR #101 引入的 TDZ 回归**：`usageDays` 用 `let` 声明在 `init()` 之后，而 `bindUsage()` 在 init 顶部引用它 ⇒ 暂时性死区抛 `ReferenceError`、整个 init 中断、账号/费率面板**全空白**。修法：变量声明块移到 `init()` 之前（IIFE 立即执行改普通赋值 + try/catch）；顺带把「今日/7日」高亮收敛到单一入口 `syncUsageRangeActive()`，消除初始化/点击/异步返回三处 toggle 竞态 |
+
+---
+
+## 🧠 思考链死循环检测（防癫拦截）
+
+新增 `internal/loopguard` 模块，算法移植自 [dsh-attention-health](https://github.com/donghangxunlang-cmd/dsh-attention-health)
+的 `lib/guard.js`（只取死循环检测，忽略健康评估/工作交接/会话日志）。
+
+- **四条判据**（阈值采用 DSH 在 79+ 真实会话上标定的值，宁可漏报不误杀）：
+  - 同行连续重复 ≥8 次（行长 ≥12 字符）；
+  - 短行高频交替：最近 60 个 ≤11 字符短行里同一短行 ≥30 次；
+  - 滑动窗口空转：最近 40 行不同行占比 ≤25%；
+  - 行内周期复读：周期 2–40 字符，重复 ≥16 次且累计 ≥160 字。
+- **防误杀护栏**：周期单元须含字母/汉字（纯符号分隔线、纯数字命令参数不算）、
+  十六进制字节周期豁免、代码围栏内豁免。
+- **全渠道覆盖**：WorkBuddy CN/AI、TraeWork/TraeCode（deepseek-v4.1-flash 所在）、
+  Qoder 系、千问办公、MonkeyCode、小浣熊、Loomy、OpenCodeZen、Cline。
+- **命中行为**：下发一帧 OpenAI 规范错误（`code=upstream_reasoning_loop`）、不补 `[DONE]`、
+  错误透传给客户端；**不罚账号**（死循环是模型级问题，换号必然复现，冷却只会误伤整条渠道）。
+- **零误伤兼容**：只在 `reasoning_content` 非空时喂入，无思维链的模型/配置不经过守卫。
+- **配置开关**（默认开启）：`config.features.loop_guard` + 面板「设置 → 思考链防癫」开关
+  （热切换无需重启）+ 环境变量 `WILDWORK_LOOP_GUARD=0` 可关闭。
+
+> 注：本版未做实盘触发验证（死循环难以稳定复现），先行发版交由社区实测反馈，
+> 阈值/判据后续按反馈校准。
+
+---
+
+## 🐛 修复清单（对照 issue）
+
+| Issue/PR | 问题 | 状态 |
+|---|---|---|
+| — | 模型思维链死循环烧光额度，无拦截手段 | ✅ 本版新增（思考链防癫检测） |
+| PR #100 | Cline 免费池（OpenRouter 系）思考文本被静默丢弃，防癫守卫在该渠道完全失效 | ✅ 本版修复（思考字段归一化） |
+| PR #101 | 费率区块埋没在页面底部 / 用量表无速度列 / 区间刷新重置 / 五卡片换行 | ✅ 本版改进（独立 tab + 速度列 + 区间记忆 + 五卡同行） |
+| PR #102 | Cline 免费档复制出的完整模型 ID 缺渠道前缀，请求报 `provider "cline-free" is not configured` | ✅ 本版修复（完整 ID 一律补前缀） |
+| PR #103 | PR #101 引入 TDZ 致 init 中断，账号/费率面板全空白 | ✅ 本版修复（声明前移 + 高亮单一入口） |
+| PR #105 | 每次重启后运行统计「模型消耗」缓存列大面积回退成「—」 | ✅ 本版修复（缓存三项随 stats.json 持久化） |
+| — | PR #102 只修了费率表、漏了**模型查找面板**（同一 `raw.includes("/")` 误判，从搜索框复制的 cline ID 仍不可用） | ✅ 本版一并修复（两处口径统一 + 静态回归） |
+| #104 | trae 系（`traework/*`、`traecode/*`）usage 未归一化：缓存命中信息丢失，下游命中率恒 0%、费用高估约 50 倍 | ✅ 本版修复（内层补齐 OpenAI 形状 + 三接口取数收敛为唯一真源） |
+| — | 防癫检测误伤：agent 在思维链里正常写代码（60 行里 30+ 行 `}`）被 short-line-repeat 掐断 | ✅ 本版修复（围栏豁免扩展 + 结构行豁免） |
+
+---
+
+## 🔄 trae 系 usage 缓存字段归一化（issue #104）
+
+**现象**：经网关使用 `traework/*`、`traecode/*` 时，下游客户端**拿不到任何缓存命中信息**——
+命中率恒 0%、所有 prompt token 按「未缓存输入」计价（按常见价表 input 0.165 vs cacheRead 0.0033 计，**费用高估约 50 倍**），而 `workbuddy/*` 一切正常。
+
+**根因**：trae 上游的 token_usage 用 **Anthropic 命名**（`cache_read_input_tokens` /
+`cache_creation_input_tokens`），内层原样透传；下游按 OpenAI 规范解析
+（实测读法 `prompt_tokens_details?.cached_tokens ?? prompt_cache_hit_tokens ?? 0`）两条都命中不了。
+
+**修复**：在**内层补齐 OpenAI 形状**（而非让下游兼容 Anthropic——后者要改所有客户端）：
+
+- 新增 `provider.NormalizeUsageShape`：补 `prompt_tokens_details.cached_tokens` /
+  `cache_write_tokens`，**保留原始字段**（不破坏已有依赖）、**只在缺失时写入**、
+  **认「字段存在」而非「值 > 0」**（0 是「明确未命中」的有效值）。
+- 接线 traework 的**流式**（在 token_usage 捕获点，覆盖回调/返回值/异常收尾三条路径）
+  与**非流式**两个出口。
+- **取数收敛为唯一真源** `provider.ExtractUsageCache`：此前 `/v1/responses`、`/v1/messages`、
+  面板**各写一套优先级且已开始漂移**（转换器先读在 workbuddy 系恒 0 的噪声字段，
+  且用 `> 0` 判定会把「明确未命中」丢成「未提供」）。
+- **`/v1/messages`（Claude Code 路径）语义换算**：Anthropic 的 `input_tokens` 是
+  「未命中且未写入」的部分，客户端自行相加还原总输入；而内层 `prompt_tokens` 已是总输入。
+  故 `input_tokens = prompt_tokens − cached − write`——不下发缓存字段（费用高估）与
+  下发了却不减（客户端求和近两倍）都是错的。三段相加恒等于原 `prompt_tokens`。
+
+---
+
+## 🛡 防癫检测误伤修复（R50 修订）
+
+**现场**：agent 在思维链里正常生成 Go 代码，60 行里 30+ 行是 `}`，被短行高频判据
+误判为「空转」而掐断流。根因是 DSH 原实现为**思维链散文**标定，未预见「思维链里写代码」。
+
+**修复（两层）**：
+
+- **围栏豁免从 ④ 扩展到 ②③**：原实现只豁免行内判据，围栏内代码的 `}` 短行照样进
+  短行/唯一率窗口被误杀；现围栏内的行不进 ②③ 窗口（① 同行连续保持不豁免——
+  连续 8 行相同长行即使围栏内也几乎必是发癫）。
+- **结构行豁免**：兜住无围栏裸代码（DeepSeek 系思维链常不挂围栏、fence 状态机管不到）——
+  trim 后无字母/数字的行（`}` `{` `});`）与无空白/标点的连续词行（`break`/`return`）
+  不进 ②③ 窗口；发癫短句必含标点或空白（「做。」、`ok then.`）不受影响。
+
+已知残留风险：`else {` 这类带结构符号的关键字组合仍计窗（密度低，遇实锤再收）。
+
+---
+
+## 🙏 致谢
+
+本版含 4 个社区 PR（均已合入 master 并保留作者署名）：
+
+| 贡献者 | 内容 |
+|--------|------|
+| [@jianzhangg](https://github.com/jianzhangg) | #100 OpenRouter 系思考字段归一化、#101 面板四项易用性改进、#103 TDZ 回归修复、#105 统计缓存持久化修复 |
+| [@bertchiangchiang](https://github.com/bertchiangchiang) | #102 费率完整模型 ID 补渠道前缀（修 Cline 免费档路径） |
+
+以及算法来源：[dsh-attention-health](https://github.com/donghangxunlang-cmd/dsh-attention-health)
+（思考链死循环检测 `lib/guard.js`）。
+
+---
+
+# wild-work v2.7.2 — 模型降级链 + 备用上游通道 + Cline 模型 ID 简化 + oczen 403 修复与地域改道
+
+> 发布主题：**模型降级链**（主模型被上游按模型限流全池冷却时，按用户配置的有序备胎链自动顶上）、
+> **代理配置重构为「全局备用上游通道」**（默认不参与任何请求，仅渠道命中地区拒绝时同请求改道重发）、
+> **Cline 模型 ID 直通上游命名空间**（`cline/cline-free/x` → `cline-free/x`）、
+> 以及 **oczen 免费档 403 修复**（issue #111）与**其地域受限模型的自动改道**、**workbuddyai 6004 / 402 权益不足纳入降级触发**、
+> **traework/traecode 模型元数据补齐 + Kimi 系 tool schema `$ref` 消毒**、
+> **流截断原因可辨识**（区分空闲看门狗与上游断连）。
+>
+> 上次 tag v2.7.1 之后累积 32 个提交 + 8 个合并 PR（#106–#110、#112–#114，
+> 来自 [@bertchiangchiang](https://github.com/bertchiangchiang) 与 [@LFDCC](https://github.com/LFDCC)）。
+> 本版为**累积发布**：v2.7.1 之后的所有变更都在这里。
+
+---
+
+## 🔗 模型降级链（R54，PR #106 + #112）
+
+主模型被上游按模型限流、全池冷却时，此前只能 fail-fast 503 打断 agent 任务。本版支持预配有序备胎链。
+
+- **配置**：`config.model_fallback[]`，每条 `{from, to[]}`（`from` 全局唯一、不自环、`channel/model` 全路径）。
+  设置弹层可视化编辑（备胎以 chip 展示，可逐个删、回车追加、整条删除），保存即热生效
+  （`POST /api/config/model_fallback`），无需重启。
+- **触发判据**：**仅**「主模型在该渠道全部账号上处于模型级限流冷却」时查链
+  （`runtimeCapacity` 一次 `Pool.List()` 同时得出 hasHealthy 与 modelAvail，口径与
+  `no_healthy_account` 的「模型全冷」分支一致）。**未配置规则时零探测** —— 正常路由零开销。
+- **不粘滞**：每个请求都按原模型重新判定，上游解冻即自动切回（粘性是账号级 R29，降级是模型级且用户显式配置）。
+- **agent 可感知**（双保险）：① 响应头 `X-Model-Fallback: 请求模型 -> 备胎`；② chat 面响应体
+  `model` 字段写实际备胎全路径。兼容层（`/v1/responses`、`/v1/messages`）**统一转写**该头——
+  这两个端点响应体由网关重建且 `model` 回填请求名，不转写就等于对 Codex/Claude Code 静默换模型。
+- **运行统计**新增「降级记录」区块：降级/恢复事件流（内存环形 200 条、重启清零），空态常显。
+- **记账口径**：token 流水仍按客户端请求名（面向「这一发花多少」）；实际执行模型由日志行 +
+  面板「降级记录」承担。
+- **修复（PR #112）**：`server.Config.ModelFallbacks` 此前**从未被赋值**，降级链唯一生效通道是
+  面板保存的热更新 ⇒ **进程重启后已配置的降级链静默失效**，直到用户重新保存一次。已补启动装配。
+
+## 🔀 402 权益不足纳入降级触发（R60，PR #113）
+
+- **流内嵌 402 无法分类**：qwenwork 等渠道的 402 以 HTTP 200 + 流内 envelope 返回，
+  剥壳后以裸 `fmt.Errorf` 抛出 ⇒ handler 的 `errors.As` 全部错过。改为抛 `*sseError`
+  并实现 `provider.StreamErrorClassifier`（错误文案保持不变）。
+- **单号渠道 402 只透传不冷却**：账号本身健康，死的只是「账号×该模型」组合 ⇒ 不冷却则
+  每次请求继续撞 402、降级链永不触发。现改为**模型级冷却**（`CooldownModel`）：账号不动、
+  同号其他模型照常可用，下一次请求挑号即「模型全冷」自动走降级链。
+- 三处接线：预流式单账号分支、流内单号分支（去掉 `&& !SingleAccount` 限定）、`Aggregate` 出口。
+
+## 🌍 代理配置重构：全局备用上游通道（R57）
+
+旧「每渠道单独配代理」有三处实证缺陷：面板 12 行输入但热更新只覆盖 9 行（`monkeycode`/`raccoon`/`loomy`
+改代理不生效、需重启）、`trCodeUp`（TraeCode）**两张表都没进** ⇒ 该渠道代理从未生效；
+每次保存都新建 Transport（杀光 idle 连接）；对用户是 12 个概念，实际只需要一个。
+
+- **新语义**：`config.backup_proxy` **单一地址**（http/https/socks5）= **备用链路**，由
+  `internal/backuplink` 原子持有。**不影响本工具的任何常规请求**（所有渠道一律直连）；
+  仅由渠道自行判定后按需取用（克隆该渠道自己的 Transport、只改出口 ⇒ 除 IP 外与出厂行为同构）。
+- **当前唯一取用方 Cline**：直连命中地区拒绝（403/451 + 保守文案表）⇒ **同一次请求内**重放同一 body。
+  未配置 / 重放失败 ⇒ **透传直连那份原始错误**（不拿第二次尝试的错误掩盖首因）；重放拿到不同答复则以它为准。
+- **学习**：命中一次后 6 小时内该模型直接走备用（免每发白撞一发 403）；改/清代理地址即作废。
+- **清理**：删 `config.proxies`、`applyProxies`/`SetTransportProxy`/`proxySyncer`、`POST /api/config/proxies`、
+  面板 12 行输入。旧 `proxies` 段在 normalize 一次性迁移（优先 cline 的值，其余渠道地址丢弃并日志点名）。
+- 新端点 `POST /api/config/proxy`（同时承载 OpenCodeZen key）。
+- **已知限制**：登录编排（`login_*`）、CDP、面板内凭证测试仍不吃备用通道（保持「只服务上游通信」的边界）。
+
+## 🧩 Cline 模型 ID 直通上游命名空间（R59）
+
+Cline 上游免费池的 ID 自带命名空间（`cline-free/*`），此前对外 ID 是双层路径 `cline/cline-free/*`。
+本版**直通上游**：`/v1/models` 与面板复制出的都是 `cline-free/step-5-preview` 这类形态。
+
+- **旧写法保留路由兼容**：`cline/cline-free/*` 仍可用（老配置的 `model_map`、降级链规则、
+  老客户端都是那种写法），两条路径经同一解析器（`provider.PublicModelID` / `SplitModelID`）。
+- **六处接线同源**：`/v1/models`、`runtimeForModel`（也是降级链的解析器）、网关 `Router.Resolve`
+  （含 `default_channel` 兜底拼接）、`app.buildFeesChannels` 新增 `id` 字段、`stats.channelOfModel`、
+  handler 统计归行（新旧写法必须落同一行）。
+- **顺带修既有 bug**：`stats.channelKind` 白名单漏 `cline` ⇒ 该渠道 token 从不进平台统计表。
+
+## 🔐 oczen 免费档 403 修复（issue #111）
+
+**现象**：OpenCodeZen 全部对话恒 403 `FreeTierError`（"free tier can only be used from within OpenCode"），
+填不填 key 都一样。
+
+- **根因**：免费档不仅校验会话头**外形** `ses_<12位小写hex><14位Base62>`，还会把 12 位 hex
+  时间戳段**解码**成官方客户端 `Identifier.descending()` 的值——`~(unix_ms<<12|counter)` 取低 48 位，
+  故末三位是 `0xFFF-counter`；实测只接受 **counter 1–63**（末三位 `0xFC0–0xFFF`），
+  超出即判非官方客户端 403。旧实现的时间戳段是 `sha256` 摘要前 6 字节（随机 hex），
+  落进被拒窗口 ⇒ **恒 403**。
+- **修法**：官方 descending 编码的 ID 原样保留，其余（摘要段 / 升序 ID）**确定性重编码**——
+  哈希前 6 字节按 descending 布局渲染、counter 取 1。确定性保证同一会话仍稳定映射同一 session
+  （prompt cache / key 亲和不断）。
+- 附新增 `-tags live` 实盘测试（`internal/oczen/live_test.go`）。
+
+## 🔁 oczen 地域受限模型自动改走备用通道（R62）
+
+**现象**：2.7.2 修复 oczen 免费档后，部分免费模型（`muse-spark-*-contributor-free` 实测）直连仍回
+403 `RegionError`（"This model is not available in your country"）。
+
+- **改道**：与 Cline 同款机制——直连命中地区限制时，在**同一次请求内**经「备用上游通道」换出口重放一次；
+  未配置备用代理则原样透传 403（不改成 503，不罚账号）。
+- **公共编排**：这条规则语义细（首因不被第二次尝试掩盖 / 备用自身不可用则本轮回落直连 /
+  只有拿到可用答复才记学习结果 / 学习结果随代理配置变更作废），故抽到
+  `internal/backuplink/route.go` 的 `Replay` + `Routes`，**Cline 与 oczen 共用一份实现**
+  （分头实现必然改一处漏一处，这是 R52 的教训）。渠道只提供「怎么发一发」与「什么算地区限制」。
+- **oczen 判据宁窄勿宽**（命中会多发一发经第三方出口的请求）：仅 403/451 +
+  `RegionError`/region 文案才算；`FreeTierError`、429、5xx 一律不重放。
+- **不涉及账号**：备用通道只换出口 IP，`SingleAccount` 豁免语义不变（不变量 22），
+  改道发生在渠道内部，成功时上层完全看不到 403。
+- **如实披露的限制**：`muse-spark-*-contributor-free` 经该出口被上游判 400
+  `ModelProtocolUnsupported`（同一出口下 mimo / big-pickle / nemotron 均 200）。
+  本工具的职责是「换出口、把上游的权威答复原样交出」，**某模型在某个出口下能否用由上游决定**，
+  本工具不承诺。
+
+---
+
+## 🧠 workbuddyai 6004 归入软限流管线（PR #114）
+
+- 国际版 6004（`usage exceeds frequency limit ... switch to the other models`）此前归 `ErrPassthrough`
+  （纯透传）。该设计诞生时只有账号级冷却这一种手段，但 #82 的**模型级冷却**与 #106 的**降级链**
+  就位后，纯透传反而成了死角：**什么都不冷却 ⇒「模型全冷」判据永不成立 ⇒ 降级链永不触发**，
+  客户端只能对着重置时间干等。
+- 现改判 `ErrSoftRate`：handler 走 `CooldownModel`，**只冷却「账号×该模型」到响应体重置点**，
+  同号其他模型不受牵连；模型全冷时降级链自动顶替，重置后自动切回。本次请求仍原文透传。
+- 同时补 `softRateResetTs` 识别国际版英文形态「will reset at `<ts>` UTC+8,」——
+  冷却精确到真实重置点，而非回退固定 60s。
+
+## 🗂 traework / traecode 模型元数据 + tool schema 消毒（R55/R56，PR #108/#109）
+
+- **模型元数据补齐**（R55）：此前只解析 `config_name` + `display_name` ⇒ 两渠道 118 个模型
+  在 `/v1/models` 上**全无** `context_length` / `max_output_tokens`、图片能力恒 false。
+  现解析上游 `context_window_tokens.{dev,max}`、`display_config.multimodal`、
+  `model_detail_list[].max_tokens`（上下文取 max 档、缺省回 dev；0 不填）。
+  **容错承接**：容量字段用 `json.RawMessage`，上游形状突变（对象→标量）时只丢该字段，
+  不让整张目录解析失败（否则本渠道池整体拉不到）。
+- **tool schema `$ref` 全量内联消毒**（R56）：Kimi/Moonshot 系对 `tools.function.parameters`
+  里任何保留的 `$ref` 都报 400 `code=4027 detected infinite recursion`（官方客户端不发 `$ref`，
+  经 MCP 接入的代理客户端会发）。改为**全量内联**：所有本地 `$ref` 就地替换为目标消毒副本，
+  成环处截断为空 schema；支持 `parameters` 预序列化字符串形态。
+  **零改动原则**：无 `$ref` 的请求一个字节不动（回写 Marshal 结果会重排键序、改写数字字面量，
+  污染上游 prompt 缓存前缀）。
+
+## 🩺 流截断原因可辨识（R58）
+
+**现场**：`Qwen3.8-Flash (QoderCOM)` 输出一部分后客户端报 `upstream stream truncated`。
+
+- **诊断缺口**：qoder/qodercn/qodercom/qwenwork 四个渠道把「截断」布尔当唯一信息，
+  收尾写**固定串**并丢弃原始错误 ⇒ 三种完全不同的故障（空闲看门狗掐的 / 上游主动断连 /
+  读到半个帧）在日志与客户端**完全同形**。
+- **判据不可达**：`internal/idle` 看门狗唯一的动作是 cancel 请求 context，在途 Read 返回
+  `context canceled`（真实链路实测），而 `IsIdleTimeout` 只认 `ErrIdleTimeout` ⇒
+  看门狗掐断在语义上根本认不出来。
+- **修法**：`provider.IsIdleTimeout` 扩展识别看门狗族；新增 `TruncationCause/TruncationError/
+  TruncationCode/TruncationFrame/WriteTruncationFrame` 一族——错误文本保留原因、空闲超时统一
+  归一成 `upstream stream idle timeout`（不直写 `context canceled`，否则日志检索漏一半）、
+  出口帧 `code` 分流为 **`upstream_timeout`** / `upstream_truncated`。
+- **日志补强**：`stream relay end` 补 `model` / `elapsed` / `ttfb` ——
+  **耗时 ≈ 空闲阈值且 TTFB 远小于它 ⇒ 看门狗掐的；耗时远小于阈值 ⇒ 上游自己断的**。
+- **清理空头支票注释**：`config.Upstream` 只有 `timeout_seconds`、`main.go` 零处给 `IdleTimeout`
+  赋值 ⇒ cline/loomy/raccoon/monkeycode 注释里承诺的 `stream_idle_seconds` 配置项**从未存在**，
+  阈值恒为硬编码。已改成如实说明（不新增用户概念）。
+- **已知限制**：`elapsed` 含上游首字节等待时间；qoder 三渠道 Transport 未设 `ResponseHeaderTimeout`，
+  「排队」若发生在响应头之前则该阶段无上限，判据需结合 TTFB 一起看。空闲阈值仍不可配。
+
+## 🐛 修复清单
+
+| Issue/PR | 问题 | 状态 |
+|---|---|---|
+| — | 主模型被上游按模型限流全池冷却时只能 fail-fast 503，无自动顶替 | ✅ 本版新增（模型降级链） |
+| PR #112 | 进程重启后降级链静默失效（配置从未在启动时载入） | ✅ 本版修复（启动装配补 `ModelFallbacks`） |
+| PR #113 | 402 权益不足不进任何冷却/降级触发（流内 402 无法分类 + 单号渠道只透传） | ✅ 本版修复（分类化 + 模型级冷却） |
+| PR #114 | workbuddyai 6004 纯透传 ⇒「模型全冷」判据永不成立 ⇒ 降级链永不触发 | ✅ 本版修复（改判软限流 + 英文重置点解析） |
+| #111 | OpenCodeZen 全部对话恒 403 `FreeTierError`（会话头时间戳段非官方 descending 编码） | ✅ 本版修复（确定性重编码） |
+| — | 旧「每渠道代理」热更新覆盖不全（3 渠道改代理不生效、TraeCode 从未生效） | ✅ 本版重构（全局备用上游通道） |
+| — | Cline 对外模型 ID 是双层路径 `cline/cline-free/*`，反直觉 | ✅ 本版改为直通上游 ID（旧写法兼容） |
+| — | Cline 的 token 从不进运行统计平台表（`channelKind` 白名单漏 cline） | ✅ 本版修复 |
+| PR #108 | traework/traecode 118 个模型无上下文/输出上限、图片能力恒 false | ✅ 本版修复（解析上游元数据 + RawMessage 容错） |
+| PR #109 | Kimi/Moonshot 系 tool schema 含 `$ref` 即 400 `4027 infinite recursion` | ✅ 本版修复（`$ref` 全量内联消毒） |
+| — | 流被截断时三种原因在日志与客户端完全同形，无法定位 | ✅ 本版修复（原因自证 + 出口错误码分流 + 日志补 elapsed/ttfb） |
+| PR #107 | qoder 系「max_output 推导」与 monkeycode 容量来源两处注释失实 | ✅ 本版修正 |
+
+## 🙏 致谢
+
+本版含 8 个社区 PR（均已合入 master 并保留作者署名）：
+
+| 贡献者 | 内容 |
+|--------|------|
+| [@bertchiangchiang](https://github.com/bertchiangchiang) | #106 模型降级链、#107 模型元数据注释修正、#108 traework 元数据解析、#109 Kimi 系 `$ref` 消毒、#112 降级链启动载入、#113 402 纳入降级触发、#114 workbuddyai 6004 软限流 |
+| [@LFDCC](https://github.com/LFDCC) | #110 OpenCodeZen 免费档会话头 descending 编码（修 issue #111 的 403） |
+
+---
+
+# wild-work v2.7.3 — 自定义渠道接入 + 小浣熊签到 + 思考强度注入
+
+> 发布主题：**自定义 OpenAI 兼容渠道**（在面板直接接入任意第三方 OpenAI 兼容 API，
+> 用 `渠道标识/模型名` 统一访问并纳入用量流水与运行统计）、**小浣熊 setting_info 签到**
+> （触发每日积分的惰性落账，不用再手动开网页）、**思考强度档位注入**（客户端未传
+> `reasoning_effort` 时按面板配置的「模型 → 档位」映射注入，与 R49 互补），
+> 以及 **面板「测试」按钮与真实对话同源**（直连被地区拒时同样自动改走备用通道，并如实回传实际出口）。
+>
+> 本次为 v2.7.2 之后的小版本，含 **4 个社区 PR**（#118 [@ezjbc](https://github.com/ezjbc)；
+> #119/#120/#121 [@jianzhangg](https://github.com/jianzhangg)）。三个新渠道/能力 PR 的
+> 合并期共修 **9 条缺陷**（含一处会打死进程的并发 map 读写、一处设置弹层打不开的悬空 DOM 引用），
+> 详见下文各自章节。
+
+---
+
+## 🎚 思考强度档位注入（R63，PR #118）
+
+客户端**没传** `reasoning_effort` 时，可按面板配置的模型档位自动补上；客户端**显式传了**的
+（任意值，含 `null`）一律不覆盖。这是 R49「透出上游声明的档位」的互补能力：前者解决
+「告诉客户端有哪些档位」，本条解决「客户端没指定时用哪个」。
+
+- **配置**：`config.reasoning_efforts`（键 = `channel/model` 全路径，或 `*` 全局默认）。
+  设置弹层新增「思考强度」区：全局默认行 + 模型档位映射列表（可增删）+ 档位输入框
+  （建议 `none/low/medium/high/max`，也可自由输入）。保存走
+  `POST /api/config/reasoning_efforts`，**保存即热生效**（无需重启）。
+- **注入三态（哑管道）**：
+  1. 请求体顶层**已有** `reasoning_effort` 键 → 一律不碰；
+  2. 未带且**精确命中**模型 ID → 注入配置档位；
+  3. 精确未命中 → 回退 `*` 全局默认；两者皆无 → 不注入（由上游用模型默认档）。
+- **零配置零开销**：未配置映射时，注入路径首行即短路 —— 不发日志、不改 body。
+- **失败不中断**：注入失败（body 非 JSON 对象等）仅记日志，原 body 照发，绝不因此让请求失败。
+- **如实披露**：`none` 档在 WorkBuddy 上游疑似回落默认档（哑管道照实注入、不做纠正）；
+  **TraeWork 渠道协议无 reasoning 注入点，对该渠道配置的档位注入无害但无效**（面板提示已写明）。
+
+## 🔌 面板「测试」按钮与真实对话同源（R64，issue #117）
+
+用户反馈：配了备用代理，面板 OC Zen「测试」仍 403，代理日志零访问记录，上游看到的仍是真实地区。
+
+根因不是备用通道失效，而是**测试路径从未经过改道编排**——`TestKey` 原先直接走 `c.HTTP`
+直连，配了代理也不会改道；看到 403 时用户无从判断「代理没生效」还是「上游本来就不给这个出口用」。
+
+- **测试改走同一条编排**：`oczen.TestKey` 现与 `ChatStream` 共用 `backuplink.Replay`
+  （含地区限制学习路由），直连被地区拒时同请求内自动改走备用通道。
+- **如实回传实际出口**：`via_backup` 字段告诉面板答复来自「直连」还是「备用通道」，
+  面板提示相应展示；403 且走直连时给出可行动提示。
+- **日志不再误导**：单账号分支的错误日志补上上游原文 `body=`，文案改为说明**为何**不冷却
+  （无号可轮换），不再对与账号无关的 403（如免费档形态校验）断言「所以这不是账号问题」。
+
+## 📝 文档与决议整合
+
+- AGENTS.md 新增 **R63（思考强度注入）**、**R64（探针与真实请求同源）**，并补全
+  **R46（Cline 只认官方 `sk_` Key，不接受 WorkOS refreshToken 号池）** 的裁定说明。
+
+## 🐻 小浣熊签到（R65，PR #119）
+
+小浣熊**没有**独立的签到/领取端点，但每日 300 积分是**惰性**落账的：名义记账在当天 00:00，
+实际要等账号当天第一次访问**工作台业务接口**才入账（网页端文案「当天登录后有效期延长至 7 天」）。
+
+- **实质动作** = 调一次 `office/v3/setting_info`（网页端打开工作台首页时本来就会调的接口，
+  故 ≈ 替用户打开一次网页，不是跨端伪装）。实测接口矩阵：对话/只读余额/`auth/v1` 均**不触发**。
+- **结果判据**用 `point_grant_popups`（本次发放的直接回执）而非余额差分——同期可能有对话扣费抵消。
+  幂等已实测：重复调用不再发放，故非空 popups ⇔ 本次刚触发新发放。
+- **接线补齐**：`rcSch` 从「空签到时间」改为全局签到时间 + 补 `SetCheckinObserver`/`SetRefreshObserver`
+  （此前**从未设置**，不设则面板与运行统计都读不到结果，属 R34 家族的静默失效）；
+  手动签到按钮开放（`noExplicitCheckin` 移除 raccoon）、登录与导入两条路径都补首次签到。
+
+## 🔌 自定义 OpenAI 兼容渠道（R66，PR #120）
+
+可在面板直接接入任意第三方 OpenAI 兼容 API（官方 StepFun、本地 CLIProxy、DeepSeek 等），
+用 `渠道标识/模型名` 统一访问，并纳入用量流水与运行统计（含 TTFB、请求日志）。
+
+- **配置**：`config.custom_channels[]`（`name`/`base_url`/`api_key`/`models`/`enabled`），
+  设置弹层可视化增删改 + 连通性测试，保存即热生效（无需重启）。
+- **模型面不做假设**：用户配什么 `/v1/models` 就返回什么，**不向上游拉取、不推测**；
+  上下文/思考档位/多模态能力均由用户填写并如实透出。
+- 单账号 + `NoCooldownOnServerError`（R16/R24 哲学）；流式与非流式分流（R35）。
+
+**合并期修复的五条缺陷**（均有代码证据，非推断）：
+
+1. **`a.runtimes` 并发读写会在保存时打死进程**——本 PR 引入该表的**首个 post-init 写**，
+   而 9 处读点（含 30s 后台统计喂入与 `/api/state`）全程不加锁 ⇒ 与保存重叠即
+   `fatal error: concurrent map read and map write`（不可 recover）。已加 `runtimesMu` +
+   快照读，回归测试反向验证（去掉锁 5/5 崩溃）。
+2. **compat syncer 捕获启动快照会丢新渠道**——「先加自定义渠道、之后单独改模型映射并保存」
+   会把路由白名单重置回启动态，`/v1/responses` 与 `/v1/messages` 报 unknown channel。
+   已抽出可变共享态 `channelList`，两条 syncer 共读。
+3. **自定义渠道名可与内建同名**——会导致 server/app 两层指向不同 Runtime（面板操作打到自定义池、
+   对话走内建渠道）。已加 `provider.BuiltinKinds()` 校验，直接拒绝。
+4. **「费率表展示自定义渠道」原为假承诺**——费率表只遍历静态渠道表，自定义渠道永不出现。
+   已改为把未登记的渠道追加到末尾。
+5. **`/api/state` 明文回传上游 `api_key`**——已改为脱敏回显（保留 `…` 供识别「未改动」），
+   面板未改动时提交脱敏值 = 不修改（后端按渠道名找回真实密钥，避免把密钥覆盖成废值）。
+
+## 🐛 修复清单
+
+| Issue/PR | 问题 | 状态 |
+|---|---|---|
+| PR #118 | 客户端未传 `reasoning_effort` 时无法按面板配置注入档位 | ✅ 本版新增（思考强度注入） |
+| PR #119 | 小浣熊每日积分要手动开网页才到账 | ✅ 本版新增（setting_info 签到，R65） |
+| PR #120 | 无法接入第三方 OpenAI 兼容渠道 | ✅ 本版新增（自定义渠道，R66，合并期修 5 处缺陷） |
+| PR #121 | #120 的 UI 打磨未进 master | ✅ 本版新增（k/M 单位、工具能力、紧凑布局；合并期修 3 处缺陷） |
+| — | 合并 #120 后设置弹层打不开（悬空引用已废弃节点） | ✅ 本版修复（+ 通用悬空 DOM 引用静态检查） |
+| #117 | 配了备用代理，面板「测试」仍 403 且无从判断代理是否生效 | ✅ 本版修复（测试同源 + 出口回传 + 日志澄清） |
+| — | 单账号渠道错误日志写死「不罚账号」，掩盖真实原因 | ✅ 本版修复（补上游原文 + 说明为何不冷却） |
+| #98 | TraeWork 授权回调停在 `127.0.0.1:18080`，回面板无响应 | ⏸ 暂缓（登录编排层，另作评估） |
+
+## 🙏 致谢
+
+| 贡献者 | 内容 |
+|--------|------|
+| [@ezjbc](https://github.com/ezjbc) | #118 思考强度档位注入（含面板可视化编辑与热更新） |
+| [@jianzhangg](https://github.com/jianzhangg) | #119 小浣熊 setting_info 签到、#120 自定义 OpenAI 兼容渠道、#121 自定义渠道 UI 打磨 |

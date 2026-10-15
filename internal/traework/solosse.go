@@ -33,6 +33,7 @@ import (
 	"strings"
 	"time"
 
+	"wild-work/internal/loopguard"
 	"wild-work/internal/provider"
 )
 
@@ -239,6 +240,11 @@ func AggregateWithModel(r io.Reader, model string) (map[string]any, error) {
 		},
 	}
 	if usage != nil {
+		// 缓存计量归一化（issue #104）：trae 上游下发的是 Anthropic 字段名
+		// （cache_read_input_tokens / cache_creation_input_tokens），下游按 OpenAI 规范
+		// 解析（prompt_tokens_details.cached_tokens ?? prompt_cache_hit_tokens）两条都读不到
+		// ⇒ 命中率恒 0%、费用高估。此处补 OpenAI 形状子字段，原始字段保留。
+		provider.NormalizeUsageShape(usage)
 		resp["usage"] = usage
 	}
 	return resp, nil
@@ -357,6 +363,11 @@ func streamOpts(w http.ResponseWriter, r io.Reader, onErr func(*SOLOStreamError)
 	var pendingUsage map[string]any
 	sawDone := false
 	st := &sseState{}
+	// 思考链死循环守卫（发癫检测）：仅在全局启用时创建。命中即中断、不罚账号。
+	var guard *loopguard.Guard
+	if loopguard.Enabled() {
+		guard = loopguard.NewDefault()
+	}
 	writeChunk := func(delta map[string]any, finish string) error {
 		chunk := map[string]any{
 			"id":      id,
@@ -409,6 +420,20 @@ func streamOpts(w http.ResponseWriter, r io.Reader, onErr func(*SOLOStreamError)
 		if ev := scanLine(st, strings.TrimRight(line, "\r\n")); ev != nil {
 			switch ev.Event {
 			case "output":
+				// 思考链死循环守卫：只在 reasoning_content 非空时喂入（无思维链的
+				// 模型/配置不经过守卫，零开销零误伤）。命中即中断、不罚账号。
+				if guard != nil && ev.Reasoning != "" {
+					if hit := guard.Push(ev.Reasoning); hit != nil {
+						gerr := &loopguard.Error{Hit: *hit}
+						frame := "data: " + loopguard.ErrorFrameJSON(hit) + "\n\n"
+						if _, werr := io.WriteString(w, frame); werr != nil {
+							log.Printf("traework reasoning loop error frame write failed: %v", werr)
+						} else if fl != nil {
+							fl.Flush()
+						}
+						return usage, gerr
+					}
+				}
 				delta := map[string]any{}
 				if ev.Response != "" {
 					delta["content"] = ev.Response
@@ -440,6 +465,12 @@ func streamOpts(w http.ResponseWriter, r io.Reader, onErr func(*SOLOStreamError)
 					}
 				}
 			case "token_usage":
+				// 缓存计量归一化（issue #104）放在**捕获点**而非写出点：这样
+				// onUsage 回调、返回给调用方的 usage、以及「不含 done 的异常收尾」
+				// 三条路径都拿到 OpenAI 形状（trae 上游给的是 Anthropic 字段名）。
+				if ev.Usage != nil {
+					provider.NormalizeUsageShape(ev.Usage)
+				}
 				pendingUsage = ev.Usage
 				if onUsage != nil && ev.Usage != nil {
 					onUsage(ev.Usage)

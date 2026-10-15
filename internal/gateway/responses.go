@@ -20,6 +20,7 @@ import (
 	"strings"
 
 	"wild-work/internal/reasoning"
+	"wild-work/internal/provider"
 )
 
 // handleResponses 处理 POST /v1/responses。
@@ -563,12 +564,16 @@ func responsesUsage(usage map[string]any) map[string]any {
 	u := map[string]any{"input_tokens": in, "output_tokens": outTok, "total_tokens": total}
 	inDetails := map[string]any{} // 只填有值的子字段，避免向客户端输出 null
 	outDetails := map[string]any{}
-	if cached := usageInt(usage, "cached_tokens"); cached > 0 {
-		inDetails["cached_tokens"] = cached
-	} else if d, ok := usage["prompt_tokens_details"].(map[string]any); ok {
-		if cached := usageInt(d, "cached_tokens"); cached > 0 {
-			inDetails["cached_tokens"] = cached
-		}
+	// 缓存计量：与 /v1/messages、面板**同源**（internal/provider.ExtractUsageCache）。
+	// 注：Responses 的 `input_tokens` 与 OpenAI 的 `prompt_tokens` 同为**含缓存口径**
+	// （与 Anthropic 的互斥口径不同），故此处**不做**扣减，只映射子字段。
+	//
+	// 旧实现的两个缺陷在此一并修正：
+	//   - 先读顶层裸 `cached_tokens`：workbuddy 系该字段恒 0 是噪声，会把真值掩盖；
+	//   - 用 `> 0` 判定：把「上游明确报告本轮未命中（0）」丢成「未提供」（不变量 24）。
+	c := provider.ExtractUsageCache(usage)
+	if c.CachedReported {
+		inDetails["cached_tokens"] = c.Cached
 	}
 	if reasoning := usageInt(usage, "reasoning_tokens", "completion_thinking_tokens"); reasoning > 0 {
 		outDetails["reasoning_tokens"] = reasoning

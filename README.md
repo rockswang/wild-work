@@ -1,6 +1,6 @@
 # wild-work
 
-> 多渠道账号聚合桌面工具——把 WorkBuddy(CodeBuddy) 国内版/国际版、TraeWork、QoderCN、QoderCOM（国际版）、千问办公、商汤小浣熊、Loomy（讯飞）、MonkeyCode 平台托管模型的多个账号聚合成一个 OpenAI 兼容 API，并额外提供**无需账号**的 OpenCodeZen 匿名免费通道，双击启动，浏览器管理。
+> 多渠道账号聚合桌面工具——把 WorkBuddy(CodeBuddy) 国内版/国际版、TraeWork、QoderCN、QoderCOM（国际版）、千问办公、MonkeyCode 平台托管模型、小浣熊、Loomy（讯飞）、智谱清言、Cline（官方 API Key 免费池）的多个账号聚合成一个 OpenAI 兼容 API，并额外提供**无需账号**的 OpenCodeZen 匿名免费通道，双击启动，浏览器管理。
 
 [![GitHub](https://img.shields.io/badge/GitHub-rockswang%2Fworkbuddy--wild-blue)](https://github.com/rockswang/workbuddy-wild)
 
@@ -8,16 +8,21 @@
 
 - **三接口协议兼容**：`/v1/chat/completions`（OpenAI Chat）+ `/v1/responses`（OpenAI Responses）+ `/v1/messages`（Anthropic Messages，含 `count_tokens`）+ **`/v1/systemone`（Jev 结构化决策）**，可直接接入 `codex` CLI、`claude` CLI 与需要语义决策的自动化流程
 - **请求体指纹脱敏**：自动清除 Claude Code / Codex CLI 注入的模板句，防止上游 11128 内容拦截
+- **思考链死循环检测（防癫拦截）**：流式生成中逐帧检测推理复读/空转，命中即中断 SSE 并向客户端返回错误（`code=upstream_reasoning_loop`），由下游 AI 客户端自行重试恢复；不罚账号（模型级问题），默认开启，面板「设置」可关闭
 - **OpenAI 兼容代理**：`/v1/chat/completions`、`/v1/models`，支持流式/非流式，模型前缀路由
 - **错误分类精细化**：区分「请求问题」与「账号问题」——内容拦截/上下文超限不罚号，限流/风控/账号故障分级冷却，429 不再误判余额耗尽；**单账号渠道（OpenCodeZen）例外：任何错误均不冷却**（无号可轮换，惩罚即等于整渠道下线）
-- **十一渠道聚合**：WorkBuddyCN(CodeBuddy) + WorkBuddyAI（国际版） + TraeWork + TraeCode + QoderCN + QoderCOM（国际版） + 千问办公 + MonkeyCode（`monkeycode/*`，平台托管模型） + 小浣熊（`raccoon/*`） + Loomy（讯飞，`loomy/*`） + OpenCodeZen（`oczen/*`，匿名免费、无需账号），模型前缀路由，粘性路由优先复用账号以提升会话缓存利用率，临期积分优先消耗；旧 Qoder（`qoder/*`）路由保留但已从界面下线
+- **十三渠道聚合**：WorkBuddyCN(CodeBuddy) + WorkBuddyAI（国际版） + TraeWork + TraeCode + QoderCN + QoderCOM（国际版） + 千问办公 + MonkeyCode（`monkeycode/*`，平台托管模型） + 小浣熊（`raccoon/*`） + Loomy（讯飞，`loomy/*`） + 智谱清言（`glm/*`，网页版私有接口 + CDP 自动登录） + Cline（`cline/*`，粘贴官方 API Key，只调度免费模型） + OpenCodeZen（`oczen/*`，匿名免费、无需账号），模型前缀路由，粘性路由优先复用账号以提升会话缓存利用率，临期积分优先消耗；旧 Qoder（`qoder/*`）路由保留但已从界面下线
   小浣熊支持两条添加路径：面板登录按钮走**网页版自动登录**（拉起独立 profile 的浏览器，登录后经 CDP 捕获凭据，跨平台），弹窗里的次按钮「从客户端导入」则复用本机客户端凭据。
   Loomy 为**导入型**渠道（凭据不由本工具登录产生，从**本机已登录的官方客户端**读取；上游无 refresh 端点，session 约 14 天，到期需重新导入）。
+  智谱清言为**网页版私有接口**渠道（非开放平台），凭据是浏览器 Cookie 里的 `chatglm_refresh_token`；面板登录按钮走 CDP 自动捕获（独立 profile），新账号须在智谱清言 App 登录一次才发放初始额度。
+- **Cline 免费池**（`cline/*`）：粘贴官方 `sk_` API Key 即用（`app.cline.bot` 自行注册并创建，Key 不过期、不轮换、不与浏览器/客户端互踢）；本渠道**只调度免费模型**，多把 Key 须来自**多个独立账号**（官方额度按账号计，同账号多 Key 共享一份额度，面板会自动识别并提示）
 - **匿名免费通道**（OpenCodeZen）：内置 `public` 凭证即可调用 Zen 上的免费模型（含 `big-pickle`），无需注册/登录；面板固定一个 `[OpenCodeZen] 匿名` 条目（不可增删停用、无签到、积分显示「不适用」）
-- **自动签到**：每日定时签到领额度（Qoder 双区含 10:00–12:00 窗口重试，避免上游活动延迟导致漏领），token 保活，冷却状态机
+- **自动签到**：每日定时签到领额度（Qoder 双区含 10:00–12:00 窗口重试，避免上游活动延迟导致漏领；小浣熊走工作台接口触发**惰性落账**的每日积分，见下），token 保活，冷却状态机
 - **自动领日活奖励**（WorkBuddy 国际版）：定时自动用免费模型对话保活，自动领取每日活跃奖励，无需手动签到
-- **用量与流水统计**：token 流水（渠道×模型）与积分流水（入项/消耗/过期）双口径记账，面板折线图 + 模型用量榜 + 积分流水对账，临期阈值可配
-- **Web 管理面板**：账号管理（添加/签到/刷新/停用/删除）、积分明细、模型列表和费率、API 配置、统一设置弹层（含单渠道代理）；监听非本机地址时强制管理密码登录（HttpOnly cookie 会话）
+- **用量与流水统计**：token 流水（渠道×模型）与积分流水（入项/消耗/过期）双口径记账，面板折线图 + 模型用量榜（含**缓存利用率**与**平均速度**列，取自运行统计引擎同源数据）+ 积分流水对账，临期阈值可配；区间（今日/7日）选择**自动记忆**
+- **运行统计面板**（第三 tab）：实时视图——今日签到收入/花费/账号数里程碑、平台概览、使用中接棒（粘性路由）、最近临期与预计作废、模型消耗、请求日志（含 TTFB/吞吐）、异常账号、运行日志，30s 自动刷新；与上面「用量与流水」是**两套并列口径**（各自标注，不做数字对齐）
+- **Web 管理面板**：账号管理（添加/签到/刷新/停用/删除）、积分明细、模型列表和费率、API 配置、统一设置弹层（含**备用上游通道**与**自定义渠道**）；监听非本机地址时强制管理密码登录（HttpOnly cookie 会话）
+- **自定义渠道接入**（`custom_channels`）：在面板设置中接入任意第三方 OpenAI 兼容 API（如官方 StepFun、本地 CLIProxy、DeepSeek 等），通过 `渠道标识/模型名` 统一路由并集中查看用量流水（ledger）与实时运行统计（TTFB、吞吐、请求日志）
 - **系统托盘**：常驻右下角，双击打开面板，右键菜单操作
 - **跨平台**：Windows（完整支持）、macOS（代码已就绪，CI 构建）、Linux（无头模式）
 - **developer→system 角色转换**：自动将下游 Agent 发送的 `<developer>` 角色改写为 `<system>`，避免上游触发内容过滤
@@ -29,9 +34,9 @@
 
 ### 声明
 
-**本项目只是各上游渠道的集成与聚合，本身不做破解、不绕过计费、不规避风控。**
+**本项目只是各上游渠道的集成与聚合，本身不涉及任何逆向分析和破解工作。**
 
-各渠道的接口参数、签名算法、风控指纹等底层知识，来自社区其他开源项目的公开成果与对上游公开接口的观察记录；本项目所做的是**在既有成果之上做多渠道路由、账号池调度、协议适配与界面封装**，并提供跨平台、低门槛的使用形态。`docs/` 下的接入备忘是集成过程中的接口整理与实测记录，服务于本项目的渠道适配与维护。所有逆向相关的功劳与风险归于下述各上游项目作者。
+即：本仓库不产出、不包含、不分发任何协议逆向研究成果。各渠道的接口参数、签名算法、风控指纹等底层知识，全部来自社区其他开源项目的公开成果；本项目所做的是**在既有公开成果之上做多渠道路由、账号池调度、协议适配与界面封装**，并提供跨平台、低门槛的使用形态。所有逆向相关的功劳与风险归于下述各上游项目作者。
 
 ### 致谢
 
@@ -50,9 +55,17 @@
 | [zhangdailin/Orchids-2api](https://github.com/zhangdailin/Orchids-2api) | Qoder 渠道端点与逻辑比对参考 |
 | [jasonxu114514/opencode2api](https://github.com/jasonxu114514/opencode2api) | OpenCodeZen（oczen）匿名渠道 endpoint 特殊要求分析 |
 | [FishBottle7/opencode2dsh](https://github.com/FishBottle7/opencode2dsh) | 同上，OpenCode 相关补充参考 |
+| [ttales430/glm2api](https://github.com/ttales430/glm2api) | 智谱清言（chatglm.cn）网页版私有接口协议逆向，glm 渠道协议依据 |
 | [codkeep/MonkeyCodeReverseEngineer](https://github.com/codkeep/MonkeyCodeReverseEngineer) | MonkeyCode 渠道协议对照参考（Apache-2.0） |
-| [xxhhlk/raccoon2api](https://github.com/xxhhlk/raccoon2api) | 商汤小浣熊渠道协议逆向（MIT），raccoon 渠道依据 |
+| [xxhhlk/raccoon2api](https://github.com/xxhhlk/raccoon2api) | 小浣熊渠道协议逆向（MIT），raccoon 渠道依据 |
 | [xxhhlk/loomy2api](https://github.com/xxhhlk/loomy2api) | 讯飞 Loomy 渠道协议逆向（MIT），loomy 渠道依据 |
+| [luawei1/cline2api](https://github.com/luawei1/cline2api) | Cline 渠道协议逆向参考（MIT；虽未采用其 WorkOS OAuth 方案，模型/对话协议知识有参考，`recommended-models` free 池机制亦借鉴自其分析） |
+| [donghangxunlang-cmd/dsh-attention-health](https://github.com/donghangxunlang-cmd/dsh-attention-health) | 思考链死循环（发癫）检测算法来源——`lib/guard.js` 的四条复读/空转判据与防误杀护栏（本项目只取死循环检测，健康评估/工作交接/会话日志未采用） |
+| [ttales430/wild-work PR #46](https://github.com/rockswang/wild-work/pull/46) | 智谱清言渠道实现（含 CDP 登录编排） |
+
+> 若上述项目作者认为本项目的引用方式不当，请提 issue 联系，我们会立即调整或移除相关内容。
+
+同时感谢给本项目 PR 的各位贡献者！
 
 以下项目用于**思考强度（reasoning effort）**相关实现的前期调研与比对。本项目只借鉴其公开结论与算法语义，未复制代码：
 
@@ -94,11 +107,8 @@
 1. 从 [Releases](https://github.com/rockswang/workbuddy-wild/releases) 下载 `wild-work.exe`
 2. 放到任意目录，双击启动
 3. 右下角出现 W 图标，**双击托盘图标** → 浏览器打开 Web 管理面板
-4. 在面板中点击「＋ WorkBuddyCN」/「＋ WorkBuddyAI」/「＋ TraeWork」/「＋ QoderCN」/「＋ QoderCOM」/「＋ 千问办公」添加账号
-   （「＋ 商汤小浣熊」/「＋ Loomy」/「＋ MonkeyCode」是**导入**按钮：读取本机已登录客户端的凭据，不需要浏览器登录；
-   小浣熊的「导入」复制的是与客户端同一份凭据，导入后请**退出小浣熊客户端**，否则两边会互相抢刷新并报 `refresh_conflict`；
-   改用「浏览器授权登录」则新建独立会话，可放心与客户端并存；
-   OpenCodeZen 无需添加账号，启动即已就绪）
+4. 在面板中点击「+ WorkBuddyCN」/「+ WorkBuddyAI」/「+ TraeWork」/「+ QoderCN」/「+ QoderCOM」/「+ 千问办公」/「+ 智谱清言」添加账号
+   （OpenCodeZen 无需添加账号，启动即已就绪；Cline 无需登录流程，直接粘贴 API Key）
 5. 根据下方配置说明接入你的 AI 客户端
 
 ### 托盘菜单
@@ -221,10 +231,41 @@ Base URL: http://127.0.0.1:7863/v1
 API Key:  WildWorkAPI
 ```
 
-模型 ID 需带渠道前缀：`workbuddy/<model>`、`workbuddyai/<model>`、`traework/<model>`、`traecode/<model>`、`qodercn/<model>`、`qodercom/<model>`、`qwenwork/<model>`、`raccoon/<model>`、`loomy/<model>`、`monkeycode/<model>`、`oczen/<model>`（旧 `qoder/<model>` 仍可用，已从界面下线）。
-> 记不住前缀不用翻文档：面板上**账号卡片的渠道名旁**就写着该渠道的前缀（如 `raccoon/`），点击即复制；
-> 「模型列表和费率」的表头同样带前缀，鼠标悬停模型名可看到完整调用 ID（`前缀 + 模型名`）；
-> 帮助弹层第 4 条列出当前已接入渠道的完整前缀清单（按实际路由清单动态生成）。
+模型 ID 需带渠道前缀：`workbuddy/<model>`、`workbuddyai/<model>`、`traework/<model>`、`traecode/<model>`、`qodercn/<model>`、`qodercom/<model>`、`qwenwork/<model>`、`monkeycode/<model>`、`raccoon/<model>`、`loomy/<model>`、`glm/<model>`、`oczen/<model>`、`cline/<model>`（旧 `qoder/<model>` 仍可用，已从界面下线）。
+
+#### Cline 免费池（`cline/*`）
+
+粘贴官方 **API Key** 即用，无需在本机安装任何 Cline 客户端：
+
+1. 打开 <https://app.cline.bot/> 并注册 Cline 账号；
+2. `Account / API Keys` → `Create API Key`；
+   Key 形如 `sk_` + 64 位十六进制，**只在创建时完整显示一次**；
+3. 面板「账号管理」→「＋ Cline」→ 粘贴 Key → 添加。
+
+```bash
+curl http://127.0.0.1:7863/v1/chat/completions \
+  -H "Authorization: Bearer WildWorkAPI" -H "Content-Type: application/json" \
+  -d '{"model":"cline-free/step-5-preview","messages":[{"role":"user","content":"你好"}]}'
+```
+
+- 可用模型：完全跟随 Cline 官方免费池动态下发（`recommended-models` 的 free 组，
+  原样透传，不做任何本地筛选）。**模型 ID 就是上游 ID**（自带 `cline-free/` 命名空间），
+  典型如 `cline-free/step-5-preview`、`cline-free/mimo-v2.6-flash`；
+  完整清单见 `/v1/models` 中 `cline-free/` 开头的条目。
+  旧版双层写法 `cline/cline-free/*` 仍可路由（兼容老配置），但对外只广告前者。
+- **必须使用多个独立 Cline 账号各自的 Key**：官方免费额度按**账号**计
+  （其权益字段名为 `…UsageCostUSDPerUser`），**同一账号建多把 Key 共享一份额度，不会翻倍**。
+  面板在检测到新 Key 与已有账号同属一个 Cline 账号时会给出提示。
+- Key **不过期、不轮换**，也不会与浏览器 / 官方客户端互相挤下线（这是选 API Key 而不是
+  逆向 OAuth 登录的主要原因）。
+- 本渠道**只暴露官方免费池**（`cline-free` 命名空间）：订阅池 `cline-pass` 与云池 `cline-cloud`
+  不在使用范围内（请求它们会得到 `ENTITLEMENT_ERROR`）。上游无余额/额度查询接口，
+  因此积分显示「不适用」，实际花费见「用量与流水」（来自逐请求 `usage.cost`）。
+- 不做价格承诺：官方「free」标记与实际计价并不一致（实测同前缀有扣费、
+  非 free 后缀反倒 `cost=0`，且同一模型相邻两次请求计价可能漂移），
+  一切以实测 `usage.cost` 为准。
+- 免费池的上游限流（OpenRouter 侧 `limit_rpd` 日限 / 临时限流）属**共享出口**，
+  与你的账号数无关：本渠道对此只做模型级冷却，不会因此惩罚或轮换账号。
 
 #### OpenCodeZen 匿名免费模型（`oczen/*`）
 
@@ -240,7 +281,10 @@ curl http://127.0.0.1:7863/v1/chat/completions \
   `oczen/nemotron-3-ultra-free`、`oczen/nemotron-3.5-lightning-free`、`oczen/ling-3.0-flash-fin-free`；
   完整清单见 `/v1/models` 中 `oczen/` 开头的条目。
 - 部分免费模型有**地域限制**（如 `muse-spark-*-contributor-free` 在国内直连返回 403 RegionError）：
-  列表仍会列出，自备代理即可使用。
+  列表仍会列出。本工具的**备用上游通道**就是为这类场景准备的（见下文设置章节），
+  但该渠道上游对抗策略变更、当前暂不可用，待恢复后再接入自动改道。
+- Cline 的 `cline-free/muse-spark-1.3-contributor` 已接入自动改道：国内直连回 403
+  `not available in your region` 时，会在同一次请求内经备用通道重发（未配则原样透传）。
 - 免费额度/限流由上游 OpenCode Zen 控制，本工具不做额外限制；上游未见请求数配额，
   但高并发时延会上升。
 
@@ -276,76 +320,6 @@ curl http://127.0.0.1:7863/v1/chat/completions \
 - 无前缀时依次尝试：`model_map` 精确匹配 → 通配匹配（key 以 `*` 结尾）→ `default_channel`
 - `max_tokens_cap` 用于封顶客户端的 `max_tokens`（Anthropic 客户端常发 64000，
   超出部分上游会直接 400）；设 `0` 表示不限制
-
-#### 思考强度（reasoning effort）
-
-客户端可用标准写法指定思考档位，网关归一化后按渠道投影到上游支持的形态：
-
-| 写法 | 来源 |
-|------|------|
-| `reasoning_effort: "high"` | Chat Completions 顶层（也接受 `reasoningEffort`） |
-| `reasoning: {"effort": "high"}` | Responses 标准写法（同时出现时嵌套优先于顶层） |
-| `thinking: {"type": "enabled", "budget_tokens": 4096}` | Anthropic / Claude 风格 |
-| `output_config: {"effort": "high"}` · `enable_thinking: true` · `disable_reasoning: true` · `think: true` | 其他常见客户端写法 |
-
-- 档位取值：`none`、`minimal`、`low`、`medium`、`high`、`xhigh`、`max`、`ultra`；`off` 等同于 `none`。
-  取值非法或同一对象内自相矛盾（如 `reasoning:{effort:"high",enabled:false}`）返回 `400 invalid_reasoning_control`。
-- **档位按模型能力自动降级**：上游各模型只接受特定档位（如国内版 `deepseek-v4-pro` 只认
-  `low/high/xhigh`、`glm-5.1` 只认 `medium`，国际版 `deepseek-v4.1-flash` 只认 `high`）。
-  网关按「不超过请求强度的最高支持档」就近降级（支持档全部高于请求档时取最低支持档），
-  未收录的模型档位原样透传。能力表优先取上游目录接口返回的 `reasoning.supportedEfforts`
-  /`defaultEffort`，缺失时回落内置静态表（见 `internal/reasoning/catalog.go`）。
-- 渠道能力：WorkBuddy 国内版/国际版按上述能力表投影；**Qoder 按官方客户端的三处同源写法投影**
-  `model_config.is_reasoning` + `parameters.reasoning_effort` + `parameters.enable_thinking`，
-  档位来自上游模型目录的 `thinking_config`（每模型一条 ladder，与 WorkBuddy 分表）；
-  客户端要求关闭但该模型没有 `disabled` 节点时降到最低档；TraeWork 协议没有该字段。
-  ✅ Qoder 的 `agent_chat_generation` 端点**会下发可见思考链**（`reasoning_content` +
-  `usage.reasoning_tokens`）—— 前提是请求体与请求头按桌面版实测形状对齐（见 AGENTS.md R21）；
-  早期实现少了顶层 `system`、`task_id`、完整 `model_config` 等字段，才误判成「上游不支持」。
-  可见性在三个接口一致：Chat 原样透传 `reasoning_content`、Anthropic 转 `thinking` 块、
-  Responses 转 `reasoning` item（Responses 侧另受下方「思考摘要」策略控制，默认 `auto`）。
-  ⚠️ 请求体形状改动后务必跑 `TestLiveProbeProductionPath`（`-tags live`）回归。
-- **DeepSeek 系思考开关**：官方客户端开思考需同时下发 `thinking:{"type":"enabled"}` 与档位，
-  缺该字段上游按「不思考」应答（`reasoning_content` 为空）；网关在客户端要开思考时自动补上，
-  并给 assistant 消息回填 `reasoning_content`（多轮一致性）。由 `compat.deepseek_thinking`
-  （或 `WILDWORK_DEEPSEEK_THINKING=0`，面板「DeepSeek 开关」同款）控制，默认开启。
-- 默认档：`compat.reasoning_effort`（或环境变量 `WILDWORK_REASONING_EFFORT`，面板「思考强度」同款）
-  在客户端**未指定**时注入，对 WorkBuddy 双面与 Qoder 生效（Qoder 的具体档位按模型 ladder 降级）；
-  留空表示不注入。
-  客户端显式指定（含显式关闭）时一律以客户端为准，默认档不会把它复活。
-  客户端只说「开思考」没给档位时，用该模型声明的默认档（缺失才回退 `high`）。
-- `thinking.budget_tokens` 会按预算换算档位：`>= 4096` → `high`，`< 1024` → `low`，
-  其余 → `medium`（上游协议没有预算字段，只能折算成档位）。
-
-```json
-"compat": {
-  "reasoning_effort": "high",
-  "deepseek_thinking": true
-}
-```
-
-#### 思考摘要（Responses 接口）
-
-`/v1/responses` 会把上游的 `reasoning_content` 转成 Responses 的 `reasoning` output item
-（`response.reasoning_summary_part.added` / `reasoning_summary_text.delta|done` 事件族），
-Codex 据此显示思考摘要。由 `compat.responses_reasoning_summary`（或环境变量
-`WILDWORK_RESPONSES_REASONING_SUMMARY`，面板「思考摘要」同款）控制：
-
-| 取值 | 行为 |
-|------|------|
-| `auto`（默认） | 仅当客户端显式索要摘要时才下发（`reasoning.summary` 非 `none`，或 `include` 含 `reasoning.encrypted_content`，或带 `thinking` 对象）。Codex 发 `reasoning:{summary:"auto"}`，故默认即可看到思考 |
-| `on` | 只要上游给了思考链就下发（客户端没要也发） |
-| `off` | 从不下发，丢弃思考链（旧版行为） |
-
-- 思考 item 排在 output 首位（`output_index=0`），message / function_call 顺延，与官方顺序一致。
-- 思考增量只在文本开始前接受；文本开始后到达的思考片段会被丢弃，避免 item 顺序倒序。
-- Anthropic（`thinking` 块）与 Chat（`reasoning_content`）两个接口一直都会下发，不受该配置影响。
-
-```json
-"compat": {
-  "responses_reasoning_summary": "auto"
-}
-```
 
 **Codex CLI 配置示例**（`~/.codex/config.toml`）：
 
@@ -440,24 +414,27 @@ curl -X POST "http://127.0.0.1:7863/v1/systemone" \
   - ⚠️ **关于小浣熊登录态互踢**：上游刷新时会轮换 refresh_token，若同一账号的凭据被本工具与浏览器 / 官方客户端**共用**，
   两边会争抢同一个 refresh_token，可能出现其中一侧被挤下线。要两边同时用，请用「网页版登录」在独立浏览器窗口里**单独登录一次**
   （本流程新建独立会话），而不是从浏览器复制凭据粘进来。
-  - ⚠️ **平台限制**：MonkeyCode / 小浣熊 / Loomy 的「从客户端导入」路径探测**跨平台**（用标准用户目录 / 环境变量定位客户端凭据，macOS / Linux 上客户端把配置写在标准位置即可命中，找不到则返回明确报错）。小浣熊的**网页版自动登录同样跨平台**（纯 HTTP + 系统 Edge/Chrome，不依赖注册表）；小浣熊 / Loomy 官方另有 macOS / Linux 客户端，MonkeyCode 客户端则仅发布过 Windows 版（其导入在非 Windows 仍会按上述口径尽力而为）。其余渠道（WorkBuddy 系 / Trae 系 / Qoder 系 / 千问办公 / 智谱清言）跨平台可用。
+  - ⚠️ **平台限制**：MonkeyCode / 小浣熊 / Loomy 的「从客户端导入」路径探测**跨平台**（用标准用户目录 / 环境变量定位客户端凭据，macOS / Linux 上客户端把配置写在标准位置即可命中，找不到则返回明确报错）。小浣熊的**网页版自动登录同样跨平台**（纯 HTTP + 系统 Edge/Chrome，不依赖注册表）；小浣熊 / Loomy 官方另有 macOS / Linux 客户端，MonkeyCode 客户端则仅发布过 Windows 版（其导入在非 Windows 仍会按上述口径尽力而为）。其余渠道（WorkBuddy 系 / Trae 系 / Qoder 系 / 千问办公 / 智谱清言 / Cline）跨平台可用（Cline 是纯 HTTP + 官方 API Key，不依赖本机客户端，天然跨平台）。
 - **账号管理**：卡片显示积分、签到状态（WorkBuddy 国际版显示「自动领日活奖励」）；图标按钮操作（签到 ✓ / 刷新 ↻ / 停用 ⏸ / 删除 ✕）
   - **修改显示名**：点击卡片上的账号名即可修改，用于给账号起好认的别名
-  - 账号按固定渠道序展示：OpenCodeZen → WorkBuddyCN → WorkBuddyAI → QoderCN → QoderCOM → TraeWork → 千问办公
+  - 账号按固定渠道序展示：OpenCodeZen → WorkBuddyCN → WorkBuddyAI → QoderCN → QoderCOM → TraeWork → 千问办公 → 智谱清言 → Cline → MonkeyCode → 小浣熊 → Loomy
   - 积分显示为「可用积分」；若该账号还有本工具用不了的额度（如 TraeWork 官方客户端专用池），会追加显示 `/ N 不可用`
 - **积分明细**：鼠标悬停积分数字显示套餐明细（含有效期与可用/不可用小计），条目多时用底部 `‹ ›` 翻页
 - **刷新积分**：面板顶部按钮，批量刷新全部账号余额
-- **模型列表和费率**：点击「刷新」从上游拉取最新模型定价；上游未返回定价的模型显示 `unknown`，免费模型高亮为 `Free`。
-  模型 ID 后的图标标记图像输入 / 思考 / 工具调用能力；悬停模型名可看上下文窗口、能力与**该模型的思考档位**（与 `/v1/models` 同源）；
-  Qoder 系模型可直接在费率表里选择**上下文窗口档位**（上游声明的可选档位，选定值随请求下发）
+- **模型列表和费率**（第四 tab）：点击「刷新」从上游拉取最新模型定价；上游未返回定价的模型显示 `unknown`，免费模型高亮为 `Free`
 - **设置（统一配置入口）**：点击顶栏右侧 ⚙ 齿轮按钮，包含：
   - *接口与鉴权*：API 监听地址（`127.0.0.1` / `0.0.0.0` / 自定义 + 端口）、API-Key（给 AI 客户端）、
     **管理密码**（给面板登录；与 API-Key 是两套凭据）
   - *自动签到与开机自启*：签到时间多组增删、开机自启开关
   - *模型路由*：默认渠道、封顶 tokens、CC/Codex 客户端模型名映射表（`claude-* = workbuddy/glm-5.2` 形式，支持通配）
-  - *渠道上游代理*：给单个渠道的上游请求单独配置代理（`http://` / `https://` / `socks5://`），留空直连；
-    典型用途：OpenCodeZen 的区域限制模型需经代理访问。还可为 OpenCodeZen 填入自定义 API key（`sk-…`，
-    留空用匿名凭证 `public`；自定义 key 有独立配额不受匿名限流影响，且可调用付费模型——需账户余额）
+  - *备用上游通道*：全局只配**一个**代理地址（`http://` / `https://` / `socks5://`），留空 = 关闭。
+    它**不影响任何常规请求**（所有渠道一律直连）；只有上游回「地区限制」时，本工具才在
+    同一次请求内自动改走该通道重发一次，重发也失败则透传原始错误（不拿第二次尝试的错误掩盖首因）。
+    目前取用方：Cline 与 OpenCodeZen（两渠道的部分模型直连会被上游按地域拒，如 cline-free/muse-spark 系）。
+    命中的模型会被「学会」，后续 6 小时内不再白撞直连；改/清代理地址则学习结果立即作废。
+    同处还可为 OpenCodeZen 填入自定义 API key（`sk-…`，留空用匿名凭证 `public`；
+    自定义 key 有独立配额不受匿名限流影响，且可调用付费模型——需账户余额）。
+    > 旧版「每个渠道单独配代理」已整体下线：除 cline 外的渠道不再支持代理，一律直连。
 
 > 顶栏的 API 地址 / API-Key 文本框点击复制；所有配置修改统一走 ⚙ 设置弹层。
 
@@ -472,41 +449,6 @@ curl -X POST "http://127.0.0.1:7863/v1/systemone" \
   密码连续错误 5 次锁定该来源 IP 5 分钟；改密码后所有已登录会话立即失效。
 - OpenAI/兼容接口的鉴权不受影响，仍用 `api_key`（两套凭据相互独立）。
 - 也可用环境变量 `WILDWORK_ADMIN_PASSWORD` 配置（优先级高于 `config.json`）。
-
-## 渠道能力对照
-
-| 渠道 | 模型前缀 | 思考档位 | 积分/余额 | 费率 | 自动签到 | 凭据续期 |
-|---|---|---|---|---|---|---|
-| WorkBuddy 国内版 | `workbuddy/*` | ✓ | ✓ | ✓ | 09:00 / 21:00 | refresh |
-| WorkBuddy 国际版 | `workbuddyai/*` | ✓ | ✓ | ✓ | 内部保活（界面无感） | refresh（≈365 天） |
-| TraeWork | `traework/*` | — | ✓ | ✓ | 09:00 / 21:00 | refresh（≈14 天） |
-| TraeCode | `traecode/*` | — | ✓（共用 TraeWork） | ✓ | —（别名渠道） | refresh（共用 TraeWork） |
-| QoderCN | `qodercn/*` | ✓ | ✓ | ✓ | 10:00–12:00 窗口重试 | refresh（≈30 天） |
-| QoderCOM | `qodercom/*` | ✓ | ✓ | ✓ | 10:00–12:00 窗口重试 | refresh（≈30 天） |
-| 千问办公 | `qwenwork/*` | — | ✓ | ✓ | 关闭（避免与官方 App 互抢） | refresh |
-| 商汤小浣熊 | `raccoon/*` | — | ✓（四池） | ✓ | — | refresh（access ≈2h，**token 单次消费、会话可多个**） |
-| Loomy（讯飞） | `loomy/*` | ✓（全档位） | ✓ | ✓ | — | **无 refresh**（≈14 天需重新导入） |
-| MonkeyCode | `monkeycode/*` | — | ✓（积分 + 每日 Token） | — | — | **无 refresh**（重新导入） |
-| 旧 Qoder | `qoder/*` | ✓ | ✓ | ✓ | — | refresh（≈30 天） |
-
-> - **思考档位** = 支持在请求里指定推理强度（`reasoning_effort`），并在 `/v1/models` 与面板费率表里列出可选档位。
-> - 模型级的「图像输入 / 思考 / 工具调用」能力标记见上一节；鼠标悬停模型名可看档位详情。
-> - **商汤小浣熊不接档位**（上表 `—`）**是刻意的**：实测该上游**默认档才是最深思考**，
->   下发任何档位（含 `high`）反而让思考量锐减约 90%。网关因此**主动剥离** `reasoning_effort`，
->   保证实际走深度思考；代价是无法让该渠道「快速」，需要快就用带 `fast` 标签的模型。
->   （客户端那个「深度思考/快速」开关属于 agent 层参数，本渠道对接的 LLM 网关不接受。）
-> - 商汤小浣熊的面板按钮走**浏览器授权**：登录期间把 `office-raccoon://` 协议回调临时指向本工具，
->   接住网页授权码后由本工具完成 token 兑换，结束立即恢复注册表。**登录期间请勿启动小浣熊客户端**
->   （它会重新注册该协议，把本工具的注册覆盖掉）；弹窗里的「从客户端导入」则复用本机已登录客户端的凭据。
->   Loomy / MonkeyCode 为**导入型**渠道，只有导入一条路。
-> - MonkeyCode 的积分明细有**两行**：`积分余额`（计入合计）与 `每日 Token 额度`
->   （单位是 token，仅展示、标「仅展示」角标，不计入合计）。两者都取自控制台会话；
->   控制台会话短寿（约 6 天），但导入时会一并读取客户端里的**百智云会话**（约 29 天），
->   失效时自动用它换一份新的 —— 不必为一周就过期的会话反复重导凭据。
-> - **小浣熊的两种添加方式会话语义不同**：**浏览器授权登录**走完整授权流程、新建独立会话（新 `sid`），
->   与官方客户端**天然独立、可并存**；**导入**复制的是客户端同一份凭据（同一 `sid`），
->   两边会抢着消费同一个 refresh_token（后刷者报 `refresh_conflict`）。
->   若走导入，请退出客户端；或让 wild-work 先刷新一次，之后的刷新即独立演进。
 
 ## 常见问题
 
@@ -540,6 +482,23 @@ curl -X POST "http://127.0.0.1:7863/v1/systemone" \
 ### 4. WorkBuddy 国际版登录后积分显示为0，刷新积分报错
 注册 WorkBuddy 国际版新账号时，需要选择地区后奖励积分才发放。
 
+### 5. 小浣熊的「签到」是怎么回事？
+
+小浣熊**没有**独立的签到/领取端点，它的每日 300 积分是**惰性落账**的：
+
+- 名义记账时间是当天 00:00（积分流水里显示 `grant_at`）；
+- **实际入账**要等账号当天第一次访问「工作台」接口才发生（流水里的 `created_at`）——
+  也就是网页端文案说的「当天**登录**后有效期延长至 7 天」。
+
+本工具的签到就是替你做这次访问（调网页端打开首页时自己也会调的 `setting_info`），
+所以：
+
+- **定时签到**：按面板「签到时间」自动执行，当天积分即时到账；
+- **手动签到**：账号卡片上的 ✓ 按钮同样有效（当天已领过时返回「今日已领取」，不会重复发放）；
+- 如果你平时会打开小浣熊网页/客户端，积分本来也会到账；本工具的签到保证**即使一天都不打开**也不漏领。
+
+> 注：纯对话、查余额、刷新 token 都**不会**触发这个落账，只有工作台接口算「当天登录」。
+
 ## ⚠️ 风险警告与免责声明
 
 **在使用本工具前，请务必阅读并理解以下内容。下载、运行或继续使用本工具即表示你已阅读、理解并同意承担全部风险与责任。**
@@ -568,6 +527,4 @@ curl -X POST "http://127.0.0.1:7863/v1/systemone" \
 
 ## License
 
-[MIT](LICENSE) — 仅供个人学习使用，请遵守各上游平台服务条款。
-
-本项目包含来自第三方开源项目的代码，其版权与许可声明见 [NOTICE](NOTICE)。
+MIT — 仅供个人学习使用，请遵守各上游平台服务条款。
