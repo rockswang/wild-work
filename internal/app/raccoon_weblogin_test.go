@@ -46,7 +46,7 @@ func TestRaccoonLoginUsesWebFlow(t *testing.T) {
 }
 
 // TestRaccoonWebLoginConstants 网页版登录的关键常量必须与实盘抓包一致
-// （2026-10-10 SAZ：Cookie 名 raccoon_refresh_token、域 .xiaohuanxiong.com）。
+// （2026-10-15 CDP 探针：Cookie 名 xhx_token、域 .xiaohuanxiong.com）。
 func TestRaccoonWebLoginConstants(t *testing.T) {
 	src, err := os.ReadFile("../login_raccoon/web.go")
 	if err != nil {
@@ -54,7 +54,7 @@ func TestRaccoonWebLoginConstants(t *testing.T) {
 	}
 	code := string(src)
 	for _, want := range []string{
-		`CookieName = "raccoon_refresh_token"`,
+		`CookieName = "xhx_token"`,
 		`CookieDomain = "xiaohuanxiong.com"`,
 		`ownerTypeUsers = "users"`,
 	} {

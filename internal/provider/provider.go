@@ -105,9 +105,18 @@ func (k ErrKind) String() string {
 //
 // 上游自己声明「换其他模型可以继续用」→ 该限流按模型独立计算，冷却也应按模型粒度。
 // 否则一个模型撞到每日上限会把账号上其他仍可用的模型一起连坐（实测：A 账号的
-// deepseek-v4.1-flash 于 02:57 起被限流，而其 gpt-5.6-luna 在 21:07 仍能成功）。
+// deepseek-v4.1-flash 于 02:57 起被限流，而其 gpt-5.6-luna 于 21:07 仍能成功）。
+//
+// 2026-10-12 补 14003（workbuddyai 瞬时拥塞限流）的原文明文：
+//
+//	"displayTips":{"en":"Wait about a minute before retry, or switch to a LESS BUSY MODEL."}
+//
+// 同一个"这个模型正忙、换一个试试"的语义，只是措辞不同。生产实测（state v4）：
+// 14003 落在账号级冷却、6004 落在模型级冷却，而 14003 会在两个账号 18~48s 内相继
+// 触发——账号级既救不了当前模型，还把该账号其它可用模型一起拖死。
 var modelScopedSoftRateMarkers = []string{
 	"switch to the other models",
+	"less busy model",
 }
 
 // IsModelScopedSoftRate 判定软限流（ErrSoftRate）是否只作用于当前模型。

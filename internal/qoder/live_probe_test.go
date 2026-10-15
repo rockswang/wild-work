@@ -427,7 +427,7 @@ func scanStream(raw []byte) streamStats {
 			}
 		}
 		return nil
-	})
+	}, nil)
 	if st.DataLines > st.Chunks {
 		st.BadLines = st.DataLines - st.Chunks
 	}

@@ -185,7 +185,7 @@ func scanRaw(raw []byte) (chunks int, deltaKeys map[string]int, firstLine string
 			}
 		}
 		return nil
-	})
+	}, nil)
 	return
 }
 

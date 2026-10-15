@@ -3,6 +3,7 @@ package login_raccoon
 import (
 	"encoding/base64"
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"wild-work/internal/raccoon"
@@ -15,9 +16,10 @@ func fakeJWT(t *testing.T, claims map[string]any) string {
 	return "header." + base64.RawURLEncoding.EncodeToString(payload) + ".sig"
 }
 
-// TestJwtOwnerType 区分真实账号（users）与访客（visitors）——这是「Cookie 出现 ≠ 登录完成」
-// 的判据：小浣熊对未登录访客也会下发 raccoon_refresh_token，必须靠 owner_type 甄别，
-// 否则会抓到一个不可用的访客凭据（对齐智谱清言 R28 的教训）。
+// TestJwtOwnerType 区分真实账号（users）与访客（visitors）——旧版「Cookie 出现 ≠ 登录完成」
+// 的判据：小浣熊对未登录访客也会下发 raccoon_refresh_token，须靠 owner_type 甄别，
+// 否则会抓到一个不可用的访客凭据（对齐智谱清言 R28 的教训）。新版登录态改用 xhx_token
+// （访客不写它），owner_type 仅作兜底，本函数保留但不再是主判据。
 func TestJwtOwnerType(t *testing.T) {
 	cases := []struct {
 		name string
@@ -62,17 +64,21 @@ func TestJwtExp(t *testing.T) {
 	}
 }
 
-// TestWebLoginURL 登录入口必须指向网页版登录页（带 loginModal=true 直接弹登录框）。
+// TestWebLoginURL 登录入口必须指向新版网页版登录页（product_code=work 定位产品，
+// redirect_url 指向工作台；**不得带 loginModal=true**，否则新版前端会重定向死循环）。
 func TestWebLoginURL(t *testing.T) {
-	if WebLoginURL != "https://office.xiaohuanxiong.com/home?loginModal=true" {
+	if WebLoginURL != "https://xiaohuanxiong.com/login?product_code=work&redirect_url=https%3A%2F%2Fxiaohuanxiong.com%2Fwork%2Fhome" {
 		t.Fatalf("WebLoginURL 不符：%s", WebLoginURL)
+	}
+	if strings.Contains(WebLoginURL, "loginModal=true") {
+		t.Fatal("WebLoginURL 不得带 loginModal=true —— 新版前端会陷入 /work/home ↔ /login 重定向死循环")
 	}
 }
 
 // TestCookieConstants Cookie 名与域必须与实盘抓包一致
-// （2026-10-10 抓包：raccoon_refresh_token 落在 .xiaohuanxiong.com 域）。
+// （2026-10-15 CDP 探针：登录态凭据为 xhx_token，域 .xiaohuanxiong.com）。
 func TestCookieConstants(t *testing.T) {
-	if CookieName != "raccoon_refresh_token" {
+	if CookieName != "xhx_token" {
 		t.Fatalf("CookieName 不符：%s", CookieName)
 	}
 	if CookieDomain != "xiaohuanxiong.com" {

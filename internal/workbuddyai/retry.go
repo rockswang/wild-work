@@ -5,16 +5,22 @@
 // 504 恒定卡在 ~12.3s（网关自身超时阈值）。
 //
 // 策略：
-//   - 仅对网关类 5xx（502/503/504）与传输层错误重试；
+//   - 网关类 5xx（502/503/504/500）与传输层错误可重试；
 //   - 4xx 一律不重试：402/403 疑似风控或余额不足，400/429 是业务/限流语义，
 //     重试只会放大问题（429 频繁重试还可能触发风控）；
+//   - **唯一例外**：上游在响应里显式声明 `retry_policy.retry=true` 的 429
+//     （14003 瞬时拥塞）。上游自己说"可以重试"时直接抛错并罚号，会把一次可自愈的
+//     抖动放大成渠道级故障（见 retryPolicyAllowsRetry 的实测），故单独开一道
+//     **收紧的**重试预算（rateLimitMaxAttempts），绝不与 5xx 的额度混用；
 //   - 5xx 中的 500 视为上游服务端错误，同样重试。
 package workbuddyai
 
 import (
+	"encoding/json"
 	"errors"
 	"math/rand"
 	"net"
+	"net/http"
 	"strings"
 	"time"
 )
@@ -23,12 +29,63 @@ import (
 const (
 	retryMaxAttempts = 3
 	retryBaseDelay   = 400 * time.Millisecond
+
+	// rateLimitMaxAttempts 上游显式声明可重试的限流的总尝试数（含首次）。
+	// 收紧到 2 = 只重试一次。429 频繁重试有风控风险（见文件头注释），
+	// 且不与 5xx 的 retryMaxAttempts 额度混用，避免把可重试限流刷成刷屏。
+	rateLimitMaxAttempts = 2
 )
+
+// rateLimitBackoff 限流重试前的等待。取变量以便测试提速（勿在运行期改）。
+// 上游 displayTips 原文是 "Wait about a minute before retry"，此处取 20s 折中：
+// 足以避开最小拥塞窗口，又不至于把一个对话请求挂满一分钟。
+var rateLimitBackoff = 20 * time.Second
 
 // retryableStatus 判断 HTTP 状态码是否值得重试。
 // 仅 5xx 网关/服务端错误可重试；4xx 明确不重试。
 func retryableStatus(status int) bool {
 	return status >= 500 && status <= 599
+}
+
+// retryPolicyAllowsRetry 判定上游是否在响应体里显式声明「这个错误可以重试」。
+//
+// WorkBuddyAI 网关对瞬时拥塞返回的 429 带结构化字段：
+//
+//	{"code":14003,"msg":"too many requests","retry_policy":{"retry":true},
+//	 "displayTips":{"en":"Wait about a minute before retry, or switch to a less busy model."}}
+//
+// 判据取结构化 `retry_policy.retry` 而非英文文案：`displayTips` 的措辞会随
+// 上游改版漂移（6004 与 14003 就是同语义两种措辞），而 `retry_policy` 是协议级承诺。
+//
+// 为什么必须理会它：2026-10-12 生产实测，state v4 显示 14003 落到**账号级**冷却，
+// 两个账号在 18~48s 内相继中招 → 双双冷却 → 无健康账号 → 客户端拿到
+// `503 no_healthy_account`（用户看到的"自定义模型错误"）。
+// 而上游明确说"等一分钟再试"即可——即故障本可自愈，是我们把罚号叠上去才放大的。
+func retryPolicyAllowsRetry(body []byte) bool {
+	if len(body) == 0 {
+		return false
+	}
+	var env struct {
+		RetryPolicy struct {
+			Retry bool `json:"retry"`
+		} `json:"retry_policy"`
+	}
+	if err := json.Unmarshal(body, &env); err != nil {
+		return false
+	}
+	return env.RetryPolicy.Retry
+}
+
+// retryDecision 单点判断「这次失败是否值得重试」。
+// 返回 (retry, isRateLimit)：后者用于走收紧的限流预算与退避。
+func retryDecision(status int, body []byte, err error) (retry, isRateLimit bool) {
+	if err != nil {
+		return retryableErr(err), false
+	}
+	if status == http.StatusTooManyRequests && retryPolicyAllowsRetry(body) {
+		return true, true
+	}
+	return retryableStatus(status), false
 }
 
 // retryableErr 判断传输层错误是否值得重试。

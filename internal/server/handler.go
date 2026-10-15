@@ -570,7 +570,9 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	clientUA := r.UserAgent()
 	// 档位能力表预热（首次请求才触发目录拉取，见 ensureEffortCaps）
 	h.ensureEffortCaps(rt)
-	dumpChatBody(body, clientModel, "client") // WILDWORK_DUMP_DIR 开启时落盘原始 body（可直接重放），默认 no-op
+	// WILDWORK_DUMP_DIR 开启时落盘原始 body（可直接重放），默认 no-op；
+	// 返回的序号把本次请求的入站/出站/错误响应三份 dump 关联起来。
+	dumpSeqNo := dumpChatBody(body, clientModel, "client")
 	body, err = prepareChatBody(body, model, h.reasoningDefaultFor(rt.Kind))
 	if err != nil {
 		if reasoning.IsInvalid(err) {
@@ -649,6 +651,11 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			kind := rt.Upstream.Classify(status, string(respBody))
 			log.Printf("client request platform=%s model=%s status=%d ua=%q params=%s",
 				rt.Kind, clientModel, status, clientUA, clientParams)
+			// WILDWORK_DUMP_DIR 开启时落盘「出站 body + 上游错误响应」对，默认 no-op。
+			// 上游按出站 body 校验/计数（如 Kimi 的 position N），仅凭入站 dump 定位不了。
+			// 保真度说明：部分渠道 client 在发送前还有渠道级改写（如 raccoon 删顶层
+			// reasoning_effort），但均不触碰 messages——按消息定位类故障此形态即等价。
+			dumpUpstreamFailure(dumpSeqNo, body, respBody, clientModel, status, rt.Kind.String(), acct.UID)
 			// 单账号渠道：任何账号级惩罚都等于整条渠道下线，故一律原文透传、不罚账号。
 			// 尤其在 429（唯一需要的背压）上：冷却后后续请求会在挑号阶段被挡成
 			// no_healthy_account，反而不如透传 429 让客户端按 Retry-After 自行重试。
@@ -1068,7 +1075,7 @@ func prepareChatBody(body []byte, model, defaultEffort string) ([]byte, error) {
 	return json.Marshal(normalized)
 }
 
-// normalizeToolTurnContent 把「content 为 null 或缺失」的工具轮消息补成空串。
+// normalizeToolTurnContent 把「content 为 null 或缺失」的 assistant / tool 消息补成空串。
 //
 // 上游（实测 qoder/deepseek-flash，2026-09-24）要求带 tool_calls 的 assistant
 // 消息必须携带**字符串** content，null 或字段缺失会让它整请求拒答，并且报一个
@@ -1090,6 +1097,14 @@ func prepareChatBody(body []byte, model, defaultEffort string) ([]byte, error) {
 //
 // 放宽到 tool 角色一并处理：工具返回空内容时客户端同样可能给 null，
 // 上游对工具轮是同一套校验。
+//
+// 2026-10-11 追加（traecode/SOLO 实测）：**普通 assistant 消息**（无 tool_calls）
+// content 缺失同样会被整请求拒答，错误是 SOLO 流内 event:error 的
+// `4001 the param is invalid`。成因是 CodeBuddy 客户端在「思考中途被打断」时，
+// 会把半截思考存成 `{"role":"assistant","reasoning":"…"}`（无 content、无
+// tool_calls）；此后该会话每轮重放都带上这条空壳，于是每发必拒（同「中毒进
+// 历史」）。dump 0060/0066 重放对照坐实：原样 → 0.6s 即 4001；删掉该条或补
+// content:"" → 均正常出流。故 assistant 一律补空串，不再以 tool_calls 为前提。
 func normalizeToolTurnContent(obj map[string]any) {
 	msgs, _ := obj["messages"].([]any)
 	for _, raw := range msgs {
@@ -1099,12 +1114,7 @@ func normalizeToolTurnContent(obj map[string]any) {
 		}
 		role, _ := m["role"].(string)
 		switch role {
-		case "assistant":
-			// 只在真的带 tool_calls 时补：普通 assistant 消息 content=null 无证据会出问题。
-			if tc, ok := m["tool_calls"].([]any); !ok || len(tc) == 0 {
-				continue
-			}
-		case "tool":
+		case "assistant", "tool":
 		default:
 			continue
 		}

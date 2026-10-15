@@ -283,7 +283,7 @@ func scanRaw(raw []byte) streamScan {
 			}
 		}
 		return nil
-	})
+	}, nil)
 	tail := strings.TrimSpace(string(raw))
 	if len(tail) > 160 {
 		tail = tail[len(tail)-160:]

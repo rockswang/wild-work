@@ -106,7 +106,7 @@ func (c *Client) fetchCatalog(a *auth.Auth) ([]catalogModel, error) {
 	if err != nil {
 		return nil, err
 	}
-	commonHeaders(req)
+	commonHeaders(req, a)
 	req.Header.Set("Authorization", "Bearer "+a.AccessToken)
 	req.Header.Set("Accept", "application/json")
 	resp, err := c.HTTP.Do(req)
@@ -204,7 +204,7 @@ func (c *Client) fetchV3Catalog(a *auth.Auth) ([]catalogModel, error) {
 	if err != nil {
 		return nil, err
 	}
-	commonHeaders(req)
+	commonHeaders(req, a)
 	req.Header.Set("Authorization", "Bearer "+a.AccessToken)
 	req.Header.Set("Accept", "application/json")
 	// UA 门禁：commonHeaders 已设 clientUA（CLI 形），实测可通过；
@@ -369,7 +369,7 @@ func (c *Client) PollLogin(state string) (r LoginResult, pending bool, err error
 	if err != nil {
 		return r, false, err
 	}
-	commonHeaders(req)
+	commonHeaders(req, nil)
 	req.Header.Set("Accept", "*/*")
 	req.Header.Set("X-No-Authorization", "true")
 	req.Header.Set("X-No-User-Id", "true")
@@ -414,7 +414,7 @@ func (c *Client) fetchAccount(state, accessToken string) [3]string {
 	if err != nil {
 		return [3]string{}
 	}
-	commonHeaders(req)
+	commonHeaders(req, nil)
 	req.Header.Set("Authorization", "Bearer "+accessToken)
 	data, err := c.doJSON(req)
 	if err != nil {

@@ -3,7 +3,7 @@
 // 历史：本包原实现的是**桌面协议回调**登录（把 HKCU 的 office-raccoon 协议临时指向本工具，
 // 接住网页授权回传的深链）。该方式仅 Windows 可用、且要求本机装有官方客户端。
 // 2026-10-10 改为**网页版流程**（见 web.go）：拉起独立 profile 的浏览器 → 用户登录
-// → CDP 捕获 Cookie 里的 raccoon_refresh_token → 换取并落盘凭据。纯 HTTP + 浏览器，跨平台。
+// → CDP 捕获 Cookie 里的 xhx_token → 换取并落盘凭据。纯 HTTP + 浏览器，跨平台。
 //
 // 「从本机客户端导入」路径保留（internal/app/import_local.go），作为不想新开浏览器时的替代。
 //

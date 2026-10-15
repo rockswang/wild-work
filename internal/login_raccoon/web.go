@@ -4,7 +4,7 @@
 //
 //	① 拉起一个**独立 profile** 的 Edge/Chrome（带 CDP 调试端口），打开小浣熊网页版登录页
 //	② 用户在真实浏览器里正常登录（扫码 / 手机号 / 微信均可）
-//	③ 登录成功后前端 JS 会把会话写进 Cookie `raccoon_refresh_token`（域 xiaohuanxiong.com）
+//	③ 登录成功后前端 JS 会把会话写进 Cookie `xhx_token`（域 xiaohuanxiong.com）
 //	④ 本工具经 CDP 轮询 Cookie，捕获到**真实账号**（owner_type=users）的 refresh_token
 //	⑤ 用该 refresh_token 调 /api/web/auth/v1/refresh 换取新 access+refresh（同时完成有效性校验）
 //	⑥ 落盘 auths/raccoon-<uid>.json → 关闭浏览器、清理临时 profile
@@ -38,12 +38,22 @@ import (
 	"wild-work/internal/raccoon"
 )
 
-// WebLoginURL 小浣熊网页版登录入口。
-// 带 loginModal=true 直接弹出登录框（实测抓包：/home?loginModal=true）。
-const WebLoginURL = "https://office.xiaohuanxiong.com/home?loginModal=true"
+// WebLoginURL 小浣熊网页版登录入口（2026-10-15 上游迁站后）。
+//
+// 旧入口 office.xiaohuanxiong.com/home?loginModal=true 已 302 到
+// xiaohuanxiong.com/work/home?loginModal=true，而该参数在新版前端会引发
+// 「/work/home?loginModal=true ↔ /login?redirect_url=…loginModal=true」重定向死循环，
+// Cookie 永远写不进来（表现为面板窗口「登录成功那一刻起一直跳转」）。
+// 故直接开登录页：product_code=work 定位网页版产品，redirect_url 指向工作台。
+// **redirect_url 不得带 loginModal=true**。
+const WebLoginURL = "https://xiaohuanxiong.com/login?product_code=work&redirect_url=https%3A%2F%2Fxiaohuanxiong.com%2Fwork%2Fhome"
 
 // CookieName 网页版凭据所在的 Cookie 名。
-const CookieName = "raccoon_refresh_token"
+//
+// 实测（2026-10-15 CDP 探针）：新版把**登录态**凭据写在 `xhx_token`（refresh_token，
+// ≈30 天），而旧的 `raccoon_refresh_token` 在**访客态**仍会下发 —— 故监听旧名会一打开
+// 就抓到访客凭据（R28 同款教训）。`xhx_token` 仅登录后出现，是更干净的判据。
+const CookieName = "xhx_token"
 
 // CookieDomain 匹配用域名片段。
 const CookieDomain = "xiaohuanxiong.com"
@@ -110,9 +120,10 @@ func (s *WebSession) Cancel() {
 // 返回的 WebSession 立即可用（状态 pending）；调用方轮询 Status()/Result()。
 // onSaved 在凭据获取成功后回调（用于落盘与账号池重载），可为 nil。
 //
-// ⚠️ 与智谱清言同理：小浣熊对**未登录访客**也会下发 raccoon_refresh_token（owner_type=visitors）。
-// 若以「Cookie 出现」为完成判据，会抓到一个不可用的访客凭据。故以 JWT 的 owner_type
-// 是否为 users 为判据——只有真实账号才换取令牌并收工。
+// ⚠️ 与智谱清言同理：小浣熊对**未登录访客**也会下发凭据（旧名 `raccoon_refresh_token`，
+// owner_type=visitors）。若监听旧名并以「Cookie 出现」为完成判据，会抓到一个不可用的访客凭据。
+// 新版（2026-10-15）登录态凭据改名为 `xhx_token`，访客态不写它，故监听 `xhx_token` 即为
+// 干净判据；同时保留 owner_type 兜底——上游若显式回 visitors 仍拒绝。
 func StartWebLogin(onSaved func(Result)) (*WebSession, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), LoginTimeout+2*time.Minute)
 
@@ -153,7 +164,11 @@ func StartWebLogin(onSaved func(Result)) (*WebSession, error) {
 				lastErr = werr
 			} else if tok != "" && tok != lastTok {
 				lastTok = tok
-				if jwtOwnerType(tok) != ownerTypeUsers {
+				// 登录判据：新版访客态**不写** `xhx_token`（2026-10-15 实测），故 cookie 出现
+				// 即视为登录完成。旧版靠 JWT `owner_type==users` 区分访客，但新版 JWT 已是标准
+				// OIDC（sid/ver/iss/sub/aud/exp/nbf/iat/jti，**无 owner_type**）——故仅当上游
+				// **显式**声明 visitors 时才拒绝，缺省即放行。
+				if ot := jwtOwnerType(tok); ot != "" && ot != ownerTypeUsers {
 					// 访客凭据：用户尚未登录，继续等
 					if !sawVisitor {
 						sawVisitor = true
@@ -205,7 +220,7 @@ func StartWebLogin(onSaved func(Result)) (*WebSession, error) {
 	return s, nil
 }
 
-// currentRefreshToken 读一次当前 profile 的 raccoon_refresh_token（无则空串）。
+// currentRefreshToken 读一次当前 profile 的 xhx_token（无则空串）。
 func currentRefreshToken(ctx context.Context, browser *cdp.Browser) (string, error) {
 	cookies, err := browser.AllCookies(ctx, CookieDomain)
 	if err != nil {
@@ -249,9 +264,13 @@ func jwtOwnerType(tok string) string {
 	return ""
 }
 
-// jwtName 取 JWT 的 name claim（小浣熊 uid）。
+// jwtName 取 JWT 里的 uid：优先 name claim（旧版），回落 sub（新版标准 OIDC）。
 func jwtName(tok string) string {
-	if s, ok := jwtClaims(tok)["name"].(string); ok {
+	claims := jwtClaims(tok)
+	if s, ok := claims["name"].(string); ok && strings.TrimSpace(s) != "" {
+		return strings.TrimSpace(s)
+	}
+	if s, ok := claims["sub"].(string); ok {
 		return strings.TrimSpace(s)
 	}
 	return ""

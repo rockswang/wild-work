@@ -432,7 +432,7 @@ const noExplicitCheckin = (g) => NO_EXPLICIT_CHECKIN.has(g);
 const IMPORT_LOCAL_CHANNELS = new Set(["raccoon", "loomy", "monkeycode"]);
 const isImportLocal = (ch) => IMPORT_LOCAL_CHANNELS.has(ch);
 // 支持「网页版自动登录」的渠道：后端拉起独立 profile 的浏览器，用户在网页里登录，
-// 后端经 CDP 捕获凭据（小浣熊：Cookie 里的 raccoon_refresh_token）。
+// 后端经 CDP 捕获凭据（小浣熊：Cookie 里的 xhx_token）。
 // 小浣熊两个集合都命中 —— 弹窗里同时给「网页版登录」与「从客户端导入」两个动作。
 const WEB_LOGIN_CHANNELS = new Set(["raccoon"]);
 const hasWebLogin = (ch) => WEB_LOGIN_CHANNELS.has(ch);
