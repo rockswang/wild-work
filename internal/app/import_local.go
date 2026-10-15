@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"wild-work/internal/monkeycode"
+	"wild-work/internal/officeace"
 	"wild-work/internal/provider"
 )
 
@@ -65,6 +66,8 @@ type authSection struct {
 	ConsoleCookie string `json:"consoleCookie"`
 	// BaizhiCookie 只在 MonkeyCode 凭据里非空（百智云会话 Cookie，控制台会话的上游来源）
 	BaizhiCookie string `json:"baizhiCookie"`
+	// Extra 渠道扩展凭据袋（officeace 用；其余渠道空）
+	Extra map[string]string `json:"extra,omitempty"`
 }
 
 type accountSection struct {
@@ -91,6 +94,8 @@ func (a *App) ImportLocalCredentials(channel string) (*ImportLocalResult, error)
 		return a.importRaccoon()
 	case provider.Loomy:
 		return a.importLoomy()
+	case provider.OfficeAce:
+		return a.importOfficeAce()
 	}
 	return nil, fmt.Errorf("渠道 %q 不支持本地导入（该渠道请用面板的登录按钮）", channel)
 }
@@ -424,6 +429,61 @@ func loomyClientSessionPath() (string, error) {
 		return "", errors.New("未找到 Loomy 客户端目录（C:\\Users\\Public\\Loomy 或 ~/Library/Application Support/loomy 不存在）：请先安装并登录 Loomy 客户端")
 	}
 	return "", fmt.Errorf("未找到 Loomy 会话文件（已尝试 %d 个路径）：请先在客户端完成登录", len(cands))
+}
+
+// importOfficeAce 扫描本机已登录的 OfficeAce 桌面端文件，发现华为云果办网关凭据。
+//
+// 与其它导入渠道不同，本渠道一个桌面端可能挂多个华为账号（多份 routing_state/users/<uid>），
+// 因此逐账号导入。网关凭据（Basic AK/SK）只是对话入口；积分/签到所需的临时凭据需后续续期获取。
+func (a *App) importOfficeAce() (*ImportLocalResult, error) {
+	accs, err := officeace.Discover(nil)
+	if err != nil {
+		return nil, err
+	}
+	if len(accs) == 0 {
+		return nil, fmt.Errorf("未找到本机 OfficeAce 客户端凭据：请先安装并登录 OfficeAce 桌面端，且至少发起过一次对话")
+	}
+	firstUID, firstFile := "", ""
+	for _, acc := range accs {
+		ex := acc.Export()
+		doc := authDoc{
+			Auth: authSection{
+				AccessToken: ex.AccessToken,
+				// 网关 Basic 凭据不过期；续期是临时凭据的事，故这里用远期到期避免误触刷新。
+				ExpiresAt: time.Now().AddDate(50, 0, 0).Unix(),
+				ApiHost:   ex.ApiHost,
+				Extra:     ex.Extra,
+			},
+			Account: accountSection{UID: ex.UID, Nickname: ex.Nickname},
+		}
+		file, err := a.writeAuthFile("officeace", ex.UID, doc)
+		if err != nil {
+			return nil, err
+		}
+		if firstUID == "" {
+			firstUID, firstFile = ex.UID, filepath.Base(file)
+		}
+	}
+	a.reloadAccounts()
+	a.afterAccountAdded(provider.OfficeAce)
+	note := fmt.Sprintf("已导入 %d 个 OfficeAce 账号；每日签到的临时凭据约 2 小时有效，wild-work 会自动续期", len(accs))
+	return &ImportLocalResult{Channel: "officeace", UID: firstUID, File: firstFile, Note: note}, nil
+}
+
+func isRealOfficeAceUID(id string) bool {
+	if len(id) != 65 || id[32] != ':' {
+		return false
+	}
+	for i := 0; i < 65; i++ {
+		if i == 32 {
+			continue
+		}
+		c := id[i]
+		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')) {
+			return false
+		}
+	}
+	return true
 }
 
 // writeAuthFile 原子写 auth 文件（tmp + rename，0600），文件名前缀即渠道 Kind。

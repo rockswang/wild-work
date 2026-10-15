@@ -571,6 +571,7 @@ var (
 		string(provider.Raccoon): true, string(provider.Loomy): true,
 		string(provider.Oczen): true, string(provider.GLM): true,
 		string(provider.Cline): true, // R59：cline 的模型名是 cline-free/*，漏了它则该渠道 token 不进平台表
+		string(provider.OfficeAce): true,
 	}
 )
 

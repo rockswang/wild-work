@@ -35,6 +35,7 @@ import (
 	"wild-work/internal/login_wbai"
 	"wild-work/internal/loopguard"
 	"wild-work/internal/oczen"
+	"wild-work/internal/officeace"
 	"wild-work/internal/platform"
 	"wild-work/internal/pool"
 	"wild-work/internal/provider"
@@ -51,7 +52,7 @@ import (
 )
 
 // Version 版本号。
-const Version = "2.7.3"
+const Version = "2.7.4"
 
 const (
 	loginTimeout   = 5 * time.Minute
@@ -120,6 +121,9 @@ type App struct {
 	// 它不轮询 state 文件，而是经 CDP 从浏览器 Cookie 捕获凭据）。
 	muGLMLogin sync.Mutex
 	glmLogin   *loginglm.AutoSession
+
+	muOALogin sync.Mutex
+	oaLogin   *officeace.LoginSession
 
 	// auth 管理面板会话（cookie）；详见 session.go
 	auth *authState
@@ -1230,6 +1234,62 @@ func (a *App) CancelGLMAutoLogin() error {
 	a.muGLMLogin.Unlock()
 	if sess == nil {
 		return errors.New("没有进行中的智谱清言登录")
+	}
+	sess.Cancel()
+	return nil
+}
+
+// StartOfficeAceLogin 发起 OfficeAce 自助登录（华为云 OAuth 授权码 + PKCE + DPoP）。
+// 返回待打开的授权 URL；后台轮询完成登录并落盘。前端轮询 GetOfficeAceLoginStatus。
+func (a *App) StartOfficeAceLogin() (string, error) {
+	a.muOALogin.Lock()
+	defer a.muOALogin.Unlock()
+	if a.oaLogin != nil {
+		if st, _ := a.oaLogin.Status(); st == "pending" || st == "exchanging" {
+			return a.oaLogin.URL(), errors.New("已有 OfficeAce 登录流程进行中，请先在浏览器完成登录或取消")
+		}
+	}
+	sess, err := officeace.StartLogin(a.cfg.AuthDir, func(r officeace.LoginResult) {
+		a.reloadAccounts()
+		a.afterAccountAdded(provider.OfficeAce)
+		log.Printf("officeace 自助登录完成，账号池已重载 uid=%s", r.UID)
+	})
+	if err != nil {
+		return "", err
+	}
+	a.oaLogin = sess
+	// 尝试用系统浏览器打开授权页（失败不阻断：URL 已返回给前端，可手动打开）。
+	_ = sess.OpenInBrowser()
+	return sess.URL(), nil
+}
+
+// GetOfficeAceLoginStatus 查询 OfficeAce 自助登录状态。
+func (a *App) GetOfficeAceLoginStatus() map[string]any {
+	a.muOALogin.Lock()
+	sess := a.oaLogin
+	a.muOALogin.Unlock()
+	if sess == nil {
+		return map[string]any{"status": "idle"}
+	}
+	status, err := sess.Status()
+	out := map[string]any{"status": status}
+	if err != nil {
+		out["error"] = err.Error()
+	}
+	if r, ok := sess.Result(); ok {
+		out["uid"] = r.UID
+		out["nickname"] = r.Nickname
+	}
+	return out
+}
+
+// CancelOfficeAceLogin 取消 OfficeAce 自助登录。
+func (a *App) CancelOfficeAceLogin() error {
+	a.muOALogin.Lock()
+	sess := a.oaLogin
+	a.muOALogin.Unlock()
+	if sess == nil {
+		return errors.New("没有进行中的 OfficeAce 登录")
 	}
 	sess.Cancel()
 	return nil
@@ -2648,6 +2708,29 @@ func (a *App) HandleAPI(mux *http.ServeMux) {
 	})
 	mux.HandleFunc("POST /api/login/glm_auto_cancel", func(w http.ResponseWriter, r *http.Request) {
 		if err := a.CancelGLMAutoLogin(); err != nil {
+			apiError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+	})
+	mux.HandleFunc("POST /api/login/officeace_auto", func(w http.ResponseWriter, r *http.Request) {
+		url, err := a.StartOfficeAceLogin()
+		if err != nil {
+			// 已有流程进行中时也回传 URL，便于前端继续打开/轮询
+			if url != "" {
+				writeJSON(w, http.StatusOK, map[string]any{"auth_url": url, "warning": err.Error()})
+				return
+			}
+			apiError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"auth_url": url})
+	})
+	mux.HandleFunc("GET /api/login/officeace_auto_status", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, http.StatusOK, a.GetOfficeAceLoginStatus())
+	})
+	mux.HandleFunc("POST /api/login/officeace_auto_cancel", func(w http.ResponseWriter, r *http.Request) {
+		if err := a.CancelOfficeAceLogin(); err != nil {
 			apiError(w, http.StatusBadRequest, err.Error())
 			return
 		}

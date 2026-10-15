@@ -430,8 +430,8 @@ function renderTopbar() {
 }
 
 // 渠道显示名与 CSS 短类名（后端 group / 费率 channel 均为 provider.Kind）。
-const CH_LABEL = { workbuddy: "WorkBuddyCN", workbuddyai: "WorkBuddyAI", traework: "TraeWork", traecode: "TraeCode", qoder: "Qoder", qodercn: "QoderCN", qodercom: "QoderCOM", qwenwork: "千问办公", glm: "智谱清言", monkeycode: "MonkeyCode", raccoon: "小浣熊", loomy: "Loomy", oczen: "OpenCodeZen", cline: "Cline" };
-const CH_CLASS = { workbuddy: "wb", workbuddyai: "wbai", traework: "trae", traecode: "traecode", qoder: "qoder", qodercn: "qodercn", qodercom: "qodercom", qwenwork: "qwenwork", glm: "glm", monkeycode: "monkeycode", raccoon: "raccoon", loomy: "loomy", oczen: "oczen", cline: "cline" };
+const CH_LABEL = { workbuddy: "WorkBuddyCN", workbuddyai: "WorkBuddyAI", traework: "TraeWork", traecode: "TraeCode", qoder: "Qoder", qodercn: "QoderCN", qodercom: "QoderCOM", qwenwork: "千问办公", glm: "智谱清言", monkeycode: "MonkeyCode", raccoon: "小浣熊", loomy: "Loomy", oczen: "OpenCodeZen", cline: "Cline", officeace: "OfficeAce" };
+const CH_CLASS = { workbuddy: "wb", workbuddyai: "wbai", traework: "trae", traecode: "traecode", qoder: "qoder", qodercn: "qodercn", qodercom: "qodercom", qwenwork: "qwenwork", glm: "glm", monkeycode: "monkeycode", raccoon: "raccoon", loomy: "loomy", oczen: "oczen", cline: "cline", officeace: "officeace" };
 const chLabel = (k) => CH_LABEL[k] || k;
 const chClass = (k) => CH_CLASS[k] || "custom";
 // 不支持显式签到（手动按钮）的渠道：
@@ -441,7 +441,7 @@ const chClass = (k) => CH_CLASS[k] || "custom";
 const NO_EXPLICIT_CHECKIN = new Set(["workbuddyai", "qwenwork", "monkeycode", "loomy", "oczen", "cline"]);
 const noExplicitCheckin = (g) => NO_EXPLICIT_CHECKIN.has(g);
 // 导入型渠道：凭据由本机已登录的官方客户端提供，没有浏览器登录流程（见 internal/app/import_local.go）。
-const IMPORT_LOCAL_CHANNELS = new Set(["monkeycode", "raccoon", "loomy"]);
+const IMPORT_LOCAL_CHANNELS = new Set(["monkeycode", "raccoon", "loomy", "officeace"]);
 const isImportLocal = (ch) => IMPORT_LOCAL_CHANNELS.has(ch);
 // 支持「网页版自动登录」的渠道：后端拉起独立 profile 的浏览器，用户在网页里登录，
 // 后端经 CDP 捕获凭据（小浣熊：Cookie 里的 raccoon_refresh_token）。
@@ -483,7 +483,7 @@ function creditsText(a) {
 }
 
 // 渠道汇总固定顺序（与添加按钮布局一致；traecode 是别名池不单独出现，qoder 下线仅存量兜底）
-const CH_SUMMARY_ORDER = ["workbuddy", "workbuddyai", "traework", "qodercn", "qodercom", "qwenwork", "glm", "cline", "oczen", "qoder"];
+const CH_SUMMARY_ORDER = ["workbuddy", "workbuddyai", "traework", "qodercn", "qodercom", "qwenwork", "glm", "cline", "officeace", "oczen", "qoder"];
 
 // renderSummary 渠道积分汇总条：每渠道一行「可用总积分 / 临期」，末尾合计。
 // 数据全部来自 state.accounts（pool 实时值），与账号卡片同源；
@@ -1017,6 +1017,7 @@ const NO_CHECKIN_LOGIN_HINT = {
   loomy: "（凭据来自本机已登录的 Loomy 客户端；上游无续期接口，约 14 天后需重新登录并再次导入）",
   glm: "（登录后请按下方指引复制 refresh_token 粘贴回来）",
   cline: "（无需登录：在 app.cline.bot 注册账号，Account / API Keys → Create API Key 后粘贴即可；Key 不过期也不轮换）",
+  officeace: "（凭据来自本机已登录的 OfficeAce 客户端；每日签到的临时凭据约 2 小时有效，本工具会自动续期）",
 };
 function promptLogin(channel) {
   pendingChannel = channel;
@@ -1026,6 +1027,27 @@ function promptLogin(channel) {
   const altBtn = $("btnLoginAlt");
   altBtn.classList.add("hidden");
   altBtn.onclick = null;
+
+  // OfficeAce（华为云果办）：主按钮走自助 OAuth（打开华为云授权页），
+  // 次按钮回退到「从本机 OfficeAce 客户端导入」。
+  if (channel === "officeace") {
+    pendingAction = "login";
+    $("lcTitle").textContent = "添加 OfficeAce 账号";
+    $("lcMsg").innerHTML = `点击「浏览器登录」将打开<b>华为云授权页</b>，用你的华为账号登录后，`
+      + `本工具会自动捕获凭据并添加账号（无需安装 OfficeAce 桌面端）。`
+      + `也可以点「从客户端导入」直接读取本机已登录的 OfficeAce 桌面端凭据。`
+      + `<div class="glm-warn" style="margin-top:10px">`
+      + `<div class="glm-warn-title">提示</div>`
+      + `对话走不过期的网关凭据；每日签到的临时凭据约 2 小时有效，本工具会自动续期。`
+      + `若同一账号的 refresh_token 被本工具与桌面端共用可能互踢，需在本工具单独登录一次。`
+      + `</div>`;
+    $("btnLoginConfirm").textContent = "浏览器登录";
+    altBtn.textContent = "从客户端导入";
+    altBtn.classList.remove("hidden");
+    altBtn.onclick = () => { pendingAction = "import"; confirmLogin(); };
+    $("loginConfirmOverlay").classList.remove("hidden");
+    return;
+  }
 
   // 网页版登录渠道：主按钮走「拉起浏览器 + 自动捕获凭据」，次按钮回退到本机客户端导入。
   if (hasWebLogin(channel)) {
@@ -1082,6 +1104,7 @@ function confirmLogin() {
   if (!pendingChannel) return;
   // 按 pendingAction 分发：小浣熊两种动作都支持，不能只看渠道是否属于导入型。
   if (pendingAction === "import") importLocal(pendingChannel);
+  else if (pendingChannel === "officeace") startOfficeAceWebLogin();
   else startLogin(pendingChannel);
 }
 
@@ -1125,11 +1148,62 @@ async function startLogin(channel) {
 
 async function cancelLogin() {
   try {
+    stopOfficeAcePoll();
+    cancelOfficeAceLogin();
     await api("/api/login/cancel", {});
     stopLoginPoll();
     $("loginOverlay").classList.add("hidden");
     toast("登录已取消");
   } catch (e) { toast(e.message); }
+}
+
+// ---- OfficeAce 自助登录（华为云 OAuth 授权码 + PKCE）----
+let oaPoll = null;
+async function startOfficeAceWebLogin() {
+  try {
+    const r = await api("/api/login/officeace_auto", {});
+    const url = r.auth_url;
+    if (!url) { toast("无法获取登录链接"); return; }
+    $("loginTitle").textContent = "添加 OfficeAce 账号";
+    $("loginMsg").textContent = "已在浏览器打开华为云授权页，请在其中登录并授权；完成后本工具会自动捕获凭据。"
+      + "若浏览器未自动打开，可点「复制链接」手动打开。";
+    $("loginOverlay").classList.remove("hidden");
+    $("btnCopyUrl").dataset.url = url;
+    if (r.warning) toast(r.warning, 6000);
+    startOfficeAcePoll();
+  } catch (e) {
+    toast(e.message);
+  }
+}
+
+function startOfficeAcePoll() {
+  stopOfficeAcePoll();
+  oaPoll = setInterval(async () => {
+    try {
+      const st = await api("/api/login/officeace_auto_status");
+      if (st.status === "done") {
+        stopOfficeAcePoll();
+        $("loginOverlay").classList.add("hidden");
+        toast(`OfficeAce 账号已添加${st.nickname ? "：" + st.nickname : ""}`);
+        await loadState();
+        refreshFees();
+      } else if (st.status === "failed" || st.status === "expired") {
+        stopOfficeAcePoll();
+        toast(st.error || "OfficeAce 登录失败", 8000);
+      } else if (st.status === "canceled" || st.status === "idle") {
+        stopOfficeAcePoll();
+      }
+    } catch (e) { /* 忽略瞬时错误 */ }
+  }, 2000);
+}
+
+function stopOfficeAcePoll() {
+  if (oaPoll) { clearInterval(oaPoll); oaPoll = null; }
+}
+
+function cancelOfficeAceLogin() {
+  stopOfficeAcePoll();
+  api("/api/login/officeace_auto_cancel", {}).catch(() => {});
 }
 
 function copyUrl() {
@@ -1924,6 +1998,7 @@ function bind() {
   $("btnAddCline").onclick = () => promptLogin("cline");
   $("btnClineSubmit").onclick = submitClineKey;
   $("btnClineCancel").onclick = () => $("clineOverlay").classList.add("hidden");
+  $("btnAddOfficeAce").onclick = () => promptLogin("officeace");
   $("btnCheckinAll").onclick = checkinAll;
   $("btnRefreshAll").onclick = refreshAll;
   $("btnAddTime").onclick = addTime;
