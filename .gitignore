@@ -2,6 +2,7 @@
 dist/
 cmd/wild-work/rsrc_windows_amd64.syso
 cmd/wild-work/icon.ico
+/prepbody.exe
 
 # Go 构建缓存与临时目录（本机构建用，不入版本控制）
 .gotmp/
