@@ -307,3 +307,70 @@ func TestModelFallbackRecoveryNotFakedWhenBackupAlsoCold(t *testing.T) {
 		t.Fatalf("解冻后事件应关闭且只有一条：%+v", evs)
 	}
 }
+
+// TestModelFallbackCrossChannelWhenWholeChannelCold 整渠道全灭（无健康账号）时
+// 跨渠道备胎仍须顶上：唯一账号整号冷却后，请求不应直接 503，而应落到另一渠道的备胎。
+// 去掉 pickModelFallback 的 !hasHealthy 提前返回即失败（这正是本次修复的目标）。
+func TestModelFallbackCrossChannelWhenWholeChannelCold(t *testing.T) {
+	upA := &codeUpstream{status: 200}
+	upB := &codeUpstream{status: 200}
+	h, pa, _ := newFbHandler(t, upA, upB, []config.ModelFallbackRule{
+		{From: "oczen/big-pickle", To: []string{"workbuddy/glm-free"}},
+	})
+	// 唯一账号整号冷却 ⇒ 渠道无健康账号（整渠道全灭形态）。
+	// 上游版用「多模型接连限流升级整号冷却」构造；本仓无该升级，账号级冷却等效。
+	pa.Cooldown(oczen.AnonymousUID, pool.CoolSoft, 10*time.Minute, "test")
+	rec := callModel(h, "oczen/big-pickle")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("整渠道全灭时应跨渠道降级返回 200，实际 %d：%s", rec.Code, rec.Body.String())
+	}
+	if got := rec.Header().Get("X-Model-Fallback"); got != "oczen/big-pickle -> workbuddy/glm-free" {
+		t.Errorf("X-Model-Fallback = %q，want 跨渠道备胎 workbuddy/glm-free", got)
+	}
+	if upB.calls != 1 {
+		t.Errorf("备胎渠道上游收到 %d 次请求，want 1", upB.calls)
+	}
+	if upA.calls != 0 {
+		t.Errorf("主渠道上游不应收到请求（整渠道已全灭），实际 %d 次", upA.calls)
+	}
+}
+
+// TestModelFallbackCrossChannelWhenChannelDisabled 整渠道被禁用（同理无健康账号）
+// 时同样跨渠道降级，不得直接 503。
+func TestModelFallbackCrossChannelWhenChannelDisabled(t *testing.T) {
+	upA := &codeUpstream{status: 200}
+	upB := &codeUpstream{status: 200}
+	h, pa, _ := newFbHandler(t, upA, upB, []config.ModelFallbackRule{
+		{From: "oczen/big-pickle", To: []string{"workbuddy/glm-free"}},
+	})
+	pa.Disable(oczen.AnonymousUID, "test")
+	rec := callModel(h, "oczen/big-pickle")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("渠道禁用时应跨渠道降级返回 200，实际 %d：%s", rec.Code, rec.Body.String())
+	}
+	if got := rec.Header().Get("X-Model-Fallback"); got != "oczen/big-pickle -> workbuddy/glm-free" {
+		t.Errorf("X-Model-Fallback = %q，want 跨渠道备胎", got)
+	}
+	if upB.calls != 1 || upA.calls != 0 {
+		t.Errorf("upA=%d upB=%d，want 0/1（跨渠道降级）", upA.calls, upB.calls)
+	}
+}
+
+// TestModelFallbackWholeChannelColdNoBackupKeeps503 整渠道全灭且备胎渠道也无容量时，
+// 仍回到原 no_healthy_account 503 路径（不得因删了提前返回而改变「无备胎可用」的收尾）。
+func TestModelFallbackWholeChannelColdNoBackupKeeps503(t *testing.T) {
+	upA := &codeUpstream{status: 200}
+	upB := &codeUpstream{status: 200}
+	h, pa, pb := newFbHandler(t, upA, upB, []config.ModelFallbackRule{
+		{From: "oczen/big-pickle", To: []string{"workbuddy/glm-free"}},
+	})
+	pa.Disable(oczen.AnonymousUID, "test")
+	pb.CooldownModel("backup-uid", "glm-free", pool.CoolSoft, time.Hour, "test")
+	rec := callModel(h, "oczen/big-pickle")
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("无可用备胎时应保持 503，实际 %d：%s", rec.Code, rec.Body.String())
+	}
+	if upB.calls != 0 {
+		t.Errorf("备胎渠道已全冷，不应收到请求，实际 %d 次", upB.calls)
+	}
+}

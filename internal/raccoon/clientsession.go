@@ -33,11 +33,38 @@ func clientAuthFile() string {
 	return ""
 }
 
-// jwtName 解出 JWT 的 name claim（小浣熊 uid），失败返回空串。
-func jwtName(tok string) string {
+// JWTUID 取小浣熊 access/refresh JWT 里的账号标识（uid）。
+//
+// 2026-10-15 上游迁站后 JWT 换成标准 OIDC（`sid/ver/iss/sub/aud/exp/nbf/iat/jti`），
+// **不再有 `name` claim**，账号标识搬到了 `sub`（实测形如 `pu-01a1365c-…`）。
+// 旧版 JWT 是 `owner_type/name/sid` 形态，`name` 才是 uid。
+//
+// 本函数是**唯一取数点**：登录编排（login_raccoon）、客户端会话自愈（RescueFromClientSession）、
+// 「从客户端导入」与登录落盘（internal/app）四处都必须用它——
+// 各处各写一份 `jwtClaim(tok, "name")` 就是 2026-10-15 那次漏改的根因
+// （PR #124 只补了 2 处，客户端会话自愈与导入路径仍读 `name` ⇒ 恒空）。
+// 解析失败返回空串（调用方自行兜底，勿 panic）。
+func JWTUID(tok string) string {
+	claims := jwtClaimMap(tok)
+	if claims == nil {
+		return ""
+	}
+	// 优先 name（旧版语义），非空才认；否则回落 sub（新版 OIDC）。
+	for _, k := range []string{"name", "sub"} {
+		if s, ok := claims[k].(string); ok {
+			if v := strings.TrimSpace(s); v != "" {
+				return v
+			}
+		}
+	}
+	return ""
+}
+
+// jwtClaimMap 解出 JWT 的 payload（失败返回 nil）。
+func jwtClaimMap(tok string) map[string]any {
 	parts := strings.Split(strings.TrimSpace(tok), ".")
 	if len(parts) < 2 {
-		return ""
+		return nil
 	}
 	seg := strings.NewReplacer("-", "+", "_", "/").Replace(parts[1])
 	if m := len(seg) % 4; m != 0 {
@@ -45,15 +72,13 @@ func jwtName(tok string) string {
 	}
 	raw, err := base64.StdEncoding.DecodeString(seg)
 	if err != nil {
-		return ""
+		return nil
 	}
-	var payload struct {
-		Name string `json:"name"`
+	var out map[string]any
+	if json.Unmarshal(raw, &out) != nil {
+		return nil
 	}
-	if json.Unmarshal(raw, &payload) != nil {
-		return ""
-	}
-	return strings.TrimSpace(payload.Name)
+	return out
 }
 
 // RescueFromClientSession 从本机客户端会话文件采纳最新令牌到 a。
@@ -87,7 +112,7 @@ func RescueFromClientSession(a *auth.Auth) error {
 	if access == "" || refresh == "" {
 		return fmt.Errorf("raccoon: 客户端会话缺少令牌（%s），请先在客户端完成登录", path)
 	}
-	if uid := jwtName(access); uid == "" || uid != a.UID {
+	if uid := JWTUID(access); uid == "" || uid != a.UID {
 		return fmt.Errorf("raccoon: 客户端会话 uid 不匹配（客户端=%q 账号=%q），拒绝采纳", uid, a.UID)
 	}
 	// 客户端令牌已过期（如客户端登出后残留旧会话）时不采纳——采纳一个过期

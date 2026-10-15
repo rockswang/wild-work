@@ -264,17 +264,10 @@ func jwtOwnerType(tok string) string {
 	return ""
 }
 
-// jwtName 取 JWT 里的 uid：优先 name claim（旧版），回落 sub（新版标准 OIDC）。
-func jwtName(tok string) string {
-	claims := jwtClaims(tok)
-	if s, ok := claims["name"].(string); ok && strings.TrimSpace(s) != "" {
-		return strings.TrimSpace(s)
-	}
-	if s, ok := claims["sub"].(string); ok {
-		return strings.TrimSpace(s)
-	}
-	return ""
-}
+// jwtName 取 JWT 里的 uid：委托给 raccoon.JWTUID（唯一取数点）——
+// 旧版取 name claim，新版标准 OIDC（2026-10-15 上游迁站后）无 name、回落 sub。
+// 本处保留同名包装只是为了调用点可读，不再各自重复解析逻辑。
+func jwtName(tok string) string { return raccoon.JWTUID(tok) }
 
 // jwtExp 取 JWT 的 exp（Unix 秒）；解析失败返回 0。
 func jwtExp(tok string) int64 {

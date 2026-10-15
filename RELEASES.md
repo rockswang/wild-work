@@ -2019,3 +2019,98 @@ Cline 上游免费池的 ID 自带命名空间（`cline-free/*`），此前对�
 |--------|------|
 | [@ezjbc](https://github.com/ezjbc) | #118 思考强度档位注入（含面板可视化编辑与热更新） |
 | [@jianzhangg](https://github.com/jianzhangg) | #119 小浣熊 setting_info 签到、#120 自定义 OpenAI 兼容渠道、#121 自定义渠道 UI 打磨 |
+
+---
+
+# wild-work v2.7.4 — 小浣熊登录跟进上游迁站 + 监听失败终止 + 跨渠道降级
+
+> 发布主题：**上游改版适配与三处「静默失效」修复**。小浣熊登录跟进上游迁站
+> （入口与凭据 cookie 名都变了，旧实现已完全失效）；启动时监听失败不再静默留在后台
+> 当僵尸实例；模型降级链在「整渠道全灭」时也能跨渠道顶上；另修一处会让
+> **管理面板登录层不可见**的 HTML 结构缺陷。
+>
+> 本次为 v2.7.3 之后的补丁小版本，含 **3 个社区 PR**（#124/#126 [@xxhhlk](https://github.com/xxhhlk)；
+> #127 [@ezjbc](https://github.com/ezjbc)）与 1 个 issue（#125 [@sept13-yu](https://github.com/sept13-yu)）。
+> **合并期额外修出 2 条跨切面缺陷**（小浣熊 JWT uid 提取漏改两处、降级文案与死代码），
+> 详见下文。
+
+---
+
+## 🦝 小浣熊登录跟进上游迁站（R67，PR #124）
+
+上游把小浣熊登录从 `office.xiaohuanxiong.com` 迁到 `xiaohuanxiong.com`，改用独立 `/login`
+页，并**改了凭据 cookie 名**。旧实现两处失效，表现为**面板弹出的登录窗口登录成功后一直跳回
+登录页，接口随后报 429**，5 分钟超时后连访客凭据都读不到。
+
+- **入口修正**：旧入口 `…/home?loginModal=true` 在新版前端会陷入
+  `/work/home?loginModal=true ↔ /login?redirect_url=…loginModal=true` 的**重定向死循环**
+  （cookie 永远写不进来）。改为直接开 `/login?product_code=work&redirect_url=…%2Fwork%2Fhome`，
+  **不带 `loginModal`**。
+- **凭据 cookie 改名**：登录态凭据从 `raccoon_refresh_token` 变为 `xhx_token`（新版标准 OIDC JWT，
+  ≈30 天）。旧名在**访客态仍会下发**且能成功调 refresh —— 监听旧名会一打开就抓到访客凭据、
+  落盘成假账号（R28 那个坑，现在必现）。
+- **判据放宽**：新版 JWT 无 `owner_type`，原判据会恒判访客 ⇒ 永不捕获。改为
+  「`xhx_token` 出现即登录，仅上游**显式**声明 `visitors` 才拒绝」。
+
+## 🚪 启动时监听失败必须终止进程（R68，PR #126）
+
+第二次双击启动没有任何「端口已被占用」提示：托盘图标照常出现、面板也能打开——打开的是
+**第一个实例**，用户以为多开成功。根因不在 socket 层，而在启动时只把 `listen` 失败写进日志
+就继续往下跑：11 个调度器与托盘全部照常启动，第二个进程在后台**重复签到**，并与第一个实例
+**共享同一数据目录**，刷新出的 token 互相覆盖。
+
+- 改用启动层已有的 `fatal()`（写日志 + 系统提示框 + `os.Exit(1)`），与「配置加载失败」
+  「对外暴露但缺管理密码」两条 `fatal` 同一口径；位置在托盘创建与调度器启动之前，
+  不会留下幽灵托盘图标。
+- `--autostart` 同样适用：自启时端口被占也必须让用户知道，静默退出只是把「静默假活」
+  换成「静默真死」，问题一样不可见。
+
+## 🔀 整渠道全灭时跨渠道模型降级（R54 扩展，PR #127）
+
+R54 的降级链在生产里**只救了一半**：主模型所在渠道被 pool 的「多模型接连限流升级整号冷却」
+打成整渠道全灭后，请求直接 503——链上的跨渠道备胎（raccoon/loomy/workbuddy）**从未被尝试**。
+
+- 删掉 `pickModelFallback` 里「本渠道无健康账号就提前返回」的分支：「模型全冷」与
+  「整渠道全灭」两种形态**共用同一条降级链**；链路里落在同渠道的备胎会被
+  `modelHasCapacity` 自然跳过，故必然落到真正可用的跨渠道备胎上。
+- **不改**：`X-Model-Fallback` 头 / `body.model` 回填 / 恢复探针语义 / 未配置规则时零探测。
+  「无备胎可用」时仍回到原 `no_healthy_account` 503 路径。
+- 面板文案同步覆盖两种触发形态（不再只说「模型全冷」）。
+
+## 🖥 管理面板登录层不可见（issue #125）
+
+开启 `admin_password` 后，管理面板能打开壳子，却**看不到登录弹层**、点按钮无反应。
+根因是 `index.html` 里「思考强度」区块**少了一个闭合 `</div>`**，导致 `settingsOverlay`
+提前吞掉其后的 5 个弹层（含 `adminLoginOverlay`）——DOM 上登录层虽已去掉 `hidden` 且
+`display:flex`，但父级 `settingsOverlay.hidden` 为 `display:none`，子树布局恒 0×0。
+
+- 补回缺失的 `</div>`，并新增 3 条静态断言防回退（`<div>` 开闭配平 / `settingsOverlay`
+  有匹配闭合 / `adminLoginOverlay` 位于 `settingsOverlay` 之外）。
+
+## 🔧 合并期修出的跨切面缺陷
+
+1. **小浣熊 JWT uid 提取漏改两处（R67 补正）**：上游迁站后 JWT 换成标准 OIDC，
+  **无 `name` claim**（账号标识在 `sub`）。PR #124 只给「登录落盘」与 `web.go` 补了 `sub` 回落，
+  而 `internal/raccoon/clientsession.go`（**客户端会话自愈**）与 `internal/app/import_local.go`
+  （**从客户端导入**）仍只读 `name` ⇒ 两路恒空：前者报「uid 不匹配」使自愈**永久失效**
+  （不变式 19），后者把账号落成 `raccoon-default.json`。现收敛为**唯一取数点 `raccoon.JWTUID`**
+  （旧版取 `name`、非空才认，否则回落 `sub`），四处共用并删掉已死代码的 `jwtClaim`。
+2. **降级链的 `runtimeCapacity` 死代码与过期文案**：PR #127 删掉提前返回后，`runtimeCapacity`
+  的 `hasHealthy` 返回值已无人使用，折叠为单一 `modelHasCapacity`；面板/统计里写死「主模型全冷」
+  的文案同步改为覆盖「整渠道全灭」。
+
+## 📝 文档与决议整合
+
+- AGENTS.md：新增 **R67（小浣熊迁站）**、**R68（监听失败终止）**，R54 触发判据同步扩展，
+  R44 注明「入口与 cookie 名已更新，见 R67」；README 决议索引更新为 R1–R68。
+- 回归：`internal/login_raccoon`、`internal/raccoon`（`TestJWTUID` / 新版 OIDC 自愈）、
+  `internal/app`（uid 单点来源静态锁）、`internal/server`（降级链 13 例）、
+  `cmd/wild-work/listen_fail_test.go`、`scripts/ui-static-check.mjs`。
+
+## 🙏 致谢
+
+| 贡献者 | 内容 |
+|--------|------|
+| [@xxhhlk](https://github.com/xxhhlk) | #124 小浣熊登录跟进上游迁站、#126 监听失败终止进程 |
+| [@ezjbc](https://github.com/ezjbc) | #127 整渠道全灭时跨渠道模型降级（R54 触发判据扩展） |
+| [@sept13-yu](https://github.com/sept13-yu) | issue #125 管理面板登录层不可见（定位到缺失的 `</div>`） |

@@ -59,6 +59,25 @@ func TestRescueFromClientSession_AdoptsMatchingUID(t *testing.T) {
 	}
 }
 
+// TestRescueFromClientSession_AdoptsNewOIDCToken 新版（2026-10-15 迁站后）只带 `sub`
+// 的 OIDC JWT 也必须能自愈——旧实现只读 name，该场景下 uid 恒空 ⇒ 恒报「uid 不匹配」，
+// 于是账号一旦 refresh 被客户端轮换作废就永久无法自救（不变式 19 失效）。
+func TestRescueFromClientSession_AdoptsNewOIDCToken(t *testing.T) {
+	exp := time.Now().Add(time.Hour).Unix()
+	uid := "pu-01a1365c-0e25-7940-b6a6-3e648daf94d6"
+	access := makeJWT(t, map[string]any{"sub": uid, "exp": exp})
+	refresh := makeJWT(t, map[string]any{"sub": uid, "exp": exp + 14*24*3600})
+	writeClientAuth(t, access, refresh)
+
+	a := &auth.Auth{UID: uid, AccessToken: "stale", RefreshToken: "stale-rt", ExpiresAt: 1}
+	if err := RescueFromClientSession(a); err != nil {
+		t.Fatalf("新版 OIDC（只有 sub）应能采纳: %v", err)
+	}
+	if a.AccessToken != access || a.RefreshToken != refresh {
+		t.Fatal("新版 OIDC 令牌未被采纳")
+	}
+}
+
 // TestRescueFromClientSession_RejectsUIDMismatch uid 不匹配必须拒绝（防多账号互相污染）。
 func TestRescueFromClientSession_RejectsUIDMismatch(t *testing.T) {
 	access := makeJWT(t, map[string]any{"name": "U2", "exp": time.Now().Add(time.Hour).Unix()})
@@ -91,13 +110,27 @@ func TestRescueFromClientSession_MissingTokens(t *testing.T) {
 	}
 }
 
-// TestJWTName jwtName 对真实结构的解析与容错。
-func TestJWTName(t *testing.T) {
+// TestJWTUID JWTUID 对旧版（name）与新版 OIDC（sub）两种形态的解析与容错。
+//
+// 2026-10-15 上游迁站后新版 JWT 无 name claim，账号标识在 sub；
+// 若只读 name，「客户端会话自愈」与「从客户端导入」两条路径都会拿不到 uid
+// （RescueFromClientSession 恒报 uid 不匹配 ⇒ 自愈永久失效）。
+func TestJWTUID(t *testing.T) {
 	tok := makeJWT(t, map[string]any{"name": "RaccoonX", "exp": 123})
-	if got := jwtName(tok); got != "RaccoonX" {
-		t.Fatalf("jwtName = %q, want RaccoonX", got)
+	if got := JWTUID(tok); got != "RaccoonX" {
+		t.Fatalf("旧版 name 形态: JWTUID = %q, want RaccoonX", got)
 	}
-	if got := jwtName("not-a-jwt"); got != "" {
+	// 新版 OIDC：无 name，只有 sub（实测 claims: sid/ver/iss/sub/aud/exp/nbf/iat/jti）。
+	newTok := makeJWT(t, map[string]any{"sub": "pu-01a1365c-0e25-7940-b6a6-3e648daf94d6", "exp": 123})
+	if got := JWTUID(newTok); got != "pu-01a1365c-0e25-7940-b6a6-3e648daf94d6" {
+		t.Fatalf("新版 sub 形态: JWTUID = %q", got)
+	}
+	// name 存在但为空串时应回落 sub（上游旧版访客 JWT 就是 name:""）。
+	emptyName := makeJWT(t, map[string]any{"name": "", "sub": "pu-fallback"})
+	if got := JWTUID(emptyName); got != "pu-fallback" {
+		t.Fatalf("name 为空应回落 sub: JWTUID = %q, want pu-fallback", got)
+	}
+	if got := JWTUID("not-a-jwt"); got != "" {
 		t.Fatalf("非 JWT 应返回空, got %q", got)
 	}
 }

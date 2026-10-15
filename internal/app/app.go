@@ -52,7 +52,7 @@ import (
 )
 
 // Version 版本号。
-const Version = "2.7.3"
+const Version = "2.7.4"
 
 const (
 	loginTimeout   = 5 * time.Minute
@@ -830,11 +830,9 @@ func (a *App) pollLogin(ctx context.Context) {
 // access_token 约 1h，靠 refresh_token 续期；签到走 setting_info 触发每日积分落账
 // （见 internal/raccoon/checkin.go），故登录后立即签到一次，让当日积分马上落账。
 func (a *App) completeRaccoonLogin(r loginraccoon.Result) {
-	uid := strings.TrimSpace(jwtClaim(r.AccessToken, "name"))
-	if uid == "" {
-		// 新版 JWT 为标准 OIDC（无 name claim），用户标识在 sub。
-		uid = strings.TrimSpace(jwtClaim(r.AccessToken, "sub"))
-	}
+	// uid 提取统一走 raccoon.JWTUID：旧版 JWT 取 name，新版（2026-10-15 上游迁站后）
+	// 标准 OIDC 无 name claim，回落 sub。与客户会话自愈、导入路径同源，避免多处各自漂移。
+	uid := raccoon.JWTUID(r.AccessToken)
 	if uid == "" {
 		uid = "default"
 	}

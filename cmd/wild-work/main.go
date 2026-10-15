@@ -637,11 +637,10 @@ func main() {
 	appInst.SetRootHandler(mux)
 
 	if err := appInst.StartServer(); err != nil {
-		// 监听失败必须终止，不能只记日志继续跑：调度器与托盘会照常起来，
-		// 表现为「面板看着一切正常，其实是另一个实例在服务本端口」，
-		// 而两个进程共享同一数据目录（config.json / auths / data），
-		// 会重复签到并互相覆盖刷新出的 token。
-		fatal("监听 %s 失败：%v\n\n该端口可能已被占用，例如已有一个 wild-work 实例在运行。\n"+
+		// 监听失败必须终止：只记日志继续跑会让调度器与托盘照常起来，
+		// 表现为「面板看着一切正常、其实是别的实例在服务本端口」，
+		// 而两个进程共享同一数据目录，会重复签到并互相覆盖刷新出的 token。
+		fatal("监听 %s 失败：%v\n\n该端口可能已被占用（例如已有一个 wild-work 实例在运行）。\n"+
 			"请先退出已有实例，或改用 config.json 的 listen.port（也可用环境变量 WILDWORK_LISTEN）。",
 			cfg.Listen.Addr(), err)
 	}
