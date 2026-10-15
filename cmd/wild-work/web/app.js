@@ -136,10 +136,7 @@ function collectAllModels() {
     for (const m of ch.models || []) {
       const raw = m.model;
       const short = raw.includes("/") ? raw.slice(raw.indexOf("/") + 1) : raw;
-      // 完整 ID 一律取服务端给的 m.id（与 /v1/models、provider.PublicModelID 同源）；
-      // 缺字段时退回旧拼接规则（兼容旧后端缓存）：上游 ID 自带命名空间（cline-free/*）
-      // 的渠道由服务端直接透传上游 ID，不再补 `<渠道>/` 前缀（R59）。
-      const full = m.id || (ch.channel && !raw.startsWith(`${ch.channel}/`) ? `${ch.channel}/${raw}` : raw);
+      const full = raw.includes("/") ? raw : (ch.channel ? `${ch.channel}/${raw}` : raw);
       out.push({ ch: ch.channel, m, short, full });
     }
   }
@@ -168,16 +165,12 @@ function renderModelSearch(q) {
   } else {
     box.innerHTML = shown.map(({ ch, m, short, full }) => {
       const caps = [m.supports_images ? "👁" : "", m.supports_reasoning ? "🧠" : ""].join("");
-      // 档位小字（issue #96）：上游声明才显示
-      const eff = (m.reasoning_efforts && m.reasoning_efforts.length)
-        ? `<span class="ms-eff" title="思考档位：${esc(m.reasoning_efforts.join("·"))}${m.default_reasoning_effort ? `（默认 ${m.default_reasoning_effort}）` : ""}">${esc(m.reasoning_efforts.join("·"))}</span>` : "";
-      const ctx = (m.has_context && m.context_window)
-        ? `<span title="上下文窗口：${esc(fmtTokens(m.context_window))} tokens（${m.hand_measured ? "本工具实测，仅供参考" : "上游接口返回"}）">(${esc(fmtTokens(m.context_window))}${m.hand_measured ? "*" : ""})</span>` : "";
+      const ctx = (m.has_context && m.context_window) ? `(${fmtTokens(m.context_window)})` : "";
       const rate = m.free ? "Free" : (m.priced ? `x${m.rate.toFixed(2)}` : "unknown");
       return `<div class="ms-row" data-mid="${esc(full)}" role="button" tabindex="0" title="点击复制完整模型 ID：${esc(full)}">`
         + `<span class="badge ${chClass(ch)}">${esc(chLabel(ch))}</span>`
         + `<span class="ms-name">${esc(short)}</span>`
-        + `<span class="ms-tags">${ctx}${caps}${eff}</span>`
+        + `<span class="ms-tags">${ctx}${caps}</span>`
         + `<span class="ms-rate">${esc(rate)}</span>`
         + `</div>`;
     }).join("");
@@ -192,68 +185,31 @@ function renderModelSearch(q) {
         : `共 ${hit.length} 个匹配`));
 }
 
-// ---------- 积分明细浮窗 ----------
+// ---------- 积分明细 tooltip ----------
 // 明细条数可能很多（TraeWork 每个签到奖励都是独立条目，常见 30+），
 // 故分页展示：每页 DETAIL_PAGE_SIZE 条，页码状态存在 detailState 里，
 // 翻页不重新请求（detailCache 已缓存该账号的完整响应）。
-//
-// 交互：**点击**积分标签打开，✕ / 点击浮窗之外 / Esc 关闭（三个关闭路径都归一到
-// closeCreditDetail）。为什么不用 hover：
-//   ① 浮窗开着时后台 loadState() 会重建卡片 DOM，被替换的元素不再派发 mouseleave
-//      ⇒ 浮窗变成孤儿、关不掉（用户实际遇到的「经常不能自动关闭」就是这个）；
-//   ② 触屏设备不派发 mouseenter/mouseleave，手机上既打不开也关不掉；
-//   ③ hover 模型把「翻页」与「移出即关」耦合成矛盾诉求（要翻页就得移进浮窗）。
 const DETAIL_PAGE_SIZE = 8;
+let detailTimer = null;
 let detailCache = {};
-// detailState 当前浮窗的展示状态：{uid, page}。
+// detailState 当前 tooltip 的展示状态：{uid, page}。
+// detailState 当前 tooltip 的展示状态：{uid, page}。
 let detailState = null;
-// detailOpenSeq 打开序号：快速连点两个账号时，只让「最后一次点击」的响应上屏。
-// 取代了 hover 版靠 detailTimer 的竞态守卫（点击式没有「等待期间鼠标移开」这回事）。
-let detailOpenSeq = 0;
-
-// closeCreditDetail 关闭浮窗（唯一的关闭入口，X / 点外部 / Esc / 切 tab 都走它）。
-function closeCreditDetail() {
-  const tip = $("creditTip");
-  if (tip) tip.style.display = "none";
-  detailOpenSeq++; // 让在途的明细请求失效，避免关掉后又被异步回调弹出来
-}
-
-// bindCreditDetailDismiss 绑定浮窗的外部关闭路径（绑定一次）。
-// 为什么用 document 级委托而不是给每个入口挂 handler：浮窗与卡片都是动态重建的，
-// 委托不受重建影响——这正是旧 hover 实现的失效根源（元素换掉后监听器一起消失）。
-function bindCreditDetailDismiss() {
-  document.addEventListener("click", (e) => {
-    const tip = $("creditTip");
-    if (!tip || tip.style.display === "none") return;
-    // 归属判定必须用事件传播路径（composedPath），不能用 e.target.closest：
-    // showCreditDetail → syncCreditsFromDetail 会在本次派发途中重写积分格 innerHTML，
-    // 把被点的 SPAN 从 DOM 摘掉；detached 节点的 closest() 恒为 null，
-    // 会让「点另一个账号的标签」被误判成「点外部」而把刚打开的浮窗关掉。
-    // composedPath 在派发时就已固化，不受中途 DOM 替换影响。
-    const path = e.composedPath ? e.composedPath() : [];
-    const inPath = (pick) => path.some((n) => n instanceof Element && pick(n));
-    if (inPath((n) => n.getAttribute("data-close-credit-tip") === "1")) { closeCreditDetail(); return; }
-    if (path.includes(tip) || tip.contains(e.target)) return;          // 浮窗内部（含翻页）不关
-    if (inPath((n) => n.classList.contains("acct-credits"))) return;   // 点另一个账号的标签 = 切换，不关
-    closeCreditDetail();                                               // 其余任何位置都关
-  });
-  // Esc 关闭：与其它弹层（设置/帮助/查找模型）的键盘行为一致
-  document.addEventListener("keydown", (e) => { if (e.key === "Escape") closeCreditDetail(); });
-}
 
 async function showCreditDetail(e, uid) {
   const el = e.currentTarget;
-  const seq = ++detailOpenSeq; // 本次打开的身份；被更晚的打开或关闭动作作废时不再上屏
+  if (detailTimer) { clearTimeout(detailTimer); detailTimer = null; }
 
-  // 切换到另一个账号时重置页码；同一账号重复点击保留原页码。
+  // 切换到另一个账号时重置页码；同一账号重复 hover 保留原页码。
   const page = (detailState && detailState.uid === uid) ? detailState.page : 0;
 
   let d = detailCache[uid];
   if (!d) {
     try {
       d = await api("/api/account/resource_detail", { uid });
-      // 竞态守卫：等待接口期间用户又点了别的账号 / 关闭了浮窗 → 本次结果作废。
-      if (seq !== detailOpenSeq) return;
+      // 竞态守卫：等待接口期间鼠标已移开（hideCreditDetail 已排定关闭且未被
+      // tip hover/翻页取消）→ 不再弹出，避免 tooltip 残留在页面上。
+      if (detailTimer !== null) return;
       detailCache[uid] = d;
       syncCreditsFromDetail(uid, d);
     } catch (err) { return; }
@@ -268,30 +224,17 @@ async function showCreditDetail(e, uid) {
     document.body.appendChild(tip);
   }
 
-  // 位置由 CSS 固定（水平居中、距顶 12vh）：不再跟着被点卡片算 left/top，
-  // 这样后台重渲染、滚动都不会让浮窗跑偏，也避免窄屏越界。
-  void el;
+  const rect = el.getBoundingClientRect();
   detailState = { uid, page };
   renderCreditDetail();
-  tip.style.display = "block";
-}
-
-// syncCreditsFromDetail 把卡片与汇总条的积分数字回写成明细响应的同源代码。
-// 顶层原本是 pool 快照（仅刷新事件/30min 自动循环更新），明细是 hover 实时值，
-// 区间内消耗会让「同屏两个数字对不上」；后端 ResourceDetail 现已把同一响应回写
-// pool 快照，前端这里再把卡片与汇总条改为同源——弹层展开那一刻全屏数字一致。
-// 只改展示状态与对应 DOM，不重请求、不全量重绘（全量重绘会替换正在 hover 的
-// 卡片节点，tooltip 锚点与鼠标事件会丢）。
-function syncCreditsFromDetail(uid, d) {
-  const a = (state.accounts || []).find((x) => x.uid === uid);
-  if (!a || a.credits_na) return;
-  a.credits = d.usable_remain || 0;
-  a.unusable_credits = d.unusable_remain || 0;
-  a.expiring_credits = d.expiring_remain || 0;
-  a.credits_stale = false;
-  const cell = document.querySelector(`.acct-credits[data-uid="${uid}"]`);
-  if (cell) cell.innerHTML = creditsText(a);
-  renderSummary();
+  // 先渲染再量尺寸，才能决定向上还是向下弹出。
+  const h = tip.offsetHeight;
+  let top = rect.bottom + 4;
+  if (top + h > window.innerHeight) top = Math.max(4, rect.top - h - 4);
+  let left = rect.left;
+  if (left + tip.offsetWidth > window.innerWidth) left = Math.max(4, window.innerWidth - tip.offsetWidth - 10);
+  tip.style.left = left + "px";
+  tip.style.top = top + "px";
 }
 
 // syncCreditsFromDetail 把卡片与汇总条的积分数字回写成明细响应的同源代码。
@@ -351,10 +294,7 @@ function renderCreditDetail() {
     html += `<span class="detail-pg${page >= pages - 1 ? " off" : ""}" data-pg="${page + 1}">›</span>`;
     html += `</span>`;
   }
-  html += `<span class="detail-title">积分明细</span>`;
-  // 关闭按钮：桌面与触屏共用同一入口（触屏没有 hover，只能靠显式按钮）
-  html += `<button type="button" class="detail-close" data-close-credit-tip="1" title="关闭" aria-label="关闭积分明细">✕</button>`;
-  html += `</div>`;
+  html += `<span class="detail-title">积分明细</span></div>`;
   html += `<table class="detail-table"><thead><tr><th>套餐</th><th>总额</th><th>已用</th><th>剩余</th>`;
   if (hasExpiry) html += `<th>有效期</th>`;
   html += `</tr></thead><tbody>`;
@@ -402,15 +342,28 @@ function renderCreditDetail() {
   tip.innerHTML = html;
   tip.style.display = "block";
 
-  // 翻页：只改状态重绘，不重新请求接口。关闭路径由 bindCreditDetailDismiss 统一接管。
+  // 翻页：只改状态重绘，不重新请求接口。事件重挂由 hideCreditDetail 统一负责。
   tip.querySelectorAll(".detail-pg").forEach((btn) => {
     if (btn.classList.contains("off")) return;
     btn.onclick = (ev) => {
       ev.stopPropagation();
+      if (detailTimer) { clearTimeout(detailTimer); detailTimer = null; } // 翻页即取消关闭
       const target = Number(btn.dataset.pg);
       if (Number.isFinite(target)) { detailState.page = target; renderCreditDetail(); }
     };
   });
+}
+
+function hideCreditDetail() {
+  detailTimer = setTimeout(() => {
+    const tip = $("creditTip");
+    if (tip) tip.style.display = "none";
+  }, 300);
+  const tip = $("creditTip");
+  if (tip) {
+    tip.onmouseenter = () => { if (detailTimer) { clearTimeout(detailTimer); detailTimer = null; } };
+    tip.onmouseleave = () => { tip.style.display = "none"; };
+  }
 }
 
 // ---------- 渲染 ----------
@@ -483,15 +436,11 @@ const isImportLocal = (ch) => IMPORT_LOCAL_CHANNELS.has(ch);
 // 小浣熊两个集合都命中 —— 弹窗里同时给「网页版登录」与「从客户端导入」两个动作。
 const WEB_LOGIN_CHANNELS = new Set(["raccoon"]);
 const hasWebLogin = (ch) => WEB_LOGIN_CHANNELS.has(ch);
-// 粘贴凭据型渠道：没有浏览器登录编排，凭据由用户从官方站点自行创建后粘贴进来。
-// Cline：app.cline.bot → 注册账号 → Account / API Keys 建 sk_ Key（见 internal/cline）。
-const PASTE_KEY_CHANNELS = new Set(["cline"]);
-const isPasteKey = (ch) => PASTE_KEY_CHANNELS.has(ch);
 // 无手动签到渠道的状态文案：国际版是「自动领日活奖励」，千问办公为「无签到」。
-const NO_CHECKIN_TAG = { workbuddyai: "自动领日活奖励", oczen: "不支持", cline: "无签到" };
+const NO_CHECKIN_TAG = { workbuddyai: "自动领日活奖励", oczen: "不支持" };
 const noCheckinText = (g) => NO_CHECKIN_TAG[g] || "无签到";
 // 无积分概念的渠道（匿名通道）：积分区域显示「不适用」，并隐藏刷新积分/明细入口。
-const NO_CREDITS = new Set(["oczen", "cline"]);
+const NO_CREDITS = new Set(["oczen"]);
 
 // creditsText 账号卡片的积分文案。
 // 拆成「可用 / 不可用 / 临期」三个数字：渠道（如 TraeWork）会下发官方客户端专用的
@@ -527,7 +476,7 @@ function modelCoolingTag(a) {
 }
 
 // 渠道汇总固定顺序（与添加按钮布局一致；traecode 是别名池不单独出现，qoder 下线仅存量兜底）
-const CH_SUMMARY_ORDER = ["workbuddy", "workbuddyai", "traework", "qodercn", "qodercom", "qwenwork", "glm", "cline", "oczen", "qoder"];
+const CH_SUMMARY_ORDER = ["workbuddy", "workbuddyai", "traework", "qodercn", "qodercom", "qwenwork", "glm", "oczen", "qoder"];
 
 // renderSummary 渠道积分汇总条：每渠道一行「可用总积分 / 临期」，末尾合计。
 // 数据全部来自 state.accounts（pool 实时值），与账号卡片同源；
@@ -630,7 +579,7 @@ function renderAccounts() {
     // 问号图标：hover 展示 oczen 通道说明（免费反代范围/私有 Key/代理三项）。
     // 放在锁头左侧；用独立的 help 样式（正常亮度 + help 光标），不可点击但 tooltip 可用。
     // title 内换行用 &#10;（HTML 属性实体），字面 \n 会被部分浏览器吞掉导致无 tooltip。
-    const oczenHelp = `<span class="icon-op help" title="关于 OpenCodeZen 通道：&#10;1. 本工具仅反代其免费模型（绕过官方客户端限制）；付费账号可直接使用官方端点，无需经此通道&#10;2. 在 OpenCodeZen 获取的 API-Key 可在设置中配置，避免匿名账号共享限额超限&#10;3. 地域受限的免费模型（如 muse-spark 系）会经「备用上游通道」自动重发（设置里配置代理地址；未配置则原文透传 403）">?</span>`;
+    const oczenHelp = `<span class="icon-op help" title="关于 OpenCodeZen 通道：&#10;1. 本工具仅反代其免费模型（绕过官方客户端限制）；付费账号可直接使用官方端点，无需经此通道&#10;2. 在 OpenCodeZen 获取的 API-Key 可在设置中配置，避免匿名账号共享限额超限&#10;3. 配置代理后可使用有地域限制的模型，可用性取决于上游通道">?</span>`;
     const ops = noCredits
       ? `${oczenHelp}<span class="icon-op off" title="固定账号，不可停用/删除" onclick="return false">🔒</span>`
       : `${checkinBtn}
@@ -703,23 +652,11 @@ function renderFees(fees) {
     return caps.length > 0 ? ` <span class="cap-icons">${caps.join("")}</span>` : "";
   };
 
-  // 思考档位标记（issue #96）：模型 ID 后的档位小字标，如 [low·high·max]。
-  // 只在上游目录声明时展示（reasoning_efforts 非空），不自行编造。
-  const effortTag = (m) => {
-    if (!m || !m.reasoning_efforts || !m.reasoning_efforts.length) return "";
-    const list = m.reasoning_efforts.join("·") + (m.default_reasoning_effort ? `（默认 ${m.default_reasoning_effort}）` : "");
-    return ` <span class="effort-tag" title="思考档位（上游目录声明）：${esc(list)}；客户端传 reasoning_effort 即可调档">[${esc(m.reasoning_efforts.join("·"))}]</span>`;
-  };
-
   // 上下文标记：模型 ID 后的 (1M)/(180K) 小字标。
-  // has_context = 上游接口真实返回（context_from_api）或本工具手工实测（hand_measured）。
-  // 实测值用带 * 的写法「(1M*)」+ tooltip 标注来源——不把实测冒充成上游官方值，
-  // 同时也不埋没它（cline 这类渠道上游根本不返回上下文，只能靠实测）。
+  // 只在上游接口真实返回时展示（has_context），不拿估算值充数。
   const ctxTag = (m) => {
     if (!m || !m.has_context || !m.context_window) return "";
-    const hand = m.hand_measured ? "*" : "";
-    const src = m.hand_measured ? "本工具实测值（仅供参考，非上游官方声明）" : "上游接口返回";
-    return ` <span class="ctx-tag${m.hand_measured ? " hand" : ""}" title="上下文窗口：${fmtTokens(m.context_window)} tokens（${src}）">(${fmtTokens(m.context_window)}${hand})</span>`;
+    return ` <span class="ctx-tag" title="上下文窗口：${fmtTokens(m.context_window)} tokens">(${fmtTokens(m.context_window)})</span>`;
   };
 
   // 上下文档位选择：仅上游声明了可选档位的模型展示（Qoder 的 context_config）。
@@ -735,7 +672,7 @@ function renderFees(fees) {
 
   // 能力文字摘要，拼进模型 tooltip。
   // 措辞说明：上游模型列表接口未声明某能力时，本工具不自行断言其「不支持」，
-  // 只说「未声明」；hand_measured（本工具实测）时改说「实测不支持」，如实标出来源。
+  // 只说「未声明」——避免把缺失信息当成否定结论。
   const capText = (m) => {
     if (!m) return null;
     const yes = [], unknown = [];
@@ -743,11 +680,7 @@ function renderFees(fees) {
     (m.supports_reasoning ? yes : unknown).push("思考模式");
     const parts = [];
     if (yes.length) parts.push(`支持：${yes.join("、")}`);
-    if (unknown.length) parts.push(`${m.hand_measured ? "实测不支持" : "上游未声明"}：${unknown.join("、")}`);
-    if (m.reasoning_efforts && m.reasoning_efforts.length) {
-      parts.push(`思考档位：${m.reasoning_efforts.join("/")}${m.default_reasoning_effort ? `（默认 ${m.default_reasoning_effort}）` : ""}`);
-    }
-    if (m.hand_measured) parts.push("（能力与上下文为本工具实测值，仅供参考）");
+    if (unknown.length) parts.push(`上游未声明：${unknown.join("、")}`);
     return parts.join("；");
   };
 
@@ -756,8 +689,7 @@ function renderFees(fees) {
   const modelTip = (channel, m) => {
     const parts = [`调用 ID：${chPrefix(channel)}${m.model}`];
     if (m.has_context && m.context_window) {
-      const src = m.hand_measured ? "（本工具实测，非上游官方值）" : "";
-      parts.push(`上下文窗口：${fmtTokens(m.context_window)}${src}`);
+      parts.push(`上下文窗口：${fmtTokens(m.context_window)}`);
       if (m.max_tokens) parts.push(`最大输出：${fmtTokens(m.max_tokens)}`);
     } else {
       parts.push("上下文窗口：未知");
@@ -948,7 +880,6 @@ const NO_CHECKIN_LOGIN_HINT = {
   loomy: "（凭据来自本机已登录的 Loomy 客户端；上游无续期接口，约 14 天后需重新登录并再次导入）",
   monkeycode: "（凭据来自本机已登录的 MonkeyCode 客户端；上游无续期接口，客户端重新登录后需再次导入）",
   glm: "（登录后请按下方指引复制 refresh_token 粘贴回来）",
-  cline: "（无需登录：在 app.cline.bot 注册账号，Account / API Keys → Create API Key 后粘贴即可；Key 不过期也不轮换）",
 };
 function promptLogin(channel) {
   pendingChannel = channel;
@@ -982,17 +913,6 @@ function promptLogin(channel) {
     return;
   }
 
-  // 粘贴凭据型渠道（Cline）：弹专用输入框，而不是「打开浏览器登录」。
-  // Cline 的凭据是官方 API Key，创建动作发生在 app.cline.bot 网页里，本工具无法代劳，
-  // 所以这里没有轮询/回调，只有一次「验证 + 落盘」（后端只调 /api-keys，零 token 消耗）。
-  if (isPasteKey(channel)) {
-    $("clineKeyInput").value = "";
-    $("clineErr").textContent = "";
-    $("clineWarn").classList.add("hidden");
-    $("clineOverlay").classList.remove("hidden");
-    setTimeout(() => $("clineKeyInput").focus(), 30);
-    return;
-  }
   // 纯导入型渠道：文案与动作都不同（读本机客户端凭据，而不是打开浏览器登录）。
   if (isImportLocal(channel)) {
     $("lcTitle").textContent = "导入 " + name + " 账号";
@@ -1148,31 +1068,6 @@ function cancelGLMLogin() {
   $("glmOverlay").classList.add("hidden");
 }
 
-// submitClineKey 提交用户粘贴的 Cline 官方 API Key。
-// 后端只做「GET /api/v1/api-keys 验证 + 落盘」，零 token 消耗；
-// 返回的 warning 非空表示「这把 Key 与已有账号同属一个 Cline 账号」——
-// 官方配额按账号计（…UsageCostUSDPerUser），同账号多 Key 不会扩额度，必须显式告知。
-async function submitClineKey() {
-  const key = ($("clineKeyInput").value || "").trim();
-  if (!key) { $("clineErr").textContent = "请粘贴 API Key（sk_ 开头）"; return; }
-  const btn = $("btnClineSubmit");
-  btn.disabled = true;
-  $("clineErr").textContent = "验证中…";
-  try {
-    const r = await api("/api/login/cline_key", { api_key: key });
-    $("clineOverlay").classList.add("hidden");
-    $("clineKeyInput").value = "";
-    if (r && r.warning) toast(r.warning);
-    toast("Cline 账号已添加");
-    await loadState();
-    refreshFees();
-  } catch (e) {
-    $("clineErr").textContent = e.message || "验证失败";
-  } finally {
-    btn.disabled = false;
-  }
-}
-
 // 手工兜底：粘贴 refresh_token
 async function submitGLMToken() {
   const token = ($("glmTokenInput").value || "").trim();
@@ -1242,224 +1137,6 @@ function renderProxyList() {
       <input class="input grow proxy-input" data-ch="${ch}" value="${esc(val)}" spellcheck="false" placeholder="如 socks5://127.0.0.1:1080（留空直连）">
     </div>`;
   }).join("");
-  $("fbList").innerHTML = rows || `<div class="hint">（暂无规则——主模型全冷时将直接返回 503 提示）</div>`;
-  $("fbErr").textContent = "";
-}
-
-// parseModelList 解析备胎输入：逗号/空格/换行分隔多个 channel/model，本地形态校验。
-function parseModelList(raw) {
-  const out = [];
-  for (const p of String(raw || "").split(/[,，\s]+/)) {
-    const t = p.trim();
-    if (!t) continue;
-    if (!/^[^/]+\/.+/.test(t)) return [null, `备胎模型 ${t} 需为 channel/model 形式（如 workbuddyai/glm-5.2）`];
-    out.push(t);
-  }
-  return [out, ""];
-}
-
-async function saveModelFallback() {
-  try {
-    await api("/api/config/model_fallback", { rules: fbRules });
-    toast("降级链已保存（热生效）");
-    $("fbErr").textContent = "";
-    loadState();
-  } catch (e) { $("fbErr").textContent = e.message; }
-}
-
-// ---------- 自定义渠道（OpenAI 兼容，R66） ----------
-// RESERVED_CHANNEL_NAMES 与 provider.BuiltinKinds() 同集：与内建渠道（或上游命名空间）
-// 同名时 server/app 两层会指向不同 Runtime，故前端先给即时反馈（后端同样会拒）。
-const RESERVED_CHANNEL_NAMES = new Set([
-  "workbuddy", "workbuddyai", "traework", "traecode", "qoder", "qodercn", "qodercom",
-  "qwenwork", "monkeycode", "raccoon", "loomy", "oczen", "glm", "cline", "cline-free",
-]);
-let editCustomChannels = [];
-
-// parseTokens 解析带 k/M 单位的 token 数（如 1M→1000000、64k→64000）；纯数字原样返回。
-function parseTokens(str, fallback) {
-  if (str === undefined || str === null || str === "") return fallback || 0;
-  if (typeof str === "number") return str;
-  const s = String(str).trim();
-  if (!s) return fallback || 0;
-  const upper = s.toUpperCase();
-  let mult = 1;
-  let numStr = upper;
-  if (upper.endsWith("M")) {
-    mult = 1000000;
-    numStr = upper.slice(0, -1).trim();
-  } else if (upper.endsWith("K")) {
-    mult = 1000;
-    numStr = upper.slice(0, -1).trim();
-  }
-  const n = parseFloat(numStr);
-  if (isNaN(n) || n < 0) return fallback || 0;
-  return Math.round(n * mult);
-}
-
-// formatTokenCount 反向格式化：优先整数 k/M（1M、64k），非整除时保留一位小数。
-function formatTokenCount(num) {
-  if (!num) return "—";
-  if (num >= 1000000 && num % 100000 === 0) return `${num / 1000000}M`;
-  if (num >= 1000 && num % 1000 === 0) return `${num / 1000}k`;
-  if (num >= 1000000) return `${(num / 1000000).toFixed(1).replace(/\.0$/, "")}M`;
-  if (num >= 1000) return `${(num / 1000).toFixed(1).replace(/\.0$/, "")}k`;
-  return String(num);
-}
-
-function renderCustomChList() {
-  const cards = editCustomChannels.map((c, i) => {
-    const isOff = c.enabled === false;
-    const offTag = isOff ? '<span class="tag neutral" style="margin-left:auto">已禁用</span>' : '<span class="tag ok" style="margin-left:auto">已启用</span>';
-    const keyMask = c.api_key ? (c.api_key.length > 8 ? c.api_key.slice(0, 3) + "…" + c.api_key.slice(-4) : "••••••") : "无密钥";
-    const models = c.models || [];
-
-    const modelRows = models.map((m, j) => {
-      const mid = typeof m === "string" ? m : m.id;
-      const ctxNum = typeof m === "object" ? parseTokens(m.context_window, 0) : 0;
-      const outNum = typeof m === "object" ? parseTokens(m.max_tokens, 0) : 0;
-      const ctx = ctxNum ? formatTokenCount(ctxNum) : "—";
-      const maxTok = outNum ? formatTokenCount(outNum) : "—";
-      const efforts = typeof m === "object" && m.reasoning_efforts && m.reasoning_efforts.length ? m.reasoning_efforts : [];
-      const defEff = typeof m === "object" && m.default_reasoning_effort ? m.default_reasoning_effort : (efforts[0] || "");
-      const rsnHtml = (typeof m === "object" && (m.supports_reasoning || efforts.length > 0))
-        ? `<span class="tag ok" title="默认: ${esc(defEff)}">${esc(defEff || "开启")}</span> <span class="hint">[${esc(efforts.join(", "))}]</span>`
-        : `<span class="hint">—</span>`;
-      const hasImg = typeof m === "object" && m.supports_images;
-      const hasRsn = typeof m === "object" && (m.supports_reasoning || efforts.length > 0);
-      const hasTools = typeof m === "object" ? m.supports_tools !== false : true;
-      const capTags = [];
-      if (hasImg) capTags.push('<span class="tag">识图</span>');
-      if (hasRsn) capTags.push('<span class="tag">思考</span>');
-      if (hasTools) capTags.push('<span class="tag">工具</span>');
-      const caps = capTags.length > 0 ? capTags.join(" ") : '<span class="hint">—</span>';
-
-      return `<tr>
-        <td><code>${esc(mid)}</code></td>
-        <td>${esc(ctx)}</td>
-        <td>${esc(maxTok)}</td>
-        <td>${rsnHtml}</td>
-        <td>${caps}</td>
-        <td style="text-align:center"><a data-del-model="${i}:${j}" style="cursor:pointer;color:var(--danger);font-weight:bold;font-size:14px" title="移除此模型">×</a></td>
-      </tr>`;
-    }).join("");
-
-    const tableHtml = models.length > 0 ? `
-      <table class="custom-models-table">
-        <colgroup>
-          <col style="width:auto">
-          <col style="width:75px">
-          <col style="width:75px">
-          <col style="width:130px">
-          <col style="width:130px">
-          <col style="width:36px">
-        </colgroup>
-        <thead>
-          <tr>
-            <th>模型 ID</th>
-            <th>上下文</th>
-            <th>最大输出</th>
-            <th>思考等级</th>
-            <th>能力</th>
-            <th style="text-align:center">操作</th>
-          </tr>
-        </thead>
-        <tbody>${modelRows}</tbody>
-      </table>
-    ` : `<div class="hint" style="margin:4px 0 8px">（该渠道尚未配置模型，请在下方添加模型及参数）</div>`;
-
-    return `
-    <div class="custom-ch-card">
-      <div class="custom-ch-header">
-        <span class="badge custom">${esc(c.name)}</span>
-        <span style="font-family:ui-monospace,monospace;font-size:12px;font-weight:600;color:var(--text)">${esc(c.base_url)}</span>
-        <span class="hint" title="${esc(c.api_key || '')}">[${esc(keyMask)}]</span>
-        ${offTag}
-        <button class="btn small" data-test-custom="${i}">测试连通</button>
-        <button class="btn small" data-toggle-custom="${i}">${isOff ? "启用" : "停用"}</button>
-        <button class="icon-btn" data-del-custom="${i}" title="删除该渠道">🗑</button>
-      </div>
-
-      <div class="custom-models-box">
-        ${tableHtml}
-        <div class="custom-model-add-row">
-          <input class="input" data-m-id="${i}" placeholder="模型 ID" style="flex:1;min-width:110px">
-          <input class="input" data-m-ctx="${i}" placeholder="上下文(如 1M)" style="width:90px;flex-shrink:0" value="1M">
-          <input class="input" data-m-out="${i}" placeholder="输出(如 64k)" style="width:80px;flex-shrink:0" value="64k">
-          <input class="input" data-m-eff="${i}" placeholder="思考档位" style="width:110px;flex-shrink:0">
-          <label class="hint" style="display:inline-flex;align-items:center;gap:2px;cursor:pointer;white-space:nowrap;margin:0 1px"><input type="checkbox" data-m-img="${i}" checked>识图</label>
-          <label class="hint" style="display:inline-flex;align-items:center;gap:2px;cursor:pointer;white-space:nowrap;margin:0 1px"><input type="checkbox" data-m-rsn="${i}" checked>思考</label>
-          <label class="hint" style="display:inline-flex;align-items:center;gap:2px;cursor:pointer;white-space:nowrap;margin:0 1px"><input type="checkbox" data-m-tools="${i}" checked>工具</label>
-          <button class="btn small icon-btn" data-add-model="${i}" style="font-size:15px;width:32px;height:30px;padding:0;display:inline-flex;align-items:center;justify-content:center;flex-shrink:0" title="添加模型">➕</button>
-        </div>
-      </div>
-    </div>`;
-  }).join("");
-
-  $("customChList").innerHTML = cards || `<div class="hint">（暂无自定义渠道，请先在下方输入渠道标识、地址与 API 密钥添加渠道）</div>`;
-  $("customChErr").textContent = "";
-  $("customChOk").textContent = "";
-}
-
-async function saveCustomChannels() {
-  try {
-    await api("/api/config/custom_channels", { channels: editCustomChannels });
-    toast("自定义渠道已保存（热生效）");
-    $("customChErr").textContent = "";
-    $("customChOk").textContent = "渠道及模型配置已成功保存并立即生效";
-    loadState();
-  } catch (e) {
-    $("customChErr").textContent = e.message;
-    $("customChOk").textContent = "";
-  }
-}
-
-// ---------- 思考强度注入（设置弹层：客户端未传 reasoning_effort 时按模型注入档位） ----------
-// effRules 编辑态副本（openSettings 时从 state.reasoning_efforts 拷贝，`*` 全局默认
-// 单独走「全局默认」输入行；保存成功后由 loadState 刷新）。
-let effRules = [];
-
-// renderEffList 渲染模型档位编辑区：每条映射一行（模型 → 档位 ＋ 🗑）。
-function renderEffList() {
-  const rows = effRules.map((r, i) =>
-    `<div class="row proxy-row">
-      <span class="lbl wide" style="max-width:260px;overflow:hidden;text-overflow:ellipsis;font-family:ui-monospace,monospace" title="${esc(r.model)}">${esc(r.model)}</span>
-      <span style="margin:0 4px">→</span>
-      <span style="flex:1;font-family:ui-monospace,monospace">${esc(r.effort)}</span>
-      <button class="icon-btn" data-del-eff="${i}" title="删除该映射">🗑</button>
-    </div>`
-  ).join("");
-  $("effList").innerHTML = rows || `<div class="hint">（暂无模型档位——未配置的请求不注入）</div>`;
-  $("effErr").textContent = "";
-}
-
-async function saveReasoningEfforts() {
-  try {
-    const efforts = {};
-    const g = $("effGlobalInput").value.trim();
-    if (g) efforts["*"] = g;
-    for (const r of effRules) efforts[r.model] = r.effort;
-    await api("/api/config/reasoning_efforts", { efforts });
-    toast("思考强度已保存（热生效）");
-    $("effErr").textContent = "";
-    loadState();
-  } catch (e) { $("effErr").textContent = e.message; }
-}
-
-// ---------- 设置弹层（统一配置：监听/API-Key/签到/自启/模型路由/备用上游通道） ----------
-// renderBackupProxy 回显全局备用上游通道（单一地址，空 = 关闭）。
-// 定位是**备份链路**而不是全局代理：不参与常规请求，仅渠道命中「上游地区拒绝」
-// 时在同一次请求内自动取用（决议 R57），故文案里不说「走代理」而说「重发」。
-function renderBackupProxy() {
-  const inp = $("backupProxyInput");
-  inp.value = state.backup_proxy || "";
-  inp.placeholder = "如 socks5://127.0.0.1:1080 或 http://127.0.0.1:7890（留空 = 关闭）";
-  // 生效位：后端同时回 backup_proxy（配置）与 backup_proxy_active（运行时已装载）。
-  // 两者不等 = 配置写了但进程内未生效（地址不合法/启动失败），必须让用户看见。
-  const s = $("backupProxyState");
-  s.textContent = !state.backup_proxy ? ""
-    : (state.backup_proxy_active ? "已生效" : "未生效（地址无效或启动失败）");
-  s.style.color = state.backup_proxy && !state.backup_proxy_active ? "var(--danger)" : "var(--muted)";
   $("proxyErr").textContent = "";
 }
 
@@ -1520,30 +1197,13 @@ function openSettings() {
   $("mapEditor").classList.add("hidden");
   $("mapErr").textContent = "";
   renderMapPresets(channels);
-  // 备用上游通道 + oczen 自定义 key
-  renderBackupProxy();
+  // 渠道代理 + oczen 自定义 key
+  renderProxyList();
   $("oczenKeyInput").value = state.oczen_api_key || ""; // 回显脱敏值；未改动则原样回传，后端按脱敏值识别为「未变」
   $("oczenKeyInput").dataset.touched = "";
-  // 模型降级链
-  fbRules = JSON.parse(JSON.stringify(state.model_fallback || []));
-  renderFbList();
-  $("fbFromInput").value = ""; $("fbToInput").value = "";
-  // 思考强度注入（`*` 全局默认单独回显到「全局默认」行）
-  const effs = state.reasoning_efforts || {};
-  effRules = Object.entries(effs).filter(([k]) => k !== "*").map(([model, effort]) => ({ model, effort }));
-  $("effGlobalInput").value = effs["*"] || "";
-  renderEffList();
-  $("effModelInput").value = ""; $("effEffortInput").value = "";
-  // 自定义渠道
-  editCustomChannels = JSON.parse(JSON.stringify(state.custom_channels || []));
-  renderCustomChList();
-  editCustomChannels = JSON.parse(JSON.stringify(state.custom_channels || []));
-  renderCustomChList();
-  $("inCustomName").value = ""; $("inCustomURL").value = ""; $("inCustomKey").value = "";
   // 自动签到 + 开机自启 + 临期阈值
   $("chkAutostart").checked = !!state.autostart;
   $("selExpiring").value = String(state.expiring_days || 1);
-  $("chkLoopGuard").checked = state.loop_guard !== false; // 缺省（旧后端）按开启显示
   syncListenRisk(); // 按当前监听地址初始化警告条与必填星号
   $("settingsOverlay").classList.remove("hidden");
 }
@@ -1552,25 +1212,27 @@ function closeSettings() {
   $("settingsOverlay").classList.add("hidden");
 }
 
-// validateBackupProxy 校验备用上游通道地址，返回 [url, err]（空串合法 = 关闭）。
-// 判据与后端 backuplink.Parse 同源：仅 http/https/socks5，且必须有主机名。
-function validateBackupProxy() {
-  const v = $("backupProxyInput").value.trim();
-  if (!v) return ["", ""];
-  let u;
-  try { u = new URL(v); } catch { return [null, `备用代理地址无效：${v}`]; }
-  if (!["http:", "https:", "socks5:"].includes(u.protocol)) {
-    return [null, `备用代理协议不支持（仅 http/https/socks5）：${v}`];
+// validateProxies 收集代理输入并做本地形态校验，返回 {proxies, err}。
+function validateProxies() {
+  const proxies = {};
+  for (const inp of document.querySelectorAll(".proxy-input")) {
+    const ch = inp.dataset.ch;
+    const v = inp.value.trim();
+    if (!v) continue;
+    let u;
+    try { u = new URL(v); } catch { return [null, `渠道 ${ch} 代理地址无效：${v}`]; }
+    if (!["http:", "https:", "socks5:"].includes(u.protocol)) {
+      return [null, `渠道 ${ch} 代理协议不支持（仅 http/https/socks5）：${v}`];
+    }
+    if (!u.hostname) return [null, `渠道 ${ch} 代理缺少主机名：${v}`];
+    proxies[ch] = v;
   }
-  if (!u.hostname) return [null, `备用代理缺少主机名：${v}`];
-  return [v, ""];
+  return [proxies, ""];
 }
 
 // testOczenKey 「测试」按钮：用输入框当前的候选 key（含脱敏值/空）调后端实测。
 // 后端逻辑：候选 key 临时写入渠道 client → big-pickle 发最小对话 → 200/429 均算通过
 // （200 = 配额正常；429 = 连通但匿名共享配额限流，属预期现象）；测试后恢复配置原值。
-// 与真实对话同源（issue #117）：直连被地区拒时后端会自动改走备用通道，
-// via_backup 标出答复来自哪个出口——否则用户配了代理点测试仍看到 403 会误以为功能没生效。
 async function testOczenKey() {
   const btn = $("btnOczenTest");
   if (btn.disabled) return;
@@ -1582,14 +1244,11 @@ async function testOczenKey() {
     let k = $("oczenKeyInput").value.trim();
     if (k.includes("…")) k = ""; // 脱敏形态 = 未改动，用当前配置值测
     const r = await api("/api/config/oczen_test", { api_key: k });
-    const via = r.via_backup ? "经备用通道" : "直连";
     if (r.ok) {
-      toast(r.status === 200 ? `✓ OpenCodeZen 凭证可用（200，${via}）` : `✓ 连通正常（429 匿名限流，属预期，${via}）`);
+      toast(r.status === 200 ? "✓ OpenCodeZen 凭证可用（200）" : "✓ 连通正常（429 匿名限流，属预期）");
     } else {
       const brief = (r.body || r.error || "").slice(0, 90).replace(/\s+/g, " ");
-      // 403 且经直连 = 最可能是地区限制，而备用通道未配置/未生效：给出可行动提示
-      const hint = (!r.via_backup && r.status === 403) ? "（未走备用通道；若已配代理仍为直连，说明本次不是地区拒绝或备用链路拨不动，详见日志）" : "";
-      toast(`✗ 测试失败 HTTP ${r.status}${hint}：${brief}`);
+      toast(`✗ 测试失败 HTTP ${r.status}：${brief}`);
     }
   } catch (e) {
     toast("✗ 测试失败：" + e.message);
@@ -1619,10 +1278,10 @@ async function saveSettings() {
     } catch (e) { toast(e.message); closeSettings(); showLogin("管理密码已变更，请重新登录"); return; }
   }
 
-  // 2) 备用上游通道（先本地校验，失败阻断保存）+ oczen key（仅在用户改动过时提交，避免把脱敏回显值存回）
-  const [proxy, perr] = validateBackupProxy();
+  // 2) 代理（先本地校验，失败阻断保存）+ oczen key（仅在用户改动过时提交，避免把脱敏回显值存回）
+  const [proxies, perr] = validateProxies();
   if (perr) { $("proxyErr").textContent = perr; toast(perr); return; }
-  const body = { proxy };
+  const body = { proxies };
   const kIn = $("oczenKeyInput");
   if (kIn.dataset.touched === "1") {
     let k = kIn.value.trim();
@@ -1631,7 +1290,7 @@ async function saveSettings() {
     if (k !== undefined) body.oczen_api_key = k; // undefined 时不携带字段 = 不改动；空串 = 清除回匿名
   }
   try {
-    await api("/api/config/proxy", body);
+    await api("/api/config/proxies", body);
   } catch (e) { toast(e.message); return; }
 
   // 3) 模型映射：优先读编辑器；编辑器从未展开过则用原值（保证「只改监听/渠道不碰映射」）
@@ -1654,19 +1313,6 @@ async function saveSettings() {
       await api("/api/config/expiring_days", { days: expDays });
     } catch (e) { toast(e.message); return; }
   }
-
-  // 4.5) 思考链防癫开关（独立端点即时生效）
-  const loopGuardOn = $("chkLoopGuard").checked;
-  if (loopGuardOn !== (state.loop_guard !== false)) {
-    try {
-      await api("/api/config/loop_guard", { on: loopGuardOn });
-    } catch (e) { toast(e.message); return; }
-  }
-
-  // 4.6) 自定义渠道（R66）
-  try {
-    await api("/api/config/custom_channels", { channels: editCustomChannels });
-  } catch (e) { toast(e.message); return; }
 
   // 5) API-Key（最后保存：改 Key 可能影响当前会话的后续请求）
   try {
@@ -1853,9 +1499,6 @@ function bind() {
   $("btnGLMSubmit").onclick = submitGLMToken;
   $("btnGLMCancel").onclick = cancelGLMLogin;
   $("btnGLMToggleManual").onclick = () => $("glmManual").classList.toggle("hidden");
-  $("btnAddCline").onclick = () => promptLogin("cline");
-  $("btnClineSubmit").onclick = submitClineKey;
-  $("btnClineCancel").onclick = () => $("clineOverlay").classList.add("hidden");
   $("btnCheckinAll").onclick = checkinAll;
   $("btnRefreshAll").onclick = refreshAll;
   $("btnAddTime").onclick = addTime;
@@ -1914,270 +1557,10 @@ function bind() {
   $("oczenKeyInput").addEventListener("input", (e) => { e.target.dataset.touched = "1"; });
   $("btnOczenTest").onclick = testOczenKey;
 
-  // 模型降级链：添加规则 / 保存 / 列表内事件委托（删规则、删备胎、追加备胎、回车添加）
-  $("btnFbAdd").onclick = () => {
-    const from = $("fbFromInput").value.trim();
-    if (!/^[^/]+\/.+/.test(from)) { $("fbErr").textContent = "主模型需为 channel/model 形式（如 workbuddyai/deepseek-v4.1-flash）"; return; }
-    if (fbRules.some((r) => r.from === from)) { $("fbErr").textContent = `主模型 ${from} 已有规则（每个主模型只允许一条）`; return; }
-    const [tos, err] = parseModelList($("fbToInput").value);
-    if (err) { $("fbErr").textContent = err; return; }
-    if (tos.length === 0) { $("fbErr").textContent = "至少填一个备胎模型"; return; }
-    fbRules.push({ from, to: tos });
-    $("fbFromInput").value = ""; $("fbToInput").value = "";
-    renderFbList();
-  };
-  $("fbToInput").addEventListener("keydown", (e) => { if (e.key === "Enter") $("btnFbAdd").onclick(); });
-  $("btnFbSave").onclick = saveModelFallback;
-  $("fbList").addEventListener("click", async (e) => {
-    const addBtn = e.target.closest("[data-add-to]");
-    if (addBtn) {
-      const i = +addBtn.dataset.addTo;
-      const inp = document.querySelector(`.fb-to-add[data-add-idx="${i}"]`);
-      const [tos, err] = parseModelList(inp && inp.value);
-      if (err) { $("fbErr").textContent = err; return; }
-      if (tos.length === 0) { $("fbErr").textContent = "先在输入框填备胎 ID 再点 ＋"; return; }
-      fbRules[i].to.push(...tos.filter((t) => t !== fbRules[i].from && !fbRules[i].to.includes(t)));
-      renderFbList();
-      return;
-    }
-    const delTo = e.target.closest("[data-del-to]");
-    if (delTo) {
-      const [i, j] = delTo.dataset.delTo.split(":").map(Number);
-      fbRules[i].to.splice(j, 1);
-      renderFbList();
-      return;
-    }
-    const delRule = e.target.closest("[data-del-rule]");
-    if (delRule) {
-      fbRules.splice(+delRule.dataset.delRule, 1);
-      renderFbList();
-    }
-  });
-  // 行内备胎输入框回车 = 追加到该规则（事件委托 keydown）；主模型输入框回车 = blur 确认
-  $("fbList").addEventListener("keydown", (e) => {
-    if (e.key !== "Enter") return;
-    if (e.target.classList.contains("fb-from-edit")) { e.target.blur(); return; }
-    if (!e.target.classList.contains("fb-to-add")) return;
-    const i = +e.target.dataset.addIdx;
-    const [tos, err] = parseModelList(e.target.value);
-    if (err) { $("fbErr").textContent = err; return; }
-    if (tos.length === 0) return;
-    fbRules[i].to.push(...tos.filter((t) => t !== fbRules[i].from && !fbRules[i].to.includes(t)));
-    renderFbList();
-  });
-  // 行内主模型 ID 编辑：change（失焦/回车后 blur）提交——形态校验 + 主模型唯一性校验，
-  // 失败回滚输入框；成功写回 fbRules 并滤掉与新 from 自环的备胎，重渲染刷新 title。
-  $("fbList").addEventListener("change", (e) => {
-    if (!e.target.classList.contains("fb-from-edit")) return;
-    const i = +e.target.dataset.editIdx;
-    const from = String(e.target.value || "").trim();
-    const cur = fbRules[i].from;
-    if (!from || from === cur) { e.target.value = cur; return; }
-    if (!/^[^/]+\/.+/.test(from)) { $("fbErr").textContent = `主模型 ${from} 需为 channel/model 形式（如 workbuddyai/deepseek-v4.1-flash）`; e.target.value = cur; return; }
-    if (fbRules.some((r, k) => k !== i && r.from === from)) { $("fbErr").textContent = `主模型 ${from} 已有规则（每个主模型只允许一条）`; e.target.value = cur; return; }
-    fbRules[i].from = from;
-    fbRules[i].to = fbRules[i].to.filter((t) => t !== from);
-    renderFbList();
-  });
-
-  // 思考强度：添加映射 / 保存 / 列表内删除 / 回车添加
-  $("btnEffAdd").onclick = () => {
-    const model = $("effModelInput").value.trim();
-    const effort = $("effEffortInput").value.trim();
-    if (!model) { $("effErr").textContent = "模型 ID 不能为空（全局默认请在上方「全局默认」行填）"; return; }
-    if (model === "*") { $("effErr").textContent = "* 是全局默认专用键，请在上方「全局默认」行填"; return; }
-    if (!effort) { $("effErr").textContent = "思考档位不能为空"; return; }
-    if (effRules.some((r) => r.model === model)) { $("effErr").textContent = `模型 ${model} 已有档位（每个模型只允许一条）`; return; }
-    effRules.push({ model, effort });
-    $("effModelInput").value = ""; $("effEffortInput").value = "";
-    renderEffList();
-  };
-  $("effEffortInput").addEventListener("keydown", (e) => { if (e.key === "Enter") $("btnEffAdd").onclick(); });
-  $("btnEffSave").onclick = saveReasoningEfforts;
-  $("effList").addEventListener("click", (e) => {
-    const del = e.target.closest("[data-del-eff]");
-    if (del) {
-      effRules.splice(+del.dataset.delEff, 1);
-      renderEffList();
-    }
-  });
-
-  // 自定义渠道（R66）：测试、停用/启用、删除、添加、保存
-  $("customChList").addEventListener("click", async (e) => {
-    const testBtn = e.target.closest("[data-test-custom]");
-    if (testBtn) {
-      const idx = +testBtn.dataset.testCustom;
-      const ch = editCustomChannels[idx];
-      if (!ch) return;
-      testBtn.disabled = true;
-      const oldText = testBtn.textContent;
-      testBtn.textContent = "测试中…";
-      $("customChErr").textContent = "";
-      $("customChOk").textContent = "";
-      try {
-        // name + base_url + api_key（回显态可能是脱敏值）一起发：后端按 name 找回真实密钥，
-        // 否则未改动过的渠道点测试会恒报 401（同 #117 的「探针没走同一条链路」）。
-        const res = await api("/api/config/custom_channel_test", { name: ch.name, base_url: ch.base_url, api_key: ch.api_key });
-        if (res.ok) {
-          toast(`[${ch.name}] 连接成功！拉取到 ${res.models?.length || 0} 个模型`);
-          $("customChOk").textContent = `[${ch.name}] 连接成功，模型: ${(res.models || []).slice(0, 6).join(", ")}${res.models?.length > 6 ? '…' : ''}`;
-        } else {
-          $("customChErr").textContent = `[${ch.name}] 测试失败：${res.error}`;
-        }
-      } catch (err) {
-        $("customChErr").textContent = `[${ch.name}] 测试失败：${err.message}`;
-      } finally {
-        testBtn.disabled = false;
-        testBtn.textContent = oldText;
-      }
-      return;
-    }
-    const toggleBtn = e.target.closest("[data-toggle-custom]");
-    if (toggleBtn) {
-      const idx = +toggleBtn.dataset.toggleCustom;
-      if (editCustomChannels[idx]) {
-        const cur = editCustomChannels[idx].enabled !== false;
-        editCustomChannels[idx].enabled = !cur;
-        renderCustomChList();
-      }
-      return;
-    }
-    const delBtn = e.target.closest("[data-del-custom]");
-    if (delBtn) {
-      const idx = +delBtn.dataset.delCustom;
-      editCustomChannels.splice(idx, 1);
-      renderCustomChList();
-      return;
-    }
-    const delModelLink = e.target.closest("[data-del-model]");
-    if (delModelLink) {
-      const [i, j] = delModelLink.dataset.delModel.split(":").map(Number);
-      if (editCustomChannels[i] && editCustomChannels[i].models) {
-        editCustomChannels[i].models.splice(j, 1);
-        renderCustomChList();
-      }
-      return;
-    }
-    const addModelBtn = e.target.closest("[data-add-model]");
-    if (addModelBtn) {
-      const idx = +addModelBtn.dataset.addModel;
-      const ch = editCustomChannels[idx];
-      if (!ch) return;
-      const idInp = document.querySelector(`[data-m-id="${idx}"]`);
-      const ctxInp = document.querySelector(`[data-m-ctx="${idx}"]`);
-      const outInp = document.querySelector(`[data-m-out="${idx}"]`);
-      const effInp = document.querySelector(`[data-m-eff="${idx}"]`);
-      const imgInp = document.querySelector(`[data-m-img="${idx}"]`);
-      const rsnInp = document.querySelector(`[data-m-rsn="${idx}"]`);
-      const toolsInp = document.querySelector(`[data-m-tools="${idx}"]`);
-
-      const mid = idInp ? idInp.value.trim() : "";
-      if (!mid) {
-        $("customChErr").textContent = "请填入模型 ID";
-        return;
-      }
-      ch.models = ch.models || [];
-      if (ch.models.some((m) => (typeof m === "string" ? m : m.id) === mid)) {
-        $("customChErr").textContent = `该渠道下已存在模型 ${mid}`;
-        return;
-      }
-      // 上下文/输出支持 k、M 单位（如 1M / 64k），未填时分别以 1M / 64k 兜底
-      const ctx = parseTokens(ctxInp ? ctxInp.value : "", 1000000);
-      const maxTok = parseTokens(outInp ? outInp.value : "", 64000);
-      const effRaw = effInp ? effInp.value.trim() : "";
-      const efforts = effRaw ? effRaw.split(/[,，\s]+/).filter(Boolean) : [];
-      const hasRsn = rsnInp ? rsnInp.checked : true;
-      const hasImg = imgInp ? imgInp.checked : true;
-      const hasTools = toolsInp ? toolsInp.checked : true;
-
-      ch.models.push({
-        id: mid,
-        context_window: ctx,
-        max_tokens: maxTok,
-        supports_images: hasImg,
-        supports_reasoning: hasRsn,
-        supports_tools: hasTools,
-        reasoning_efforts: efforts,
-        default_reasoning_effort: efforts[0] || (hasRsn ? "high" : ""),
-      });
-      renderCustomChList();
-      $("customChErr").textContent = "";
-      $("customChOk").textContent = `已添加模型 [${mid}]，点击「保存全部配置」生效`;
-      return;
-    }
-  });
-
-  // 模型添加输入框回车快捷添加（整行任一输入框回车 = 点 ➕）
-  $("customChList").addEventListener("keydown", (e) => {
-    if (e.key !== "Enter") return;
-    const addBtn = e.target.closest(".custom-model-add-row")?.querySelector("[data-add-model]");
-    if (addBtn) { e.preventDefault(); addBtn.click(); }
-  });
-
-  $("btnCustomTest").onclick = async () => {
-    const u = $("inCustomURL").value.trim();
-    const k = $("inCustomKey").value.trim();
-    const name = $("inCustomName").value.trim().toLowerCase();
-    if (!u) {
-      $("customChErr").textContent = "请先填入 Base URL";
-      $("customChOk").textContent = "";
-      return;
-    }
-    const btn = $("btnCustomTest");
-    btn.disabled = true;
-    const old = btn.textContent;
-    btn.textContent = "测试中…";
-    $("customChErr").textContent = "";
-    $("customChOk").textContent = "";
-    try {
-      const res = await api("/api/config/custom_channel_test", { name, base_url: u, api_key: k });
-      if (res.ok) {
-        toast(`连接成功！拉取到 ${res.models?.length || 0} 个模型`);
-        $("customChOk").textContent = `连接成功，发现模型: ${(res.models || []).slice(0, 8).join(", ")}${res.models?.length > 8 ? '…' : ''}`;
-      } else {
-        $("customChErr").textContent = `测试失败：${res.error}`;
-      }
-    } catch (err) {
-      $("customChErr").textContent = `测试失败：${err.message}`;
-    } finally {
-      btn.disabled = false;
-      btn.textContent = old;
-    }
-  };
-
-  $("btnCustomAdd").onclick = () => {
-    const name = $("inCustomName").value.trim().toLowerCase();
-    const url = $("inCustomURL").value.trim();
-    const key = $("inCustomKey").value.trim();
-    if (!name) { $("customChErr").textContent = "请填入渠道标识"; $("customChOk").textContent = ""; return; }
-    if (!/^[a-zA-Z0-9_\-]+$/.test(name)) { $("customChErr").textContent = "渠道标识仅允许字母、数字、下划线、短横线"; $("customChOk").textContent = ""; return; }
-    // 与内建渠道/上游命名空间同名时两层会指向不同 Runtime，后端也会拒；此处先给即时反馈。
-    if (RESERVED_CHANNEL_NAMES.has(name)) { $("customChErr").textContent = `渠道标识 ${name} 与内建渠道同名，请另取一个`; $("customChOk").textContent = ""; return; }
-    if (!url) { $("customChErr").textContent = "请填入 Base URL"; $("customChOk").textContent = ""; return; }
-    if (editCustomChannels.some(c => c.name.toLowerCase() === name)) {
-      $("customChErr").textContent = `已存在同名渠道 ${name}`;
-      $("customChOk").textContent = "";
-      return;
-    }
-    editCustomChannels.push({ name, base_url: url, api_key: key, models: [], enabled: true });
-    renderCustomChList();
-    $("inCustomName").value = "";
-    $("inCustomURL").value = "";
-    $("inCustomKey").value = "";
-    $("customChErr").textContent = "";
-    $("customChOk").textContent = `已创建渠道 [${name}]，现在可在其下方配置模型 ID、上下文大小、思考等级与能力`;
-  };
-
-  $("btnCustomSave").onclick = saveCustomChannels;
-
   // 点击弹层空白处关闭
   $("settingsOverlay").onclick = (e) => { if (e.target === $("settingsOverlay")) closeSettings(); };
   $("renameOverlay").onclick = (e) => { if (e.target === $("renameOverlay")) closeRename(); };
   $("helpOverlay").onclick = (e) => { if (e.target === $("helpOverlay")) closeHelp(); };
-
-  // 积分明细浮窗的外部关闭路径（✕ / 点浮窗之外 / Esc）：document 级委托，绑定一次。
-  // 浮窗与账号卡片都会随时重建，委托不受重建影响。
-  bindCreditDetailDismiss();
 
   $("btnHelp").onclick = openHelp;
   $("btnAbout").onclick = openAbout;
@@ -2191,32 +1574,6 @@ function bind() {
 
   $("aboutOverlay").onclick = (e) => { if (e.target === $("aboutOverlay")) closeAbout(); };
 }
-
-// ---------- 用量与流水面板（变量声明必须在 init 执行前——bindUsage() 在 init 顶部调用） ----------
-// usageDays 从 localStorage 恢复上次选择（今日/7日），刷新页面不重置回 7 日。
-// 存储键与 TOAST_SEEN_KEY 同族（usage-range-seen）；非法值回退默认 7。
-// ⚠️ 本段必须在 init() 之前执行：bindUsage() 在 init 顶部被调用并引用 usageDays，
-//    若声明滞后于 init（IIFE 立即执行），let 处于暂时性死区（TDZ）会抛
-//    ReferenceError 中断整个 init —— 实测表现：账号卡片/费率表全空白、
-//    控制台报 "Cannot access 'usageDays' before initialization"。
-const USAGE_DAYS_KEY = "usage-range-seen";
-const USAGE_DAYS_VALID = [1, 7];
-let usageDays = 7;
-try {
-  const v = parseInt(localStorage.getItem(USAGE_DAYS_KEY) || "", 10);
-  if (USAGE_DAYS_VALID.includes(v)) usageDays = v;
-} catch (e) { /* localStorage 不可用时保持默认 */ }
-// persistUsageDays 落盘当前区间（不可用存储时静默失败，不阻塞功能）。
-function persistUsageDays() {
-  try { localStorage.setItem(USAGE_DAYS_KEY, String(usageDays)); } catch (e) { /* 忽略 */ }
-}
-let usageChart = null;    // token 折线图（echarts 实例）
-let creditChart = null;   // 积分消耗折线图（echarts 实例）
-let recentAll = [];       // 全量最近流水（分页源，时间升序）
-let recentPage = 0;
-let lastNames = {};       // 最近一次渲染的 uid→昵称表（翻页时复用）
-const RECENT_PAGE_SIZE = 20;
-const MODEL_TOP_N = 20;   // 模型榜只保留前 N 名
 
 // ---------- 初始化 ----------
 (async function init() {
@@ -2232,6 +1589,16 @@ const MODEL_TOP_N = 20;   // 模型榜只保留前 N 名
   await loadState(); // 状态瞬间返回
   await loadFees();  // 费率表用缓存/静态兜底，秒开
 })();
+
+// ---------- 用量与流水面板 ----------
+let usageDays = 7;
+let usageChart = null;    // token 折线图（echarts 实例）
+let creditChart = null;   // 积分消耗折线图（echarts 实例）
+let recentAll = [];       // 全量最近流水（分页源，时间升序）
+let recentPage = 0;
+let lastNames = {};       // 最近一次渲染的 uid→昵称表（翻页时复用）
+const RECENT_PAGE_SIZE = 20;
+const MODEL_TOP_N = 20;   // 模型榜只保留前 N 名
 
 function fmtCredits(n) {
   if (n == null) return "-";
@@ -2271,8 +1638,6 @@ function renderUsage(st) {
   $("ucReqs").textContent = fmtCredits(st.token.requests);
   $("ucSpend").textContent = fmtCredits(st.credit.spend);
   $("ucEarn").textContent = fmtCredits(st.credit.earn);
-  renderUsageCacheCard(st.token || {});
-  syncUsageRangeActive(); // 高亮始终跟随 usageDays（含异步返回路径）
 
   renderModelTable(st.token.by_model || [], usageDays);
   renderCreditTab(st.credit || {});
@@ -2280,25 +1645,16 @@ function renderUsage(st) {
   renderCreditChart(st.credit || {});
 }
 
-// syncUsageRangeActive 把「今日/7日」按钮高亮同步为当前 usageDays。
-// 单一入口：初始化、点击切换、异步返回都走它，避免三处 toggle 竞态
-// （此前点击后 loadUsage 异步返回时高亮被回写错误的 bug）。
-function syncUsageRangeActive() {
-  $("usageRange").querySelectorAll(".seg-btn").forEach((x) =>
-    x.classList.toggle("active", parseInt(x.dataset.days, 10) === usageDays));
-}
-
 function renderModelTable(rows, days) {
   const tb = $("tblModels").querySelector("tbody");
-  if (!rows.length) { tb.innerHTML = `<tr><td colspan="7" class="empty-cell">暂无数据（流水自本功能上线后开始记录）</td></tr>`; return; }
+  if (!rows.length) { tb.innerHTML = `<tr><td colspan="5" class="empty-cell">暂无数据（流水自本功能上线后开始记录）</td></tr>`; return; }
   const top = rows.slice(0, MODEL_TOP_N); // 前 20 名，已按 token 降序
   tb.innerHTML = top.map((r) => {
     const avg = days > 1 ? Math.round((r.pt + r.ct) / days) : (r.pt + r.ct);
     return `<tr>
       <td>${esc(r.model)}</td><td><span class="badge ${chClass(r.channel)}">${esc(chLabel(r.channel))}</span></td>
       <td class="num">${fmtCredits(r.requests)}</td><td class="num">${fmtTokensFull(r.pt + r.ct)}</td>
-      <td class="num">${fmtTokensFull(avg)}</td>
-      <td class="num">${cacheCell(r)}</td><td class="num">${perfCellFor(r.channel, r.model)}</td></tr>`;
+      <td class="num">${fmtTokensFull(avg)}</td></tr>`;
   }).join("");
 }
 
@@ -2439,12 +1795,10 @@ function bindUsage() {
   $("usageRange").querySelectorAll(".seg-btn").forEach((b) => {
     b.onclick = () => {
       usageDays = parseInt(b.dataset.days, 10);
-      persistUsageDays(); // 记住选择，刷新不重置
-      syncUsageRangeActive(); // 单一入口同步高亮
+      $("usageRange").querySelectorAll(".seg-btn").forEach((x) => x.classList.toggle("active", x === b));
       loadUsage();
     };
   });
-  syncUsageRangeActive(); // 初始高亮按恢复的 usageDays（localStorage 命中「今日」不显示 7日 高亮）
   document.querySelectorAll(".tabs .tab").forEach((b) => {
     b.onclick = () => {
       document.querySelectorAll(".tabs .tab").forEach((x) => x.classList.toggle("active", x === b));
