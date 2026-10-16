@@ -45,7 +45,7 @@
 
 ---
 
-## 1. 决议项索引（R1–R75）
+## 1. 决议项索引（R1–R76）
 
 **全文（含证据链、反例、已知限制）见 [`docs/决议项.md`](docs/决议项.md)** —— 改动相关代码前必读对应条目。
 
@@ -105,12 +105,13 @@
 | R70 | 华为云果办 OfficeAce：双层凭据（网关 Basic 不过期 + 临时 AK/SK ~2h 需 refresh 续期） |
 | R71 | WorkBuddyAI 对话出站必带会话头族（缺 `X-Conversation-ID` 即 `400 11-128`） |
 
-> **R72–R75 为本仓独有决议**（上游无对应编号，为保持与上游合并时的编号不冲突，自上游 R71 之后顺延）：
+> **R72–R76 为本仓独有决议**（上游无对应编号，为保持与上游合并时的编号不冲突，自上游 R71 之后顺延）：
 
 | R72 | **入库 prepbody 工具**（`cmd/prepbody`）：入站 dump → 出站请求体离线重放，定位「上游按出站 body 拒答」类故障；不参与运行时链路 |
 | R73 | **档位注入走上游 efforts 映射，能力表只做校验/展示**：注入 = `config.ReasoningEfforts`（`*` 通配，`handler.applyEffort`）；`internal/reasoning` 保留为能力表（`Clamp`/`Listing`）供渠道校验与面板展示 |
 | R74 | **DeepSeek 思考开关与多轮回填**（`internal/upstream/thinking.go`）：客户端表达思考意图时补 `thinking.type` + 默认档；每条 assistant 消息回填 `reasoning_content`（字符串），否则上游按「不思考」应答 |
 | R75 | **loomy 流式路径必须识别「HTTP 200 + 业务错误体」**：整段非 SSE 时补 error 帧、**不补 `[DONE]`**、不计成功；单号渠道流内登录态失效**不硬禁用**（实测 100002 会自愈，硬禁用 = 整渠道下线） |
+| R76 | **devdump 落盘必须 tee 流式，不得 `io.ReadAll`**：读全量再转发会把 SSE 攒批成「正文突然整段出现」（本机常开 `WILDWORK_DUMP_DIR` 必现）；tee + 64 KiB 延迟写，内存只驻留 `tailKeep` |
 
 > ⚠️ **R71 附带的实测纪律**（也是 §0.1 的来源）：上游校验的是**头族齐全**而非单点
 > （只补 `X-Conversation-ID` 仍被拒）；且 `X-Conversation-ID` 的**取值形态不被校验**
@@ -329,7 +330,16 @@ git tag vX.Y.Z && git push origin vX.Y.Z
 **接线点只有一个**：`cmd/wild-work/transport.go` 的 `wrapDumps`（R57 后唯一统一改 Transport 的地方；
 启动时一次性包住全部渠道 client），故各渠道包**零改动**；漏项由
 `cmd/wild-work/transport_test.go` 静态锁死。文件落 `$WILDWORK_DUMP_DIR/<channel>/*.http`，
-头部带 `# usage=` 速览行（SSE 取**末帧**）。
+尾部带 `# duration=… usage=…` 汇总行（SSE 取**末帧**）。
+
+> ⚠️ **落盘必须 tee，不得 `io.ReadAll(resp.Body)`**（R76）：后者会把整个响应缓冲到底
+> 才交给调用方，对 SSE 流式响应等于「上游流完之后客户端才一次性收到全部内容」——
+> 表现为**对话时正文突然整段出现**（本机常开 `WILDWORK_DUMP_DIR` 时必现）。现实现用
+> `teeBody` + `respRecorder`：响应体原样逐帧转发（即时 flush 不受影响），落盘走 64 KiB
+> 缓冲的独立写入（**延迟写，非逐字节写盘**）；内存只驻留最近 `tailKeep` 字节用于尾部与
+> usage 速览，且入参/汇总行仍与旧 `truncateBody` 口径一致（前 `bodyCap` + 后 `tailKeep`）。
+> 回归测试 `internal/devdump/devdump_on_test.go`：`TestDumpIsStreamingNotBuffered`
+> （首帧到达即落盘头、不等流结束）+ `TestDumpConcurrentRecorders`（并发不串号/不丢帧）。
 
 ```bash
 export WILDWORK_DUMP_DIR="$PWD/temp/dump"
@@ -352,7 +362,7 @@ bash scripts/probe-dump.sh summarize                # 汇总各渠道 usage 字�
 | [README.md](README.md) | 用户文档 |
 | [DEVELOPMENT.md](DEVELOPMENT.md) | 开发者文档（面向 AI Agent） |
 | [AGENTS.md](AGENTS.md) | **本文件**：纪律 + 决议索引 + 关键不变量 + 构建发版 |
-| [docs/决议项.md](docs/决议项.md) | **R1–R75 决议全文**（证据链、反例、已知限制） |
+| [docs/决议项.md](docs/决议项.md) | **R1–R76 决议全文**（证据链、反例、已知限制） |
 | [docs/渠道接入备忘.md](docs/渠道接入备忘.md) | 各渠道协议要点、凭据模型、已知限制与踩坑 |
 | [docs/接口参考.md](docs/接口参考.md) | 面板区块规划 + 管理 API 全量清单 |
 | [docs/三接口兼容改造备忘.md](docs/三接口兼容改造备忘.md) | 三接口（Chat/Responses/Anthropic）兼容层架构决策与验证清单 |
