@@ -33,12 +33,16 @@ const (
 	// 上游无目录/额度/刷新接口 → 模型表静态、额度恒 0、RefreshToken 空实现。
 	MonkeyCode Kind = "monkeycode"
 	TraeCode   Kind = "traecode" // Trae 代码版：与 TraeWork 同一上游、共用账号，function=solo_agent
-	Oczen      Kind = "oczen"    // OpenCodeZen 匿名免费通道（opencode.ai/zen，无账号、凭证固定 public）
+	Oczen      Kind = "oczen"    // OpenCodeZen 匿名免费通道（opencode.ai/inference，无账号、凭证固定 public）
 	GLM        Kind = "glm"      // 智谱清言（chatglm.cn 网页版私有接口，凭据为 chatglm_refresh_token）
 	// Cline 免费池（api.cline.bot）：凭据是**官方文档化的 sk_ API Key**（非 OAuth），
 	// 一个账号一把 Key；Key 不轮换 ⇒ 无 RefreshToken、无保活、无签到；
 	// 只暴露 Cline 官方免费池，定位是多账号免费额度调度器 + 反代（见决议 R46）。
 	Cline Kind = "cline"
+	// OfficeAce 华为云果办（hw AgentArts 模型网关，OpenAI 兼容）：凭据来自本机
+	// OfficeAce 桌面端文件（models.json 里的 Basic AK/SK）或自助 OAuth 登录；
+	// 积分/签到走 V11 签名，续期走 DPoP + refresh_token。
+	OfficeAce Kind = "officeace"
 )
 
 func (k Kind) String() string { return string(k) }
@@ -52,7 +56,7 @@ func (k Kind) String() string { return string(k) }
 func BuiltinKinds() map[string]bool {
 	m := map[string]bool{}
 	for _, k := range []Kind{WorkBuddy, WorkBuddyAI, TraeWork, Qoder, QoderCN, QoderCOM,
-		QwenWork, MonkeyCode, Raccoon, Loomy, TraeCode, Oczen, GLM, Cline} {
+		QwenWork, MonkeyCode, Raccoon, Loomy, TraeCode, Oczen, GLM, Cline, OfficeAce} {
 		m[k.String()] = true
 	}
 	for ns := range ModelNamespaces {

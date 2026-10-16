@@ -2022,19 +2022,79 @@ Cline 上游免费池的 ID 自带命名空间（`cline-free/*`），此前对�
 
 ---
 
-# wild-work v2.7.4 — 小浣熊登录跟进上游迁站 + 监听失败终止 + 跨渠道降级
+# wild-work v2.8.0 — 新增华为云果办 OfficeAce 渠道 + WorkBuddyAI 渠道校验修复 + 小浣熊迁站适配 + 跨渠道降级 + 面板易用性
 
-> 发布主题：**上游改版适配与三处「静默失效」修复**。小浣熊登录跟进上游迁站
-> （入口与凭据 cookie 名都变了，旧实现已完全失效）；启动时监听失败不再静默留在后台
+> 发布主题：**新增第十四条渠道（华为云果办 OfficeAce）+ 上游改版/风控适配 + 四处「静默失效」修复**。
+> 新增 **OfficeAce（`officeace/*`，华为云 AgentArts 模型网关）**——支持本机客户端导入与自助
+> OAuth 登录两条添加路径、积分/签到、临时凭据自动续期；**修国际版 workbuddyai 全模型
+> `400 code=11-128` 不可用**（上游新增渠道校验，点名缺 `X-Conversation-ID`）；小浣熊登录
+> 跟进上游迁站（入口与凭据 cookie 名都变了，旧实现已完全失效）；启动时监听失败不再静默留在后台
 > 当僵尸实例；模型降级链在「整渠道全灭」时也能跨渠道顶上；另修一处会让
-> **管理面板登录层不可见**的 HTML 结构缺陷。
+> **管理面板登录层不可见**的 HTML 结构缺陷；设置面板补上模型查找入口、模型查找结果不再截断、
+> 思考强度行的模型 ID 不再被截断。
 >
-> 本次为 v2.7.3 之后的补丁小版本，含 **3 个社区 PR**（#124/#126 [@xxhhlk](https://github.com/xxhhlk)；
-> #127 [@ezjbc](https://github.com/ezjbc)）与 1 个 issue（#125 [@sept13-yu](https://github.com/sept13-yu)）。
-> **合并期额外修出 2 条跨切面缺陷**（小浣熊 JWT uid 提取漏改两处、降级文案与死代码），
-> 详见下文。
+> 本次为 v2.7.3 之后的功能版本（跳过未发布的 v2.7.4 编号，把该轮修复一并归入），含
+> **8 个社区 PR**（#124/#126 [@xxhhlk](https://github.com/xxhhlk)；#127/#130/#131/#132 [@ezjbc](https://github.com/ezjbc)；
+> #122 [@zkj123](https://github.com/zkj123)；#128 [@fmdxx1991](https://github.com/fmdxx1991)；
+> #135 [@jianzhangg](https://github.com/jianzhangg)）
+> 与 3 个 issue（#125 [@sept13-yu](https://github.com/sept13-yu)；#117 [@fmdxx1991](https://github.com/fmdxx1991)；
+> #133 [@danshui93](https://github.com/danshui93)）。
+> **合并期额外修出 7 条跨切面缺陷**（小浣熊 JWT uid 提取漏改两处、降级文案与死代码、
+> oczen 匿名车道与伪装头、OfficeAce 的 error 帧误报/非流式吞错/Extra map 竞态/导入丢 refresh_token），详见下文。
+>
+> **⚠️ 本版于当日重发**：初版 v2.8.0 发布后 1 小时，国际版上游开始按账号灰度拦截
+> **缺 `X-Conversation-ID` 的对话请求**（`400 code=11-128`），workbuddyai 全模型不可用；
+> 修复（PR #135）合并后本 tag 重指向新提交并重新构建全部产物。已下载初版的用户请重新下载。
 
 ---
+
+## 🎉 新渠道：华为云果办 OfficeAce（`officeace/*`，PR #122，[@zkj123](https://github.com/zkj123)）
+
+把**华为云果办**（AgentArts 模型网关，本身 OpenAI 兼容）聚合进本工具，可多账号池化调度、
+统一记流水与运行统计。协议参考开源项目 [Q-shuang-dot/officeace2api](https://github.com/Q-shuang-dot/officeace2api)（MIT）。
+
+- **对话**：`officeace/<model>` 路由；流式/非流式（恒以 `stream:true` 打上游，非流式本地聚合）；
+  推理模型自适应补足 `max_tokens` 预算（思维链吃光预算会让正文为空），`glm-5.3` 系自动剥离
+  其不认的 `thinking` 参数、且**保留 `stream_options.include_usage`**（否则该模型 token 流水恒 0）。
+- **账号来源（两路）**：① 面板「从客户端导入」读本机已登录的 OfficeAce 桌面端文件
+  （`models.json` + 加密档案，后者经 DPAPI/AES-256-GCM 解密取临时 AK/SK，仅 Windows）；
+  ② 面板「浏览器登录」走自助 OAuth（华为云授权码 + PKCE + DPoP，跨平台，无需桌面端）。
+- **积分/签到**：控制面 V4/V11 华为签名查询套餐与奖励积分；每日签到走 `bonus/claim`。
+- **续期**：`refresh_token` 一次性轮换（单账号单飞 + 死名单防重放），落盘持久化。
+- **模型列表**：`/v1/models` 以华为网关动态目录为准；拉取失败回退内置静态表。
+- **能力字段口径（R49）**：上游目录只返回模型 id、无任何能力声明，故 `SupportsTools` /
+  `SupportsReasoning` 一律**不编造**（保持未知）；思考档位面同样不编造。
+- **已知限制（如实披露）**：合并时**无真实华为账号端到端实盘验证**——首次真实登录/续期/签到
+  如遇上游字段与预期不符，需按实际响应微调；DPAPI 解密仅 Windows 生效，其它平台若不走自助登录
+  则积分/签到降级（对话不受影响，网关 Basic 凭据不过期）。
+
+## 🛡 WorkBuddyAI 对话补会话头族，修上游渠道校验（R71，PR #135，issue #133）
+
+2026-10-16 上午起，**国际版 workbuddyai 全模型**恒返回
+`400 code=11-128 "conversation id missing"`，响应体里明写「这次调用没通过渠道校验，
+可能不是官方客户端发出的」；**国内版 workbuddy 同时刻完全正常**。上游按账号灰度推进
+（生产池实测约 22% 账号先中招），故表现为「同一时刻有人能用、有人全挂」。
+
+- **根因**：上游国际版新增渠道校验，校验对象是**请求头里的会话头族**（实测只在 body 里
+  加 `conversationId` **无效**）。本仓 `chatHeaders` 此前已带
+  `X-Conversation-Request-ID` / `-Message-ID` / `X-Request-ID` / `X-Root-Request-ID` 四件，
+  **唯独缺 `X-Conversation-ID`** —— 恰是上游点名的那个字段。
+- **修法**：补 `X-Conversation-ID`（随机 UUIDv4、带连字符，每次请求现生成），
+  既有四件头保持原貌不动。**不改 body**（实测无效），**不碰国内版**（上游无此校验）。
+- **证据**：三个独立项目交叉验证 —— ardeyouxipianyi/workbuddy2api-hub#380（对官方客户端
+  5.8.4 静态解包 + mitmproxy 抓包约 350 条核验会话头族形态）、CangShui/workbuddy-gateway#20
+  的 A/B 实验（同凭据同 body 直连，缺会话头族恒 400、带齐恒 200）、ithtelab/workbuddy-manager#193
+  （生产池补头后逐号全绿）。
+- **本仓独立复现与验证**：三账号直连上游做消元矩阵 —— 被封账号「无头 / 只补
+  `X-Conversation-ID` / 只带原四件头」三种形态**全部 400**，**五件齐全才 200**；
+  未封账号任何形态均 200。端到端跑 master 与修复版两份二进制：master 对 `deepseek-v4.1-flash`
+  / `glm-5.3` 恒 400，修复版对 `deepseek-v4.1-flash` / `glm-5.3` / `kimi-k3` 均正常出流。
+- **顺带实证的两条**（PR 描述未覆盖，已记入 R71）：① 上游校验的是**头族齐全**而非单点，
+  只补 `X-Conversation-ID` 仍被拒；② `X-Conversation-ID` 的**取值形态不被校验** ——
+  UUIDv4、32 位 hex、甚至裸串 `xyz` 都通过，重复使用同一 id 也稳定 200，故「每请求现生成」
+  与「稳定派生」在功能上等价。
+- **已知限制**：上游为抽样/灰度校验，补头后短期不再出现不等于绝对修好（可能还有其他校验维度）；
+  若后续仍偶发 11-128，需抓失败样本重新定位。
 
 ## 🦝 小浣熊登录跟进上游迁站（R67，PR #124）
 
@@ -2087,6 +2147,41 @@ R54 的降级链在生产里**只救了一半**：主模型所在渠道被 pool 
 - 补回缺失的 `</div>`，并新增 3 条静态断言防回退（`<div>` 开闭配平 / `settingsOverlay`
   有匹配闭合 / `adminLoginOverlay` 位于 `settingsOverlay` 之外）。
 
+## 🎛 面板易用性打磨（PR #130 / #131 / #132，[@ezjbc](https://github.com/ezjbc)）
+
+三处纯前端改进，都不改接口与既有 DOM 结构，且各补了静态断言防回退：
+
+- **设置面板补上模型查找入口（#131）**：「模型降级链」与「思考强度」两块都要填
+  `channel/model` 完整 ID，此前只能关掉设置弹层、跳回首页查、再手工抄回来。现两处标题右侧各加
+  「🔍 查询模型」按钮，复用首页同一个查找弹层。**审查跟进修出真实缺陷**：按钮同时带 `.icon-btn`
+  （`width:30px` 纯图标尺寸），只覆盖 `height` 不覆盖 `width` 会让 68px 标签挣出 30px 边框盒、
+  压到相邻内容；已补 `width:auto` 并加断言（原先只校验选择器存在，对本缺陷会假绿）。
+- **模型查找结果不再截断（#130）**：原 `MODEL_SEARCH_MAX = 12` 让结果只渲染前 12 条，
+  渠道多或前缀相似时想找的模型看不到。现结果全量渲染，超出对话框高度的部分由 `.ms-list`
+  纵向滚动（对话框尺寸不变）；`min-height:0` 是让 flex 子项可滚动的前提，已在注释标明。
+- **思考强度行模型 ID 不再被截断（#132）**：`renderEffList` 的 ID 列用了 `.lbl.wide`（定宽
+  `90px`），同时给定宽与 `max-width` 时取较小值 ⇒ 内联 `max-width:260px` 从未生效。改为
+  `width:auto;max-width:340px`，短 ID 自适应、长 ID 在 340px 处省略。
+
+## 🔓 OpenCodeZen 匿名车道与伪装头跟进上游闸门（R69，issue #117）
+
+issue #117 二次反馈「升级了还是恒 403」，并附**逐项消元矩阵**称上游 2026-10-14 起有三道形状闸门。
+经核实，其引用的参考实现注释**确实存在且当前有效**（opencode2api 明确记载该三处变更），
+故按参考实现对齐：
+
+- **匿名车道改走 `/inference/v1`**（新增 `AnonymousBase`，`base()` 按凭证分流：匿名 → `/inference`，
+  自备 `sk-…` key → `/zen`）。上游把 **keyless 推理**从 `/zen` 迁到了独立入口，两条车道基址已分离。
+- **不再发 `x-opencode-request`**：该关联头一旦出现即判非官方客户端 ⇒ 403。
+- **`x-opencode-project` 改裸 40 位小写 hex**：`prj_` 前缀的规范 id 会被拒（值本身不校验，只校验形状），
+  由 session 经 sha256 派生 ⇒ 同一会话稳定映射同一 project（保住 prompt cache 亲和）。
+- 顺带补发参考实现要求、本仓此前**缺失**的 `x-opencode-session-id`（与 `x-opencode-session` 同值）。
+
+**如实披露（不是「已复现」）**：本仓在 CN 直连与 JP 代理出口下，出厂形状与逐项变体共 **56 次**
+匿名调用**全部 200**（含 `zen/v1` + `prj_` + `x-opencode-request`），同时**负对照有效**
+（去掉 `bash`/`read` 桩工具 ⇒ 403），证明探针确能观测闸门。故判断为**上游按出口/后端金丝雀下发**，
+而非闸门不存在。换到 `/inference` 在两种情形下都不会更差（两基址的 `GET /models` 完全相同、均 200），
+故跟随参考实现；**若仍有 403，请附日志里的上游原文 body。**
+
 ## 🔧 合并期修出的跨切面缺陷
 
 1. **小浣熊 JWT uid 提取漏改两处（R67 补正）**：上游迁站后 JWT 换成标准 OIDC，
@@ -2098,19 +2193,101 @@ R54 的降级链在生产里**只救了一半**：主模型所在渠道被 pool 
 2. **降级链的 `runtimeCapacity` 死代码与过期文案**：PR #127 删掉提前返回后，`runtimeCapacity`
   的 `hasHealthy` 返回值已无人使用，折叠为单一 `modelHasCapacity`；面板/统计里写死「主模型全冷」
   的文案同步改为覆盖「整渠道全灭」。
+3. **OfficeAce 流内 error 帧误报（合并期实证）**：`errorSniffer` 原用
+  `strings.Contains(line, "error")` 判据——正常回答正文里只要出现 `error` 字样（模型写代码/
+  解释报错）就被当成错误帧 ⇒ 产出 `StreamError` ⇒ `statusOfPayload` 默认 502 ⇒ 归 `ErrServer`
+  （Rotatable）⇒ handler 累计 `errCount` 后**冷却健康账号**。修为「必须能解析成 JSON 且顶层存在
+  `error` 键」。
+4. **OfficeAce 非流式路径吞掉内嵌错误**：`Aggregate` 原不做 error 嗅探，上游 200 + 流内 error 帧
+  被 `upstream.Aggregate` 当成「成功空回答」吞掉（实测 `err=nil`）——客户端看到空内容、账号不冷却
+  （与 R60 修 qwenwork 的正是同一形态，本渠道漏了非流式出口）。现与 `Stream` 同款嗅探。
+5. **OfficeAce `Extra` map 并发读写致命错误**：`a.Extra` 是 map，`refreshToken` 的 `addDead`
+  无锁就地写、`accountFromAuth` 无锁读 ⇒ Go `fatal error: concurrent map read and map write`
+  （**不可 recover，直接打死进程**，实测复现）。修为 `accountFromAuth` 持 `RLock`、`addDead` 持 `Lock`。
+6. **OfficeAce「从客户端导入」丢 refresh_token**：`Account.Export()` 原缺 `RefreshToken` 字段，
+  而导入路径用它落盘 ⇒ 导入的账号只有 ~2h 临时凭据，之后积分/签到**永久无法续期**
+  （对话走不过期的网关凭据，故极隐蔽）。现补字段并在导入处落盘 + 对无 refresh_token 的账号给出提示。
+7. **OfficeAce 能力字段不编造（R49）**：`fetchModels`/`StaticModels` 原一律置
+  `SupportsTools/SupportsReasoning = true`（上游目录只回 id，无任何声明）⇒ 属编造。现保持零值（未知）。
+  另：401/403 从 `ErrSessionDead`（会 `pool.Disable` 永久禁用）改归 `ErrAccountFault`（软冷却可自愈），
+  `reloadAccounts` 补上 OfficeAce 分支（否则 OAuth/导入落盘后账号要等重启才进池，R34/R41 家族）。
 
 ## 📝 文档与决议整合
 
-- AGENTS.md：新增 **R67（小浣熊迁站）**、**R68（监听失败终止）**，R54 触发判据同步扩展，
-  R44 注明「入口与 cookie 名已更新，见 R67」；README 决议索引更新为 R1–R68。
+- AGENTS.md：新增 **R67（小浣熊迁站）**、**R68（监听失败终止）**、**R69（oczen 车道与伪装头）**，
+  R54 触发判据同步扩展，R44 注明「入口与 cookie 名已更新，见 R67」；OpenCodeZen 渠道说明改为四道闸门；
+  决议索引更新为 R1–R69。
+- **PR #128 的 oczen 核心未采纳（本仓实现更优）**：PR #128 与本仓已落地的 R69 同向，但其核心相对本仓
+  是退化版——① 把 `DefaultBase` 一刀切改成 `/inference/v1`，**丢掉键控车道**（本仓 `base()` 按凭证
+  分流：匿名 → `AnonymousBase`(/inference)，自备 `sk-…` key → `DefaultBase`(/zen)，与参考实现
+  `Upstream.Zen` / `Upstream.Anonymous` 双字段一致）；② **漏发 `x-opencode-session-id`**（参考实现要求
+  两个 session 头同值）。故 oczen 三文件与 AGENTS.md 保留本仓版本，仅采纳其文档/夹具/重复行等净残差：
+  `DEVELOPMENT.md`（端点按车道分流 + 闸门清单补 `-session-id`）、`README.md`（systemone 示例端点）、
+  `internal/provider/provider.go` 注释、`internal/devdump/devdump_on_test.go` 夹具、
+  `internal/oczen/live_test.go` 注释、`cmd/wild-work/web/app.js`（删 `openSettings` 里重复两遍的
+  `editCustomChannels`/`renderCustomChList`）。
 - 回归：`internal/login_raccoon`、`internal/raccoon`（`TestJWTUID` / 新版 OIDC 自愈）、
   `internal/app`（uid 单点来源静态锁）、`internal/server`（降级链 13 例）、
+  `internal/oczen`（车道分流 / 伪装头形状 / project 派生 + 实盘 live）、
   `cmd/wild-work/listen_fail_test.go`、`scripts/ui-static-check.mjs`。
 
 ## 🙏 致谢
 
 | 贡献者 | 内容 |
 |--------|------|
+| [@zkj123](https://github.com/zkj123) | #122 新增华为云果办 OfficeAce 渠道（对话/积分/签到/OAuth 登录/DPAPI） |
 | [@xxhhlk](https://github.com/xxhhlk) | #124 小浣熊登录跟进上游迁站、#126 监听失败终止进程 |
-| [@ezjbc](https://github.com/ezjbc) | #127 整渠道全灭时跨渠道模型降级（R54 触发判据扩展） |
+| [@ezjbc](https://github.com/ezjbc) | #127 整渠道全灭时跨渠道模型降级（R54 触发判据扩展）；#130/#131/#132 面板查找与模型 ID 显示打磨 |
 | [@sept13-yu](https://github.com/sept13-yu) | issue #125 管理面板登录层不可见（定位到缺失的 `</div>`） |
+| [@fmdxx1991](https://github.com/fmdxx1991) | issue #117 与 #128 OpenCodeZen 恒 403（附逐项消元矩阵，定位到端点与两个伪装头闸门） |
+| [@jianzhangg](https://github.com/jianzhangg) | #135 WorkBuddyAI 对话补 `X-Conversation-ID`（修上游渠道校验 11-128，附 5.8.4 抓包口径） |
+| [@danshui93](https://github.com/danshui93) | issue #133 国际版全模型 400 `11-128`（首个现场报告 + 指出国内版不受影响） |
+
+---
+
+# wild-work v2.8.1 — 自定义渠道积分噪音修复（无积分概念渠道全面退出积分体系）
+
+> 发布主题：**修「刷新积分」把自定义渠道误计为失败**的提示噪音（R66 收尾）。
+> 用户实测症状：面板点「刷新积分」恒报「成功 32 / 失败 4」，但全部真实账号都是绿的——
+> 失败的 4 条全是自定义渠道（cliproxy / sgproxy / stepfun / zhipu）的占位账号。
+
+## 🐛 修复内容
+
+自定义 OpenAI 兼容渠道（R66）本就无积分概念：凭据本体是**渠道级 api_key**（对话转发用），
+占位账号无 access/refresh token，上游也无任何余额端点（`UserResourceDetail` 恒返回空），
+面板积分区已正确显示「不适用」。但积分体系的三条路径漏了对齐：
+
+- **`RefreshAll`（批量刷新积分）**：不跳过自定义渠道，每个渠道必记一条
+  `no token` 假失败 → 面板 toast 报「失败 N」纯噪音。对齐 oczen 的处理：
+  `rt.Custom` 运行时直接 `continue`，不进统计（回归 `TestRefreshAllSkipsCustomChannels`）。
+- **`RefreshCredits`（单账号刷新）**：不拒绝会落入 `creditSnapshot`，把 pool 快照**写成 0**
+  （`UserResourceDetail` 恒空），让人误读成「额度已用光」。改为明确报
+  「<渠道> 为自定义渠道，无积分概念，不适用」（回归 `TestRefreshCreditsCustomChannelNA`）。
+- **`ResourceDetail`（积分明细弹层）**：同样恒返回空 items，前端弹出一张空白明细层。
+  改为明确报错（同上回归覆盖）。
+
+## 🎨 前端对齐（`web/app.js`）
+
+- `NO_CREDITS` / `NO_EXPLICIT_CHECKIN` 原为**静态内建名单**，自定义渠道名不在其中：
+  自定义账号卡片上有可点的「签到 / 刷新积分」按钮（点了后端必拒或写 0），
+  显示名也可点改名（后端必报「无凭证文件」）。改为**动态判定**：
+  `isCustomGroup()` 以后端 `/api/state` 下发的 `custom_channels` 为准（保存即热更新，
+  勿在前端另维护一份）；`hasNoCredits() = 内建 NA 名单 ∪ 自定义渠道`，与后端
+  `creditsNAKind` 同口径。
+- 无积分账号拆成两类分别处理：**oczen/cline（固定账号）**维持原样——只留静态指示、
+  不可停用/删除/改名；**自定义渠道账号**无积分/无签到，但保留停用/删除/改名入口
+  （后端本就支持：删除 = 移除整个渠道配置），仅去掉签到/刷新积分两个无意义按钮。
+- 「全部签到」的 skip 计数随之动态化（此前自定义账号既不在 results 里也不在 skip 里，
+  toast 合计数对不上）。
+- 「刷新积分」toast：失败为 0 时显示「全部成功（N 个）」，避免「成功 N / 失败 0」
+  的怪异句式；「不适用」tooltip 文案改为「该渠道无积分概念」（不再是匿名通道特指）。
+- `promptLogin` 的登录提示文案改回查内建名单（该处只可能收到内建渠道名）。
+
+## ✅ 验证
+
+- `go build ./... && go vet ./... && go test ./...` 全绿（35 包）；
+  新增 3 条回归测试（`internal/app/creditrefresh_test.go`）。
+- `scripts/ui-static-check.mjs` 通过；`node --check app.js` 语法通过。
+- 本地实测（macOS，带 4 个自定义渠道的真实配置）：`POST /api/account/refresh_all`
+  返回 `failed=0`，自定义渠道不再出现在 platforms；单账号刷新与明细均明确报「不适用」；
+  `/api/state` 中自定义账号 `credits_na=true` 不变。

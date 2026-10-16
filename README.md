@@ -1,6 +1,6 @@
 # wild-work
 
-> 多渠道账号聚合桌面工具——把 WorkBuddy(CodeBuddy) 国内版/国际版、TraeWork、QoderCN、QoderCOM（国际版）、千问办公、MonkeyCode 平台托管模型、小浣熊、Loomy（讯飞）、智谱清言、Cline（官方 API Key 免费池）的多个账号聚合成一个 OpenAI 兼容 API，并额外提供**无需账号**的 OpenCodeZen 匿名免费通道，双击启动，浏览器管理。
+> 多渠道账号聚合桌面工具——把 WorkBuddy(CodeBuddy) 国内版/国际版、TraeWork、QoderCN、QoderCOM（国际版）、千问办公、MonkeyCode 平台托管模型、小浣熊、Loomy（讯飞）、智谱清言、Cline（官方 API Key 免费池）、华为云果办 OfficeAce 的多个账号聚合成一个 OpenAI 兼容 API，并额外提供**无需账号**的 OpenCodeZen 匿名免费通道，双击启动，浏览器管理。
 
 [![GitHub](https://img.shields.io/badge/GitHub-rockswang%2Fworkbuddy--wild-blue)](https://github.com/rockswang/workbuddy-wild)
 
@@ -11,7 +11,8 @@
 - **思考链死循环检测（防癫拦截）**：流式生成中逐帧检测推理复读/空转，命中即中断 SSE 并向客户端返回错误（`code=upstream_reasoning_loop`），由下游 AI 客户端自行重试恢复；不罚账号（模型级问题），默认开启，面板「设置」可关闭
 - **OpenAI 兼容代理**：`/v1/chat/completions`、`/v1/models`，支持流式/非流式，模型前缀路由
 - **错误分类精细化**：区分「请求问题」与「账号问题」——内容拦截/上下文超限不罚号，限流/风控/账号故障分级冷却，429 不再误判余额耗尽；**单账号渠道（OpenCodeZen）例外：任何错误均不冷却**（无号可轮换，惩罚即等于整渠道下线）
-- **十三渠道聚合**：WorkBuddyCN(CodeBuddy) + WorkBuddyAI（国际版） + TraeWork + TraeCode + QoderCN + QoderCOM（国际版） + 千问办公 + MonkeyCode（`monkeycode/*`，平台托管模型） + 小浣熊（`raccoon/*`） + Loomy（讯飞，`loomy/*`） + 智谱清言（`glm/*`，网页版私有接口 + CDP 自动登录） + Cline（`cline/*`，粘贴官方 API Key，只调度免费模型） + OpenCodeZen（`oczen/*`，匿名免费、无需账号），模型前缀路由，粘性路由优先复用账号以提升会话缓存利用率，临期积分优先消耗；旧 Qoder（`qoder/*`）路由保留但已从界面下线
+- **十四渠道聚合**：WorkBuddyCN(CodeBuddy) + WorkBuddyAI（国际版） + TraeWork + TraeCode + QoderCN + QoderCOM（国际版） + 千问办公 + MonkeyCode（`monkeycode/*`，平台托管模型） + 小浣熊（`raccoon/*`） + Loomy（讯飞，`loomy/*`） + 智谱清言（`glm/*`，网页版私有接口 + CDP 自动登录） + Cline（`cline/*`，粘贴官方 API Key，只调度免费模型） + 华为云果办 OfficeAce（`officeace/*`，华为云 AgentArts 模型网关，客户端导入或自助 OAuth 登录） + OpenCodeZen（`oczen/*`，匿名免费、无需账号），模型前缀路由，粘性路由优先复用账号以提升会话缓存利用率，临期积分优先消耗；旧 Qoder（`qoder/*`）路由保留但已从界面下线
+  OfficeAce 支持两条添加路径：面板登录按钮走**自助 OAuth**（华为云授权码 + PKCE + DPoP，跨平台），弹窗里的次按钮「从客户端导入」则读本机已登录的 OfficeAce 桌面端凭据（临时 AK/SK 经 DPAPI 解密，仅 Windows）。对话走不过期的网关 Basic 凭据，每日签到的临时凭据约 2 小时有效，本工具会自动续期。
   小浣熊支持两条添加路径：面板登录按钮走**网页版自动登录**（拉起独立 profile 的浏览器，登录后经 CDP 捕获凭据，跨平台），弹窗里的次按钮「从客户端导入」则复用本机客户端凭据。
   Loomy 为**导入型**渠道（凭据不由本工具登录产生，从**本机已登录的官方客户端**读取；上游无 refresh 端点，session 约 14 天，到期需重新导入）。
   智谱清言为**网页版私有接口**渠道（非开放平台），凭据是浏览器 Cookie 里的 `chatglm_refresh_token`；面板登录按钮走 CDP 自动捕获（独立 profile），新账号须在智谱清言 App 登录一次才发放初始额度。
@@ -59,6 +60,7 @@
 | [codkeep/MonkeyCodeReverseEngineer](https://github.com/codkeep/MonkeyCodeReverseEngineer) | MonkeyCode 渠道协议对照参考（Apache-2.0） |
 | [xxhhlk/raccoon2api](https://github.com/xxhhlk/raccoon2api) | 小浣熊渠道协议逆向（MIT），raccoon 渠道依据 |
 | [xxhhlk/loomy2api](https://github.com/xxhhlk/loomy2api) | 讯飞 Loomy 渠道协议逆向（MIT），loomy 渠道依据 |
+| [Q-shuang-dot/officeace2api](https://github.com/Q-shuang-dot/officeace2api) | 华为云果办 OfficeAce 渠道协议依据（MIT）——V4/V11 华为云签名（`src/quota.mjs`）、网关错误码分类（`src/server.mjs`）、`max_tokens` 推理预算常量（`src/config.mjs`）、桌面端凭据发现与 DPAPI/AES-256-GCM 档案解密（`src/discover*.mjs` / `src/dpapi.mjs`）、DPoP + PKCE 自助 OAuth（`src/oauth.mjs`）、refresh_token 一次性轮换（`src/refresh.mjs`）；本项目只取协议与凭据链路，其**批量注册/接码**、Web 控制台、Windows 计划任务看门狗未采用 |
 | [luawei1/cline2api](https://github.com/luawei1/cline2api) | Cline 渠道协议逆向参考（MIT；虽未采用其 WorkOS OAuth 方案，模型/对话协议知识有参考，`recommended-models` free 池机制亦借鉴自其分析） |
 | [donghangxunlang-cmd/dsh-attention-health](https://github.com/donghangxunlang-cmd/dsh-attention-health) | 思考链死循环（发癫）检测算法来源——`lib/guard.js` 的四条复读/空转判据与防误杀护栏（本项目只取死循环检测，健康评估/工作交接/会话日志未采用） |
 | [ttales430/wild-work PR #46](https://github.com/rockswang/wild-work/pull/46) | 智谱清言渠道实现（含 CDP 登录编排） |
@@ -107,7 +109,7 @@
 1. 从 [Releases](https://github.com/rockswang/workbuddy-wild/releases) 下载 `wild-work.exe`
 2. 放到任意目录，双击启动
 3. 右下角出现 W 图标，**双击托盘图标** → 浏览器打开 Web 管理面板
-4. 在面板中点击「+ WorkBuddyCN」/「+ WorkBuddyAI」/「+ TraeWork」/「+ QoderCN」/「+ QoderCOM」/「+ 千问办公」/「+ 智谱清言」添加账号
+4. 在面板中点击「+ WorkBuddyCN」/「+ WorkBuddyAI」/「+ TraeWork」/「+ QoderCN」/「+ QoderCOM」/「+ 千问办公」/「+ 智谱清言」/「+ OfficeAce」添加账号
    （OpenCodeZen 无需添加账号，启动即已就绪；Cline 无需登录流程，直接粘贴 API Key）
 5. 根据下方配置说明接入你的 AI 客户端
 
@@ -398,7 +400,7 @@ curl -X POST "http://127.0.0.1:7863/v1/systemone" \
 - `state` 文本约 32k token 预算（state + questions 共享），英文最强，数学/日期/十六进制请交给代码
 - `choice` 最多 255 个选项，`score` 2~10 级
 - **免费**：`cost:"0"`，实测 0.5~1.3s 完成决策
-- 也可直连上游：`POST https://opencode.ai/zen/v1/systemone` + `Authorization: Bearer public` + OpenCode 伪装头，但本网关已帮你处理了鉴权与伪装
+- 也可直连上游：`POST https://opencode.ai/inference/v1/systemone` + `Authorization: Bearer public` + OpenCode 伪装头，但本网关已帮你处理了鉴权与伪装
 
 > **别拿它当 GPT 用**——把它当成"语义判断 API"：给它状态和选择题，它回概率和置信度，你的代码根据 typed 值做后续决策。
 
@@ -411,6 +413,14 @@ curl -X POST "http://127.0.0.1:7863/v1/systemone" \
   （「＋ 小浣熊」主按钮走**网页版自动登录**：拉起一个独立浏览器窗口，登录后自动捕获凭据；
   次按钮「从客户端导入」则读取本机已登录客户端的凭据，不需要浏览器登录）
   （「＋ Loomy」是**导入**按钮：读取本机已登录客户端的凭据，不需要浏览器登录）
+  （「＋ OfficeAce」主按钮走**自助 OAuth**：拉起华为云授权页，登录后自动捕获凭据；
+  次按钮「从客户端导入」则读取本机已登录 OfficeAce 桌面端的凭据（临时 AK/SK 经 DPAPI 解密，仅 Windows），
+  不需要浏览器登录）
+  - ⚠️ **OfficeAce 关于登录态互踢**：上游刷新时会轮换 refresh_token，若同一账号的凭据被本工具与 OfficeAce 桌面端**共用**，
+  两边会争抢同一个 refresh_token。要两边同时用，请用「浏览器登录」在本工具**单独登录一次**（新建独立链路），而不是从桌面端导入。
+  - ⚠️ **OfficeAce 关于平台限制**：**浏览器登录（自助 OAuth）跨平台**（纯 HTTP + 系统浏览器）；
+  而「从客户端导入」的加密档案解密依赖 **Windows DPAPI**，仅 Windows 可用。
+  两条路径的对话都不受影响（网关 Basic 凭据不过期），但非 Windows 下若不走自助登录，积分/签到会降级。
   - ⚠️ **关于小浣熊登录态互踢**：上游刷新时会轮换 refresh_token，若同一账号的凭据被本工具与浏览器 / 官方客户端**共用**，
   两边会争抢同一个 refresh_token，可能出现其中一侧被挤下线。要两边同时用，请用「网页版登录」在独立浏览器窗口里**单独登录一次**
   （本流程新建独立会话），而不是从浏览器复制凭据粘进来。

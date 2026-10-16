@@ -205,16 +205,26 @@ func TestChatStreamRequestShape(t *testing.T) {
 	if got := gotH.Get("x-opencode-client"); got != "cli" {
 		t.Errorf("x-opencode-client 错误: %q", got)
 	}
-	for _, k := range []string{"x-opencode-session", "x-session-affinity", "X-Session-Id"} {
+	for _, k := range []string{"x-opencode-session", "x-opencode-session-id", "x-session-affinity", "X-Session-Id"} {
 		if got := gotH.Get(k); !strings.HasPrefix(got, "ses_") || len(got) != 30 {
 			t.Errorf("%s 非规范会话形状: %q", k, got)
 		}
 	}
-	if !strings.HasPrefix(gotH.Get("x-opencode-request"), "req_") {
-		t.Errorf("x-opencode-request 缺失: %q", gotH.Get("x-opencode-request"))
+	// 2026-10-14 起上游把 x-opencode-request 列为 403 触发头（见 R69/headered），
+	// 一旦发出即被拒；这里锁死「不得再发」。
+	if got := gotH.Get("x-opencode-request"); got != "" {
+		t.Errorf("不得发送 x-opencode-request（上游 2026-10-14 起对携带该头的请求回 403）: %q", got)
 	}
-	if !strings.HasPrefix(gotH.Get("x-opencode-project"), "prj_") {
-		t.Errorf("x-opencode-project 缺失: %q", gotH.Get("x-opencode-project"))
+	// project 必须是裸 40 位小写 hex（prj_ 前缀的规范形态会被拒 403）。
+	proj := gotH.Get("x-opencode-project")
+	if len(proj) != 40 || strings.HasPrefix(proj, "prj_") {
+		t.Errorf("x-opencode-project 必须是裸 40 位 hex（不得带 prj_ 前缀），实际: %q", proj)
+	}
+	for _, ch := range proj {
+		if !(ch >= '0' && ch <= '9' || ch >= 'a' && ch <= 'f') {
+			t.Errorf("x-opencode-project 含非小写 hex 字符: %q", proj)
+			break
+		}
 	}
 	if gotBody["stream"] != true {
 		t.Errorf("请求体未强制 stream=true: %v", gotBody["stream"])
@@ -353,6 +363,7 @@ func TestAnonymousAuthShape(t *testing.T) {
 	}
 }
 
+
 // TestStreamClientHasNoTotalTimeout 守门：流式必须走**无总超时**的 client。
 //
 // http.Client.Timeout 是整请求上限，SSE 整个生成期都在读 body ⇒ 长思考请求会被从流中间
@@ -408,4 +419,54 @@ func TestChatStreamWrapsIdleReader(t *testing.T) {
 	}
 	defer rc.Close()
 	_ = rc // 上游 oczen 的流包装由 internal/idle 提供，类型不导出，这里只校验请求成功
+}
+
+// TestBaseSelectsLaneByCredential 基址必须按车道分流（R69）。
+//
+// 上游 2026-10-14 把 **keyless**（匿名 public）推理从 /zen 迁到 /inference，
+// 两条车道基址不再相同。issue #117 的现场就是「匿名走 /zen 恒 403」。
+// 显式 Base（测试注入）必须仍然优先，否则全部 httptest 用例会打到真上游。
+func TestBaseSelectsLaneByCredential(t *testing.T) {
+	c := New()
+	if got := c.base(); got != AnonymousBase || !strings.Contains(got, "/inference") {
+		t.Fatalf("匿名凭证必须走 AnonymousBase(/inference)，实际 %q", got)
+	}
+	c.SetAPIKey("sk-user-key")
+	if got := c.base(); got != DefaultBase {
+		t.Fatalf("自备 key 必须走 DefaultBase(/zen)，实际 %q", got)
+	}
+	c.SetAPIKey("")
+	if got := c.base(); got != AnonymousBase {
+		t.Fatalf("清空 key 后应回匿名车道，实际 %q", got)
+	}
+	// 显式 Base 优先于两条车道（测试注入 httptest 上游）。
+	c.Base = "http://127.0.0.1:1"
+	if got := c.base(); got != c.Base {
+		t.Fatalf("显式 Base 必须优先，实际 %q", got)
+	}
+}
+
+// TestClientProjectIDShape 伪装 project 头必须是官方 CLI 的**裸 40 位小写 hex**
+// （带 prj_ 前缀的规范 id 会被上游 403），且同一 session 恒定映射同一值
+// （prompt cache 亲和）。见 R69。
+func TestClientProjectIDShape(t *testing.T) {
+	s := canonicalSessionID("conv-a")
+	got := clientProjectID(s)
+	if len(got) != 40 {
+		t.Fatalf("project 必须是 40 位 hex，实际 %d 位: %q", len(got), got)
+	}
+	if strings.HasPrefix(got, "prj_") {
+		t.Fatalf("project 不得带 prj_ 前缀（上游拒绝该规范形态）: %q", got)
+	}
+	for _, ch := range got {
+		if !(ch >= '0' && ch <= '9' || ch >= 'a' && ch <= 'f') {
+			t.Fatalf("project 必须全为小写 hex，实际含 %q: %q", ch, got)
+		}
+	}
+	if again := clientProjectID(s); again != got {
+		t.Fatalf("同一 session 必须稳定映射同一 project（prompt cache 亲和）: %q vs %q", got, again)
+	}
+	if other := clientProjectID(canonicalSessionID("conv-b")); other == got {
+		t.Fatal("不同 session 不应映射到同一 project")
+	}
 }

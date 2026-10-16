@@ -400,8 +400,8 @@ function renderTopbar() {
 }
 
 // 渠道显示名与 CSS 短类名（后端 group / 费率 channel 均为 provider.Kind）。
-const CH_LABEL = { workbuddy: "WorkBuddyCN", workbuddyai: "WorkBuddyAI", traework: "TraeWork", traecode: "TraeCode", qoder: "Qoder", qodercn: "QoderCN", qodercom: "QoderCOM", qwenwork: "千问办公", glm: "智谱清言", raccoon: "商汤小浣熊", loomy: "Loomy", monkeycode: "MonkeyCode", oczen: "OpenCodeZen" };
-const CH_CLASS = { workbuddy: "wb", workbuddyai: "wbai", traework: "trae", traecode: "traecode", qoder: "qoder", qodercn: "qodercn", qodercom: "qodercom", qwenwork: "qwenwork", glm: "glm", raccoon: "raccoon", loomy: "loomy", monkeycode: "monkeycode", oczen: "oczen" };
+const CH_LABEL = { workbuddy: "WorkBuddyCN", workbuddyai: "WorkBuddyAI", traework: "TraeWork", traecode: "TraeCode", qoder: "Qoder", qodercn: "QoderCN", qodercom: "QoderCOM", qwenwork: "千问办公", glm: "智谱清言", raccoon: "商汤小浣熊", loomy: "Loomy", monkeycode: "MonkeyCode", oczen: "OpenCodeZen", cline: "Cline", officeace: "OfficeAce" };
+const CH_CLASS = { workbuddy: "wb", workbuddyai: "wbai", traework: "trae", traecode: "traecode", qoder: "qoder", qodercn: "qodercn", qodercom: "qodercom", qwenwork: "qwenwork", glm: "glm", raccoon: "raccoon", loomy: "loomy", monkeycode: "monkeycode", oczen: "oczen", cline: "cline", officeace: "officeace" };
 const chLabel = (k) => CH_LABEL[k] || "WorkBuddy";
 const chClass = (k) => CH_CLASS[k] || "wb";
 // chNameOf 数据驱动的渠道名（用量面板 / 流水 / 图表）：命中显示名则用显示名，
@@ -409,6 +409,11 @@ const chClass = (k) => CH_CLASS[k] || "wb";
 // 历史流水，可能是新增/已删渠道，显示原 id 才有诊断价值（chLabel 的兜底是给
 // 固定入口用的，那里必须有个能看的名字）。
 const chNameOf = (k) => CH_LABEL[k] || k || "";
+// isCustomGroup 该分组是否为用户自定义 OpenAI 兼容渠道（R66）。
+// 以 state.custom_channels（后端 /api/state 下发，保存即热更新）为准，勿在前端另维护一份。
+const isCustomGroup = (g) => !!(state && (state.custom_channels || []).some((c) => c && c.name === g));
+// hasNoCredits 该分组是否无积分概念：内建 NA 名单 ∪ 动态自定义渠道。与后端 creditsNAKind 同口径。
+const hasNoCredits = (g) => NO_CREDITS_BUILTIN.has(g) || isCustomGroup(g);
 // chPrefix 渠道前缀：客户端模型名必须带的渠道段（provider.Kind 即前缀，
 // 例如小浣熊填 raccoon/<模型名>）。面板多处要展示「客户端该填什么」，
 // 统一由此出口，避免各写一份副本随渠道增加而漂移。
@@ -424,12 +429,17 @@ function chPrefixChip(k) {
 // 不支持显式签到（手动按钮）的渠道：
 // 旧 Qoder 渠道无签到活动（qoder.DailyCheckin 直接返回错误，见 internal/qoder/client.go）；
 // WorkBuddy 国际版不提供手动签到，而是自动对话保活领日活奖励；千问办公无签到活动；
-// 小浣熊 / Loomy 无签到端点；OpenCodeZen 匿名通道无账号概念（也无积分）。
+// 小浣熊 / Loomy 无签到端点；OpenCodeZen 匿名通道无账号概念（也无积分）；
+// Cline 官方无签到活动（Key 不过期，无保活语义）。
 // QoderCN / QoderCOM 已实现签到（campaigns 主路径），保留手动按钮。
-const NO_EXPLICIT_CHECKIN = new Set(["qoder", "workbuddyai", "qwenwork", "raccoon", "loomy", "monkeycode", "oczen"]);
+const NO_EXPLICIT_CHECKIN = new Set(["qoder", "workbuddyai", "qwenwork", "raccoon", "loomy", "monkeycode", "oczen", "cline"]);
 const noExplicitCheckin = (g) => NO_EXPLICIT_CHECKIN.has(g);
+// 粘贴凭据型渠道：凭据是官方文档化的 API Key，创建动作发生在上游网页里，本工具无法代劳，
+// 故走专用输入框（而非「打开浏览器登录」）。当前仅 Cline（sk_ Key，见 internal/cline）。
+const PASTE_KEY_CHANNELS = new Set(["cline"]);
+const isPasteKey = (ch) => PASTE_KEY_CHANNELS.has(ch);
 // 导入型渠道：凭据由本机已登录的官方客户端提供，没有浏览器登录流程（见 internal/app/import_local.go）。
-const IMPORT_LOCAL_CHANNELS = new Set(["raccoon", "loomy", "monkeycode"]);
+const IMPORT_LOCAL_CHANNELS = new Set(["raccoon", "loomy", "monkeycode", "officeace"]);
 const isImportLocal = (ch) => IMPORT_LOCAL_CHANNELS.has(ch);
 // 支持「网页版自动登录」的渠道：后端拉起独立 profile 的浏览器，用户在网页里登录，
 // 后端经 CDP 捕获凭据（小浣熊：Cookie 里的 xhx_token）。
@@ -437,10 +447,13 @@ const isImportLocal = (ch) => IMPORT_LOCAL_CHANNELS.has(ch);
 const WEB_LOGIN_CHANNELS = new Set(["raccoon"]);
 const hasWebLogin = (ch) => WEB_LOGIN_CHANNELS.has(ch);
 // 无手动签到渠道的状态文案：国际版是「自动领日活奖励」，千问办公为「无签到」。
-const NO_CHECKIN_TAG = { workbuddyai: "自动领日活奖励", oczen: "不支持" };
+const NO_CHECKIN_TAG = { workbuddyai: "自动领日活奖励", oczen: "不支持", cline: "无签到" };
 const noCheckinText = (g) => NO_CHECKIN_TAG[g] || "无签到";
-// 无积分概念的渠道（匿名通道）：积分区域显示「不适用」，并隐藏刷新积分/明细入口。
-const NO_CREDITS = new Set(["oczen"]);
+// 无积分概念的渠道：积分区域显示「不适用」，并隐藏刷新积分/明细入口。
+// 内建名单只有 oczen（匿名通道）与 cline（官方无余额端点，UserResource 恒 0）；
+// 自定义渠道（R66）同样无积分，但渠道名是用户配置的、运行期可增删，
+// 故运行时以后端下发的 custom_channels 动态判定（isCustomGroup）。
+const NO_CREDITS_BUILTIN = new Set(["oczen", "cline"]);
 
 // creditsText 账号卡片的积分文案。
 // 拆成「可用 / 不可用 / 临期」三个数字：渠道（如 TraeWork）会下发官方客户端专用的
@@ -476,7 +489,7 @@ function modelCoolingTag(a) {
 }
 
 // 渠道汇总固定顺序（与添加按钮布局一致；traecode 是别名池不单独出现，qoder 下线仅存量兜底）
-const CH_SUMMARY_ORDER = ["workbuddy", "workbuddyai", "traework", "qodercn", "qodercom", "qwenwork", "glm", "oczen", "qoder"];
+const CH_SUMMARY_ORDER = ["workbuddy", "workbuddyai", "traework", "qodercn", "qodercom", "qwenwork", "glm", "cline", "officeace", "oczen", "qoder"];
 
 // renderSummary 渠道积分汇总条：每渠道一行「可用总积分 / 临期」，末尾合计。
 // 数据全部来自 state.accounts（pool 实时值），与账号卡片同源；
@@ -573,24 +586,27 @@ function renderAccounts() {
       ? `<span class="icon-op off" title="${esc(noCheckinTitle)}" onclick="return false">✓</span>`
       : `<span class="icon-op" title="签到" onclick="checkin('${a.uid}')">✓</span>`;
 
-    // 匿名渠道（无积分/无签到）：只保留「不可操作」的静态指示，
-    // 不给刷新积分/停用/删除入口——后端也会硬拒，避免用户白点一次。
-    const noCredits = NO_CREDITS.has(a.group);
+    // 无积分渠道（匿名 oczen / Cline / 自定义渠道）：只去掉「刷新积分」，
+    // 保留签到（若渠道有）/停用/删除/改名入口。其中**固定账号**（后端硬拒的 oczen）
+    // 连停用/删除/改名都不给，只留「不可操作」的静态指示，避免用户白点一次——
+    // 自定义渠道虽无积分但账号可管，故必须与固定账号区分（否则删不掉）。
+    const noCredits = hasNoCredits(a.group);
+    const fixedAcct = noCredits && !isCustomGroup(a.group);
     // 问号图标：hover 展示 oczen 通道说明（免费反代范围/私有 Key/代理三项）。
     // 放在锁头左侧；用独立的 help 样式（正常亮度 + help 光标），不可点击但 tooltip 可用。
     // title 内换行用 &#10;（HTML 属性实体），字面 \n 会被部分浏览器吞掉导致无 tooltip。
     const oczenHelp = `<span class="icon-op help" title="关于 OpenCodeZen 通道：&#10;1. 本工具仅反代其免费模型（绕过官方客户端限制）；付费账号可直接使用官方端点，无需经此通道&#10;2. 在 OpenCodeZen 获取的 API-Key 可在设置中配置，避免匿名账号共享限额超限&#10;3. 配置代理后可使用有地域限制的模型，可用性取决于上游通道">?</span>`;
-    const ops = noCredits
+    const ops = fixedAcct
       ? `${oczenHelp}<span class="icon-op off" title="固定账号，不可停用/删除" onclick="return false">🔒</span>`
       : `${checkinBtn}
-          <span class="icon-op" title="刷新积分" onclick="refreshOne('${a.uid}')">↻</span>
+          ${noCredits ? "" : `<span class="icon-op" title="刷新积分" onclick="refreshOne('${a.uid}')">↻</span>`}
           <span class="icon-op warn" title="${disableTitle}" onclick="toggleDisable('${a.uid}',${a.disabled})">${disableIcon}</span>
-          <span class="icon-op danger" title="删除账号" onclick="removeAcct('${a.uid}')">✕</span>`;
-    // 显示名：点击直接弹出改名框（匿名渠道不可改，降级为普通文本）。
+          <span class="icon-op danger" title="${isCustomGroup(a.group) ? esc("删除账号（自定义渠道将移除整个渠道配置）") : "删除账号"}" onclick="removeAcct('${a.uid}')">✕</span>`;
+    // 显示名：点击直接弹出改名框（固定账号不可改，降级为普通文本）。
     // oczen 特例：渠道名已由 badge 承担，名字按凭证形态显示「匿名/私有Key」。
     const isOczen = a.group === "oczen";
     const oczenName = (state.oczen_api_key || "") ? "私有Key" : "匿名";
-    const nameHtml = noCredits
+    const nameHtml = fixedAcct
       ? `<span class="acct-name">${esc(isOczen ? oczenName : (a.nickname || shortUid(a.uid)))}</span>`
       : `<span class="acct-name editable" title="点击修改显示名" onclick="openRename('${a.uid}','${esc(a.nickname || shortUid(a.uid)).replace(/'/g, "&#39;")}')">${esc(a.nickname || shortUid(a.uid))}</span>`;
 
@@ -880,6 +896,8 @@ const NO_CHECKIN_LOGIN_HINT = {
   loomy: "（凭据来自本机已登录的 Loomy 客户端；上游无续期接口，约 14 天后需重新登录并再次导入）",
   monkeycode: "（凭据来自本机已登录的 MonkeyCode 客户端；上游无续期接口，客户端重新登录后需再次导入）",
   glm: "（登录后请按下方指引复制 refresh_token 粘贴回来）",
+  cline: "（无需登录：在 app.cline.bot 注册账号，Account / API Keys → Create API Key 后粘贴即可；Key 不过期也不轮换）",
+  officeace: "（凭据来自本机已登录的 OfficeAce 客户端；每日签到的临时凭据约 2 小时有效，本工具会自动续期）",
 };
 function promptLogin(channel) {
   pendingChannel = channel;
@@ -913,6 +931,34 @@ function promptLogin(channel) {
     return;
   }
 
+  // 粘贴凭据型渠道（Cline）：弹专用输入框，而不是「打开浏览器登录」。
+  // Cline 的凭据是官方 API Key，创建动作发生在 app.cline.bot 网页里，本工具无法代劳。
+  if (isPasteKey(channel)) {
+    $("clineKeyInput").value = "";
+    $("clineErr").textContent = "";
+    $("clineWarn").style.display = "none";
+    $("clineOverlay").classList.remove("hidden");
+    setTimeout(() => $("clineKeyInput").focus(), 30);
+    return;
+  }
+
+  // OfficeAce（华为云果办）：主按钮走自助 OAuth（打开华为云授权页，跨平台），
+  // 次按钮回退到「从本机 OfficeAce 客户端导入」（仅 Windows 可解密 DPAPI 档案）。
+  if (channel === "officeace") {
+    pendingAction = "login";
+    $("lcTitle").textContent = "添加 OfficeAce 账号";
+    $("lcMsg").innerHTML = `点击「登录 OfficeAce」会打开<b>华为云授权页</b>，登录后本工具自动捕获凭据并添加账号`
+      + `（无需安装 OfficeAce 桌面端）。`
+      + `也可以点「从客户端导入」直接读取本机已登录的 OfficeAce 桌面端凭据。`;
+    $("btnLoginConfirm").textContent = "登录 OfficeAce";
+    const oaAlt = $("btnLoginAlt");
+    oaAlt.textContent = "从客户端导入";
+    oaAlt.classList.remove("hidden");
+    oaAlt.onclick = () => { pendingAction = "import"; confirmLogin(); };
+    $("loginConfirmOverlay").classList.remove("hidden");
+    return;
+  }
+
   // 纯导入型渠道：文案与动作都不同（读本机客户端凭据，而不是打开浏览器登录）。
   if (isImportLocal(channel)) {
     $("lcTitle").textContent = "导入 " + name + " 账号";
@@ -934,6 +980,8 @@ function confirmLogin() {
   if (!pendingChannel) return;
   // 按 pendingAction 分发：小浣熊两种动作都支持，不能只看渠道是否属于导入型。
   if (pendingAction === "import") importLocal(pendingChannel);
+  // OfficeAce 自助登录走专用端点（华为云 OAuth），与其它渠道的 /api/login/start 不同。
+  else if (pendingChannel === "officeace") startOfficeAceWebLogin();
   else startLogin(pendingChannel);
 }
 
@@ -950,6 +998,80 @@ async function importLocal(channel) {
   } catch (e) {
     toast(e.message);
   }
+}
+
+// submitClineKey 提交用户粘贴的 Cline 官方 API Key。
+// 后端只做「GET /api/v1/api-keys 验证 + 落盘」，零 token 消耗；
+// 返回的 warning 非空表示「这把 Key 与已有账号同属一个 Cline 账号」——
+// 官方配额按账号计（…UsageCostUSDPerUser），同账号多 Key 不会扩额度，必须显式告知。
+async function submitClineKey() {
+  const key = ($("clineKeyInput").value || "").trim();
+  if (!key) { $("clineErr").textContent = "请粘贴 API Key（sk_ 开头）"; return; }
+  const btn = $("btnClineSubmit");
+  btn.disabled = true;
+  $("clineErr").textContent = "验证中…";
+  try {
+    const r = await api("/api/login/cline_key", { api_key: key });
+    $("clineOverlay").classList.add("hidden");
+    $("clineKeyInput").value = "";
+    if (r && r.warning) toast(r.warning, 8000);
+    toast("Cline 账号已添加");
+    await loadState();
+    refreshFees();
+  } catch (e) {
+    $("clineErr").textContent = e.message || "验证失败";
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+// ---- OfficeAce 自助登录（华为云 OAuth 授权码 + PKCE）----
+let oaPoll = null;
+async function startOfficeAceWebLogin() {
+  try {
+    const r = await api("/api/login/officeace_auto", {});
+    const url = r.auth_url;
+    if (!url) { toast("无法获取登录链接"); return; }
+    $("loginTitle").textContent = "添加 OfficeAce 账号";
+    $("loginMsg").textContent = "已在浏览器打开华为云授权页，请在其中登录并授权；完成后本工具会自动捕获凭据。"
+      + "若浏览器未自动打开，可点「复制链接」手动打开。";
+    $("loginOverlay").classList.remove("hidden");
+    $("btnCopyUrl").dataset.url = url;
+    if (r.warning) toast(r.warning, 6000);
+    startOfficeAcePoll();
+  } catch (e) {
+    toast(e.message);
+  }
+}
+
+function startOfficeAcePoll() {
+  stopOfficeAcePoll();
+  oaPoll = setInterval(async () => {
+    try {
+      const st = await api("/api/login/officeace_auto_status");
+      if (st.status === "done") {
+        stopOfficeAcePoll();
+        $("loginOverlay").classList.add("hidden");
+        toast(`OfficeAce 账号已添加${st.nickname ? "：" + st.nickname : ""}`);
+        await loadState();
+        refreshFees();
+      } else if (st.status === "failed" || st.status === "expired") {
+        stopOfficeAcePoll();
+        toast(st.error || "OfficeAce 登录失败", 8000);
+      } else if (st.status === "canceled" || st.status === "idle") {
+        stopOfficeAcePoll();
+      }
+    } catch (e) { /* 忽略瞬时错误 */ }
+  }, 2000);
+}
+
+function stopOfficeAcePoll() {
+  if (oaPoll) { clearInterval(oaPoll); oaPoll = null; }
+}
+
+function cancelOfficeAceLogin() {
+  stopOfficeAcePoll();
+  api("/api/login/officeace_auto_cancel", {}).catch(() => {});
 }
 
 async function startLogin(channel) {
@@ -977,6 +1099,8 @@ async function startLogin(channel) {
 
 async function cancelLogin() {
   try {
+    // 仅在 OfficeAce 自助流程进行中才调它的取消端点（否则对其它渠道是无谓的 400 噪音）。
+    if (oaPoll) { cancelOfficeAceLogin(); }
     await api("/api/login/cancel", {});
     stopLoginPoll();
     $("loginOverlay").classList.add("hidden");
@@ -1495,6 +1619,10 @@ function bind() {
   $("btnAddRaccoon").onclick = () => promptLogin("raccoon");
   $("btnAddLoomy").onclick = () => promptLogin("loomy");
   $("btnAddMonkeyCode").onclick = () => promptLogin("monkeycode");
+  $("btnAddCline").onclick = () => promptLogin("cline");
+  $("btnClineSubmit").onclick = submitClineKey;
+  $("btnClineCancel").onclick = () => $("clineOverlay").classList.add("hidden");
+  $("btnAddOfficeAce").onclick = () => promptLogin("officeace");
   $("btnAddGLM").onclick = () => startGLMLogin();
   $("btnGLMSubmit").onclick = submitGLMToken;
   $("btnGLMCancel").onclick = cancelGLMLogin;

@@ -30,6 +30,11 @@ docs/*
 !docs/qoderCN渠道接入备忘.md
 !docs/三端点四能力矩阵.md
 !docs/用量积分流水记账备忘.md
+!docs/GitHub直连下载与加速代理调研备忘.md
+!docs/三接口兼容改造备忘.md
+!docs/决议项.md
+!docs/渠道接入备忘.md
+!docs/接口参考.md
 
 # 临时文件
 temp/

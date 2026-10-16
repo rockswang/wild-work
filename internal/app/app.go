@@ -35,6 +35,7 @@ import (
 	"wild-work/internal/login_wbai"
 	"wild-work/internal/loopguard"
 	"wild-work/internal/oczen"
+	"wild-work/internal/officeace"
 	"wild-work/internal/platform"
 	"wild-work/internal/pool"
 	"wild-work/internal/provider"
@@ -52,7 +53,7 @@ import (
 )
 
 // Version 版本号。
-const Version = "2.7.4"
+const Version = "2.8.1"
 
 const (
 	loginTimeout   = 5 * time.Minute
@@ -119,6 +120,9 @@ type App struct {
 	// 它不轮询 state 文件，而是经 CDP 从浏览器 Cookie 捕获凭据）。
 	muGLMLogin sync.Mutex
 	glmLogin   *loginglm.AutoSession
+
+	muOALogin sync.Mutex
+	oaLogin   *officeace.LoginSession
 
 	// auth 管理面板会话（cookie）；详见 session.go
 	auth *authState
@@ -344,7 +348,8 @@ func (a *App) allStatuses() []pool.Status {
 var channelOrder = map[provider.Kind]int{
 	provider.Oczen: 0, provider.WorkBuddy: 1, provider.WorkBuddyAI: 2,
 	provider.QoderCN: 3, provider.QoderCOM: 4, provider.TraeWork: 5, provider.QwenWork: 6,
-	provider.GLM: 7,
+	provider.GLM:       7,
+	provider.OfficeAce: 8,
 }
 
 // feeChannelOrder 「模型列表和费率」面板的渠道分组顺序。
@@ -357,6 +362,7 @@ var feeChannelOrder = []provider.Kind{
 	provider.MonkeyCode,
 	provider.Raccoon,
 	provider.Loomy,
+	provider.OfficeAce,
 }
 
 // channelRank 渠道排序键：未知渠道排最后。
@@ -1244,6 +1250,62 @@ func (a *App) CancelGLMAutoLogin() error {
 	return nil
 }
 
+// StartOfficeAceLogin 发起 OfficeAce 自助登录（华为云 OAuth 授权码 + PKCE + DPoP）。
+// 返回待打开的授权 URL；后台轮询完成登录并落盘。前端轮询 GetOfficeAceLoginStatus。
+func (a *App) StartOfficeAceLogin() (string, error) {
+	a.muOALogin.Lock()
+	defer a.muOALogin.Unlock()
+	if a.oaLogin != nil {
+		if st, _ := a.oaLogin.Status(); st == "pending" || st == "exchanging" {
+			return a.oaLogin.URL(), errors.New("已有 OfficeAce 登录流程进行中，请先在浏览器完成登录或取消")
+		}
+	}
+	sess, err := officeace.StartLogin(a.cfg.AuthDir, func(r officeace.LoginResult) {
+		a.reloadAccounts()
+		a.afterAccountAdded(provider.OfficeAce)
+		log.Printf("officeace 自助登录完成，账号池已重载 uid=%s", r.UID)
+	})
+	if err != nil {
+		return "", err
+	}
+	a.oaLogin = sess
+	// 尝试用系统浏览器打开授权页（失败不阻断：URL 已返回给前端，可手动打开）。
+	_ = sess.OpenInBrowser()
+	return sess.URL(), nil
+}
+
+// GetOfficeAceLoginStatus 查询 OfficeAce 自助登录状态。
+func (a *App) GetOfficeAceLoginStatus() map[string]any {
+	a.muOALogin.Lock()
+	sess := a.oaLogin
+	a.muOALogin.Unlock()
+	if sess == nil {
+		return map[string]any{"status": "idle"}
+	}
+	status, err := sess.Status()
+	out := map[string]any{"status": status}
+	if err != nil {
+		out["error"] = err.Error()
+	}
+	if r, ok := sess.Result(); ok {
+		out["uid"] = r.UID
+		out["nickname"] = r.Nickname
+	}
+	return out
+}
+
+// CancelOfficeAceLogin 取消 OfficeAce 自助登录。
+func (a *App) CancelOfficeAceLogin() error {
+	a.muOALogin.Lock()
+	sess := a.oaLogin
+	a.muOALogin.Unlock()
+	if sess == nil {
+		return errors.New("没有进行中的 OfficeAce 登录")
+	}
+	sess.Cancel()
+	return nil
+}
+
 // completeQwenWorkLogin 登录成功：写 auth 文件、重载账号池。
 // 千问办公无签到活动（每日积分服务端被动发放），不做首次签到。
 func (a *App) completeQwenWorkLogin(r loginqwenwork.Result) {
@@ -1412,6 +1474,17 @@ func (a *App) reloadAccounts() {
 		auths, err := auth.LoadClineDir(a.cfg.AuthDir)
 		if err != nil {
 			log.Printf("reload cline accounts: %v", err)
+		} else {
+			rt.Pool.SyncToDir(auths)
+		}
+	}
+	// OfficeAce：华为云果办，凭据由面板「浏览器登录」或「从客户端导入」写入 auths/。
+	// 两条添加路径（OAuth onDone / importOfficeAce）都依赖本分支把新账号同步进池，
+	// 缺了它账号要等 daemon 重启才出现（R34/R41 家族的「声明了却没接线」）。
+	if rt := a.runtime(provider.OfficeAce); rt != nil && rt.Pool != nil {
+		auths, err := auth.LoadOfficeAceDir(a.cfg.AuthDir)
+		if err != nil {
+			log.Printf("reload officeace accounts: %v", err)
 		} else {
 			rt.Pool.SyncToDir(auths)
 		}
@@ -1679,6 +1752,12 @@ func (a *App) RefreshCredits(uid string) (int64, error) {
 		// 匿名通道无积分概念，面板显示「不适用」，无刷新语义。
 		return 0, fmt.Errorf("OpenCodeZen 匿名通道无积分，不适用")
 	}
+	if rt.Custom {
+		// 自定义渠道（R66）无积分接口：凭据本体是渠道级 api_key（对话转发用），
+		// 不拒绝会落入 creditSnapshot 把 pool 快照写成 0（UserResourceDetail 恒返回空），
+		// 让人误读成「额度已用光」。
+		return 0, fmt.Errorf("%s 为自定义渠道，无积分概念，不适用", rt.Kind)
+	}
 	log.Printf("credits refresh start platform=%s uid=%s", rt.Kind, uid)
 	usable, expiring, unusable, err := a.creditTotals(rt, au)
 	if err != nil {
@@ -1711,6 +1790,12 @@ func (a *App) RefreshAll() RefreshSummary {
 		}
 		// oczen 无积分可刷：纳入只会产生一条无意义的「无积分」失败记录。
 		if rt.Kind == provider.Oczen {
+			continue
+		}
+		// 自定义渠道（R66）同样无积分概念：凭据本体是渠道级 api_key（对话转发用），
+		// 占位账号无 access/refresh token，且 UserResourceDetail 恒返回空。
+		// 纳入只会把每个自定义渠道都记成一条「no token」假失败（面板报「失败 N」噪音）。
+		if rt.Custom {
 			continue
 		}
 		ps := PlatformSummary{Accounts: []AccountRefresh{}}
@@ -1834,6 +1919,11 @@ func (a *App) ResourceDetail(uid string) (remain int64, items []provider.Resourc
 	}
 	if rt.Kind == provider.Oczen {
 		return 0, nil, 0, 0, fmt.Errorf("OpenCodeZen 匿名通道无积分，不适用")
+	}
+	if rt.Custom {
+		// 自定义渠道（R66）无明细接口：UserResourceDetail 恒返回空 items，
+		// 不拒绝会让前端弹出一张空白明细层。
+		return 0, nil, 0, 0, fmt.Errorf("%s 为自定义渠道，无积分明细，不适用", rt.Kind)
 	}
 	return a.creditSnapshot(rt, au)
 }
@@ -2779,6 +2869,29 @@ func (a *App) HandleAPI(mux *http.ServeMux) {
 	})
 	mux.HandleFunc("POST /api/login/glm_auto_cancel", func(w http.ResponseWriter, r *http.Request) {
 		if err := a.CancelGLMAutoLogin(); err != nil {
+			apiError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+	})
+	mux.HandleFunc("POST /api/login/officeace_auto", func(w http.ResponseWriter, r *http.Request) {
+		url, err := a.StartOfficeAceLogin()
+		if err != nil {
+			// 已有流程进行中时也回传 URL，便于前端继续打开/轮询
+			if url != "" {
+				writeJSON(w, http.StatusOK, map[string]any{"auth_url": url, "warning": err.Error()})
+				return
+			}
+			apiError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"auth_url": url})
+	})
+	mux.HandleFunc("GET /api/login/officeace_auto_status", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, http.StatusOK, a.GetOfficeAceLoginStatus())
+	})
+	mux.HandleFunc("POST /api/login/officeace_auto_cancel", func(w http.ResponseWriter, r *http.Request) {
+		if err := a.CancelOfficeAceLogin(); err != nil {
 			apiError(w, http.StatusBadRequest, err.Error())
 			return
 		}

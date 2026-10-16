@@ -1019,6 +1019,12 @@ body {
 .badge.cline { background: #15803d; }
 .fees .ch-header.cline td { color: #15803d; }
 
+/* officeace：华为云果办渠道（华为红，与既有色系区分） */
+.btn.primary.alt.officeace { background: #cf0a2c; border-color: #cf0a2c; }
+.btn.primary.alt.officeace:hover { background: #a9081f; }
+.badge.officeace { background: #cf0a2c; }
+.fees .ch-header.officeace td { color: #cf0a2c; }
+
 /* ==========================================================================
    响应式适配（手机/平板竖屏）
    —— 原实现只有「卡片改单列 / 使用卡 2 列」两条窄屏规则，其余区块在手机竖屏

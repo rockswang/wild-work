@@ -54,7 +54,8 @@
         <!-- 中间弹性空白由 flex:1 撑开 -->
         <div class="pa-spacer"></div>
         <!-- 右组：渠道添加三列 grid，整体靠右；保持两行，第4列留白（体验渠道不占主位） -->
-        <!-- 布局：行1 = WorkBuddyCN | QoderCN | TraeWork | 智谱清言(体验)；行2 = WorkBuddyAI | QoderCOM | 千问办公 | 留空 -->
+        <!-- 布局：行1 = WorkBuddyCN | QoderCN | TraeWork | 智谱清言(体验)；行2 = WorkBuddyAI | QoderCOM | 千问办公 | 留空
+             行3 = 商汤小浣熊 | Loomy | MonkeyCode | Cline；行4 = OfficeAce -->
         <!-- 旧 Qoder 渠道已下线（代码保留，仅删界面入口） -->
         <div class="pa-group pa-right">
           <button class="btn primary" id="btnAddWB" style="grid-column:1;grid-row:1">＋ WorkBuddyCN</button>
@@ -67,6 +68,8 @@
           <button class="btn primary alt raccoon" id="btnAddRaccoon" style="grid-column:1;grid-row:3">＋ 商汤小浣熊</button>
           <button class="btn primary alt loomy" id="btnAddLoomy" style="grid-column:2;grid-row:3">＋ Loomy</button>
           <button class="btn primary alt monkeycode" id="btnAddMonkeyCode" style="grid-column:3;grid-row:3">＋ MonkeyCode</button>
+          <button class="btn primary alt cline" id="btnAddCline" style="grid-column:4;grid-row:3" title="免费池渠道：粘贴官方 API Key，须为多个独立账号各自的 Key">＋ Cline</button>
+          <button class="btn primary alt officeace" id="btnAddOfficeAce" style="grid-column:1;grid-row:4" title="华为云果办：从本机 OfficeAce 客户端导入或自助 OAuth 登录">＋ OfficeAce</button>
         </div>
       </div>
     </div>
@@ -210,6 +213,34 @@
     </div>
     <div class="modal-actions">
       <button class="btn small" id="btnGLMCancel">关闭</button>
+    </div>
+  </div>
+</div>
+
+<!-- Cline 登录弹层（粘贴型渠道：官方 API Key，无浏览器登录流程） -->
+<div class="overlay hidden" id="clineOverlay">
+  <div class="modal modal-wide">
+    <div class="modal-title">添加 Cline 账号</div>
+    <div class="modal-body settings-body">
+
+      <div class="cfg-section">
+        <div class="cfg-heading">申请办法</div>
+        <ol class="glm-steps">
+          <li>打开 <a href="https://app.cline.bot/" target="_blank" rel="noopener noreferrer">app.cline.bot</a> 并注册账号。</li>
+          <li>进入 <code>Account / API Keys</code> → <code>Create API Key</code>。</li>
+          <li>Key（形如 <code>sk_</code> + 64 位十六进制）<b>只在创建时完整显示一次</b>，请立即复制粘贴到下面。</li>
+        </ol>
+        <input id="clineKeyInput" class="input grow" spellcheck="false" autocomplete="off"
+               placeholder="粘贴 API Key（sk_…）" style="width:100%;font-family:ui-monospace,monospace">
+      </div>
+
+      <div class="hint" id="clineWarn" style="color:var(--warn);display:none"></div>
+      <div class="hint" id="clineErr" style="color:var(--danger)"></div>
+      <div class="hint">Key 不过期也不轮换，只保存在本机 <code>auths/</code> 目录，不会外传。同一 Cline 账号的多把 Key 共享一份官方额度。</div>
+    </div>
+    <div class="modal-actions">
+      <button class="btn small" id="btnClineCancel">关闭</button>
+      <button class="btn small primary" id="btnClineSubmit">验证并添加</button>
     </div>
   </div>
 </div>

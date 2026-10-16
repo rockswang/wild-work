@@ -46,6 +46,11 @@ type Auth struct {
 	// 导入器从客户端同一 bundle 目录的 baizhi-cookies.json 取得。
 	// 仅 MonkeyCode 用；其它渠道不用该字段。
 	BaizhiCookie string
+	// Extra 是渠道扩展凭据的通用承载袋（键值均字符串）。首例 officeace：
+	// base_url / account_id / user_id / access_key / secret_key / security_token /
+	// project_id / cred_expires / dpop_priv / region 等，均以字符串保存。
+	// 只增不减、向后兼容（旧凭证无该字段 → nil，各渠道自行判空）。仅该类渠道使用。
+	Extra        map[string]string `json:"extra,omitempty"`
 	UID          string
 	EnterpriseID string
 	Nickname     string
@@ -140,6 +145,8 @@ func Parse(raw []byte) (*Auth, error) {
 				ConsoleCookie string `json:"consoleCookie"`
 				// baizhiCookie 同上：百智云会话 Cookie（控制台会话的上游来源）
 				BaizhiCookie string `json:"baizhiCookie"`
+				// extra 渠道扩展凭据袋（officeace 等；其余渠道空）
+				Extra map[string]string `json:"extra"`
 			} `json:"auth"`
 			Account struct {
 				UID          string `json:"uid"`
@@ -166,6 +173,7 @@ func Parse(raw []byte) (*Auth, error) {
 			ConsoleCookie: n.Auth.ConsoleCookie,
 			// BaizhiCookie 同上（控制台会话的上游来源）
 			BaizhiCookie: n.Auth.BaizhiCookie,
+			Extra:        n.Auth.Extra,
 			UID:          n.Account.UID,
 			EnterpriseID: n.Account.EnterpriseID,
 			Nickname:     n.Account.Nickname,
@@ -187,9 +195,11 @@ func Parse(raw []byte) (*Auth, error) {
 			ConsoleCookie string `json:"consoleCookie"`
 			// baizhiCookie 同上：百智云会话 Cookie（控制台会话的上游来源）
 			BaizhiCookie string `json:"baizhiCookie"`
-			UID          string `json:"uid"`
-			EnterpriseID string `json:"enterpriseId"`
-			Nickname     string `json:"nickname"`
+			// extra 渠道扩展凭据袋（officeace 等；其余渠道空）
+			Extra        map[string]string `json:"extra"`
+			UID          string            `json:"uid"`
+			EnterpriseID string            `json:"enterpriseId"`
+			Nickname     string            `json:"nickname"`
 		}
 		if err := json.Unmarshal(raw, &f); err != nil {
 			return nil, fmt.Errorf("storage_parse_error: %w", err)
@@ -208,6 +218,7 @@ func Parse(raw []byte) (*Auth, error) {
 			SigningSecret: f.SigningSecret,
 			ConsoleCookie: f.ConsoleCookie,
 			BaizhiCookie:  f.BaizhiCookie,
+			Extra:         f.Extra,
 			UID:           f.UID,
 			EnterpriseID:  f.EnterpriseID,
 			Nickname:      f.Nickname,
@@ -250,6 +261,8 @@ func (a *Auth) saveAtomicLocked() error {
 			"consoleCookie": a.ConsoleCookie,
 			// baizhiCookie 同上：仅 MonkeyCode 用（百智云会话 Cookie）
 			"baizhiCookie": a.BaizhiCookie,
+			// extra 仅 officeace 等扩展渠道非空；其余渠道写空 map 无副作用
+			"extra": a.Extra,
 		},
 		"account": map[string]any{
 			"uid":          a.UID,
@@ -473,6 +486,16 @@ func LoadLoomyDir(dir string) ([]*Auth, error) {
 // qodercom- / qwenwork- / glm- / monkeycode- / raccoon- / loomy- 与 cline- 无包含关系。
 func LoadClineDir(dir string) ([]*Auth, error) {
 	return loadPrefixed(dir, "cline")
+}
+
+// LoadOfficeAceDir 扫描华为云果办 OfficeAce 渠道凭证（officeace-*.json）。
+// 与 cline 同为「导入型」渠道：凭据由面板从本机 OfficeAce 客户端文件发现后生成
+// （见 internal/officeace 的发现逻辑），或自助 OAuth 登录生成。
+// 上游模型网关是 OpenAI 兼容的华为 AgentArts 网关，故 accessToken 承载网关 Authorization 头
+// （Basic base64(AK:SK)）；其余扩展字段（base_url / 临时 AK-SK / refresh_token / DPoP 私钥）
+// 由 Parse 落到 Auth.Extra。
+func LoadOfficeAceDir(dir string) ([]*Auth, error) {
+	return loadPrefixed(dir, "officeace")
 }
 
 // loadPrefixed 按前缀扫描并解析凭证（供无登录编排的「导入型」渠道复用）。

@@ -5,6 +5,7 @@ import (
 	"io"
 	"net/http"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -598,5 +599,88 @@ func TestSetContextWindow(t *testing.T) {
 
 	if err := a.SetContextWindow("qwen3.8-flash", 1000000); err == nil {
 		t.Fatal("缺渠道前缀应报错")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// 自定义渠道（R66）与积分体系的关系：无积分概念，不得产生假失败/假 0
+// ---------------------------------------------------------------------------
+
+// TestRefreshAllSkipsCustomChannels RefreshAll 必须跳过自定义渠道：
+// 其占位账号无 access/refresh token（凭据本体是渠道级 api_key），纳入统计只会
+// 每渠道产生一条「no token」假失败，面板 toast 报「失败 N」纯噪音（issue 用户实测：
+// 4 个自定义渠道每次刷新都「失败 4」，但 32 个真实账号全部成功）。
+// 对齐 oczen 的跳过逻辑（无积分概念的渠道都不参与）。
+func TestRefreshAllSkipsCustomChannels(t *testing.T) {
+	up := &fakeUpstream{remain: 500}
+	a, _ := newTestApp(t, provider.WorkBuddyAI, up, "uid-real")
+
+	// 挂一个自定义渠道运行时：占位账号故意不带任何 token（与 main.buildCustomRuntimes 一致）
+	cp := pool.New(t.TempDir() + "/state-mychannel.json")
+	cp.Add(&auth.Auth{Kind: "mychannel", UID: "custom-mychannel", Nickname: "mychannel (自定义)", ExpiresAt: 4102444800})
+	a.UpdateCustomRuntimes(map[provider.Kind]*Runtime{
+		provider.Kind("mychannel"): {Kind: provider.Kind("mychannel"), Pool: cp, Upstream: up, Custom: true},
+	})
+
+	sum := a.RefreshAll()
+	if sum.Failed != 0 {
+		t.Errorf("自定义渠道不应计入失败：failed=%d（accounts=%v）", sum.Failed, sum.Platforms["mychannel"])
+	}
+	if sum.OK != 1 {
+		t.Errorf("真实账号应正常计入成功：ok=%d", sum.OK)
+	}
+	if _, ok := sum.Platforms["mychannel"]; ok {
+		t.Errorf("自定义渠道不应出现在汇总里")
+	}
+}
+
+// TestRefreshAllSkipsDisabledCustomChannels 变体：自定义渠道停用态（Enabled=false 时
+// buildCustomRuntimes 直接不装配，但热更新窗口内可能出现 Custom+Disabled 组合），同样不崩不进统计。
+func TestRefreshCreditsCustomChannelNA(t *testing.T) {
+	up := &fakeUpstream{remain: 500}
+	a, _ := newTestApp(t, provider.WorkBuddyAI, up, "uid-real")
+
+	cp := pool.New(t.TempDir() + "/state-mychannel.json")
+	cp.Add(&auth.Auth{Kind: "mychannel", UID: "custom-mychannel", ExpiresAt: 4102444800})
+	a.UpdateCustomRuntimes(map[provider.Kind]*Runtime{
+		provider.Kind("mychannel"): {Kind: provider.Kind("mychannel"), Pool: cp, Upstream: up, Custom: true},
+	})
+
+	// 单账号刷新必须明确报「不适用」，而不是假装成功把池内余额写成 0。
+	remain, err := a.RefreshCredits("custom-mychannel")
+	if err == nil {
+		t.Fatalf("自定义渠道单账号刷新应报「不适用」，却成功返回 remain=%d", remain)
+	}
+	if !strings.Contains(err.Error(), "不适用") {
+		t.Errorf("错误信息应说明无积分概念，得: %v", err)
+	}
+	if st, ok := cp.Status("custom-mychannel"); ok && st.Credits != 0 {
+		// 未被 creditSnapshot 污染（这里快照本就是 0，重点是没有假装成功）
+		t.Logf("pool credits=%d", st.Credits)
+	}
+
+	// 积分明细同理：报错而不是返回空 items 让前端弹空白层。
+	if _, _, _, _, err := a.ResourceDetail("custom-mychannel"); err == nil {
+		t.Error("自定义渠道积分明细应报「不适用」，却成功返回")
+	}
+}
+
+// TestCreditsNAKindCoversCustomChannels creditsNAKind 对自定义渠道返回 true
+// （/api/state 据此给 credits_na=true，前端显示「不适用」）。
+func TestCreditsNAKindCoversCustomChannels(t *testing.T) {
+	up := &fakeUpstream{remain: 1}
+	a, _ := newTestApp(t, provider.WorkBuddyAI, up, "uid-real")
+
+	cp := pool.New(t.TempDir() + "/state-mychannel.json")
+	cp.Add(&auth.Auth{Kind: "mychannel", UID: "custom-mychannel", ExpiresAt: 4102444800})
+	a.UpdateCustomRuntimes(map[provider.Kind]*Runtime{
+		provider.Kind("mychannel"): {Kind: provider.Kind("mychannel"), Pool: cp, Upstream: up, Custom: true},
+	})
+
+	if !a.creditsNAKind("mychannel") {
+		t.Error("自定义渠道应判定为积分不适用（credits_na=true）")
+	}
+	if a.creditsNAKind("workbuddyai") {
+		t.Error("内建有积分渠道不应被判定为 NA")
 	}
 }
