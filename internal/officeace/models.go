@@ -3,7 +3,8 @@ package officeace
 import "wild-work/internal/provider"
 
 // 已知可用模型（作为上游目录拉取失败时的兜底；正常以 /models 动态目录为准）。
-// 来源：officeace2api 实测「能用的 11 个」（34 目录里仅这些有权限）。
+// 来源：officeace2api 实测「能用的 11 个」+ 其目录里其余条目；上游 /models 无能力声明，
+// 故这里也只透出 id，不编造 SupportsTools/SupportsReasoning（R49 哲学）。
 var knownModels = []string{
 	"glm-5.3", "glm-5.2", "glm-5.1",
 	"deepseek-v4.1-flash", "deepseek-v4.1-flash-0930",
@@ -23,10 +24,8 @@ func StaticModels() []provider.ModelInfo {
 	out := make([]provider.ModelInfo, 0, len(knownModels))
 	for _, id := range knownModels {
 		out = append(out, provider.ModelInfo{
-			ID:                id,
-			Name:              id,
-			SupportsTools:     true,
-			SupportsReasoning: true,
+			ID:   id,
+			Name: id,
 		})
 	}
 	return out

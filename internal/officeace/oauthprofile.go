@@ -23,18 +23,18 @@ const secureDirRel = "packages/api/.config/secure-config-nodejs"
 
 // oauthProfileState 是解密后的 providerState 关键字段。
 type oauthProfileState struct {
-	AuthType    string `json:"authType"`
-	AccountID   string `json:"accountId"`
-	UserName    string `json:"userName"`
-	UserID      string `json:"user_id"`
-	Credential  struct {
-		Access          string `json:"access"`
-		Secret          string `json:"secret"`
-		STSToken        string `json:"sts_token"`
-		ProjectID       string `json:"project_id"`
-		ExpiresAt       any    `json:"expires_at"`
-		RefreshToken    string `json:"refresh_token"`
-		RefreshExpires  any    `json:"refresh_expires_at"`
+	AuthType   string `json:"authType"`
+	AccountID  string `json:"accountId"`
+	UserName   string `json:"userName"`
+	UserID     string `json:"user_id"`
+	Credential struct {
+		Access         string `json:"access"`
+		Secret         string `json:"secret"`
+		STSToken       string `json:"sts_token"`
+		ProjectID      string `json:"project_id"`
+		ExpiresAt      any    `json:"expires_at"`
+		RefreshToken   string `json:"refresh_token"`
+		RefreshExpires any    `json:"refresh_expires_at"`
 	} `json:"credential"`
 }
 

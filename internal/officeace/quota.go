@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"strconv"
 	"strings"
@@ -23,23 +24,24 @@ const (
 )
 
 // UserResource 返回该账号**可消耗积分**（套餐剩余 + 奖励剩余）。
-// 无临时凭据（未续期/未登录）或查询失败时返回 0 且不报错——
-// 读不到额度不该拦请求（对齐 officeace2api：读不到视为够用）。
+// 查询失败必须返回 error（不能 return 0,nil）——否则 creditSnapshot 会把「查询失败」
+// 当成「余额归零」，对上次快照的所有 key 记一条假 expire 事件污染 ledger 差分（R17），
+// 且让 pool 误判余额见底把账号排序垫底。与其它渠道口径一致：失败即上抛、由调用方跳过本轮。
 func (c *Client) UserResource(a *auth.Auth) (int64, error) {
 	ac := c.ensureCredential(a)
 	rem, _, err := c.subscriptionRemain(ac)
 	if err != nil {
-		return 0, nil
+		return 0, err
 	}
 	return rem, nil
 }
 
-// UserResourceDetail 返回可消耗余额 + 明细条目。
+// UserResourceDetail 返回可消耗余额 + 明细条目（失败同样上抛，理由见 UserResource）。
 func (c *Client) UserResourceDetail(a *auth.Auth) (int64, []provider.ResourceItem, error) {
 	ac := c.ensureCredential(a)
 	rem, items, err := c.subscriptionRemain(ac)
 	if err != nil {
-		return 0, nil, nil
+		return 0, nil, err
 	}
 	return rem, items, nil
 }
@@ -243,27 +245,35 @@ func (c *Client) DailyCheckin(a *auth.Auth) error {
 
 // DailyCheckinReport 结构化上报签到结果。
 func (c *Client) DailyCheckinReport(a *auth.Auth) (provider.CheckinReport, error) {
+	uid := a.UID
+	// 结构化日志行（供 stats 事件解析签到收入，格式与 qoder/raccoon 同构；R43）。
+	// 只在 claimed 时带 amount；其余状态 amount=0。日志零 token。
+	ret := func(st provider.CheckinStatus, claimed bool, amount int64, msg string, err error) (provider.CheckinReport, error) {
+		log.Printf("officeace checkin bonus uid=%s status=%s claimed=%t amount=%d msg=%s err=%v",
+			uid, st, claimed, amount, msg, err)
+		return provider.CheckinReport{Status: st, Msg: msg, Amount: amount}, err
+	}
 	ac := c.ensureCredential(a)
 	if ac.AccessKeyID == "" || ac.SecretAccessKey == "" {
-		return provider.CheckinReport{Status: provider.CheckinNoToken, Msg: "无临时凭据，需先续期/登录"}, nil
+		return ret(provider.CheckinNoToken, false, 0, "无临时凭据，需先续期/登录", nil)
 	}
 	gw, err := c.gatewayBase(ac)
 	if err != nil {
-		return provider.CheckinReport{Status: provider.CheckinError, Msg: err.Error()}, err
+		return ret(provider.CheckinError, false, 0, err.Error(), err)
 	}
 	u := trimSlash(gw) + "/v1/subscription/bonus/claim"
 	body, status, err := c.doV11(ac, http.MethodPost, u, "{}", "application/json;charset=utf8")
 	if err != nil {
-		return provider.CheckinReport{Status: provider.CheckinError, Msg: "签到请求失败：" + err.Error()}, err
+		return ret(provider.CheckinError, false, 0, "签到请求失败："+err.Error(), err)
 	}
 	if status != http.StatusOK {
-		return provider.CheckinReport{Status: provider.CheckinError, Msg: fmt.Sprintf("签到被拒 HTTP %d：%s", status, truncate(body, 200))}, nil
+		return ret(provider.CheckinError, false, 0, fmt.Sprintf("签到被拒 HTTP %d：%s", status, truncate(body, 200)), nil)
 	}
 	var resp struct {
 		BonusSKUs []bonusSKU `json:"bonus_skus"`
 	}
 	if err := json.Unmarshal(body, &resp); err != nil {
-		return provider.CheckinReport{Status: provider.CheckinError, Msg: "签到响应解析失败：" + err.Error()}, nil
+		return ret(provider.CheckinError, false, 0, "签到响应解析失败："+err.Error(), nil)
 	}
 	// 上游对已领过的号不报错，只回同样列表。判定「本次是否新发放」需对比余额：
 	// 简化口径——只要存在 remaining>0 的奖励即视为已有额度（幂等），不去重发放。
@@ -275,9 +285,9 @@ func (c *Client) DailyCheckinReport(a *auth.Auth) (provider.CheckinReport, error
 		}
 	}
 	if gained > 0 {
-		return provider.CheckinReport{Status: provider.CheckinClaimed, Msg: fmt.Sprintf("签到成功，剩余奖励 %d", gained), Amount: gained}, nil
+		return ret(provider.CheckinClaimed, true, gained, fmt.Sprintf("签到成功，剩余奖励 %d", gained), nil)
 	}
-	return provider.CheckinReport{Status: provider.CheckinAlready, Msg: "今日已领取或暂无奖励"}, nil
+	return ret(provider.CheckinAlready, false, 0, "今日已领取或暂无奖励", nil)
 }
 
 // ---------------------------------------------------------------------------
@@ -291,10 +301,10 @@ type subscription struct {
 }
 
 type sku struct {
-	SKUCode       string  `json:"sku_code"`
-	SKUName       string  `json:"sku_name"`
-	ExpiredTime   string  `json:"expired_time"`
-	Quotas        []quota `json:"quotas"`
+	SKUCode     string  `json:"sku_code"`
+	SKUName     string  `json:"sku_name"`
+	ExpiredTime string  `json:"expired_time"`
+	Quotas      []quota `json:"quotas"`
 }
 
 type quota struct {
@@ -305,10 +315,10 @@ type quota struct {
 }
 
 type bonusSKU struct {
-	ActivityName string `json:"activity_name"`
-	Points       string `json:"points"`
-	CurrentValue string `json:"current_value"`
-	ExpiredTime  string `json:"expired_time"`
+	ActivityName  string `json:"activity_name"`
+	Points        string `json:"points"`
+	CurrentValue  string `json:"current_value"`
+	ExpiredTime   string `json:"expired_time"`
 	CBCResourceID string `json:"cbc_resource_id"`
 }
 

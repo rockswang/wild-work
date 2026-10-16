@@ -72,10 +72,19 @@ func (c *Client) ChatStream(a *auth.Auth, body []byte) (io.ReadCloser, int, []by
 }
 
 // Stream 透传并规范化上游 SSE 帧，回填 model 为客户端请求名。
+// 同时嗅探流内 error 帧（HTTP 200 内嵌错误）——发现即返回实现 StreamErrorClassifier
+// 的错误，供 handler 分类冷却账号（R40）。
 func (c *Client) Stream(w http.ResponseWriter, r io.Reader, model string) (map[string]any, error) {
 	var usage map[string]any
-	err := upstream.StreamCapture(w, rewriteModelReader(r, model), func(u map[string]any) { usage = u })
-	return usage, err
+	sn := &errorSniffer{src: r}
+	err := upstream.StreamCapture(w, rewriteModelReader(sn, model), func(u map[string]any) { usage = u })
+	if err != nil {
+		return usage, err
+	}
+	if sn.payload != "" {
+		return usage, &StreamError{Status: statusOfPayload(sn.payload), Body: sn.payload}
+	}
+	return usage, nil
 }
 
 // Aggregate 非流式聚合（上游恒 stream=true，故只处理 SSE）。

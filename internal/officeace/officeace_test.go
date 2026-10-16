@@ -4,6 +4,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"wild-work/internal/provider"
 )
 
 // 锁定 V4/V11 签名的结构（不联网）：授权头应含算法标识、Credential、SignedHeaders、Signature。
@@ -67,7 +69,7 @@ func TestDPoPProof(t *testing.T) {
 
 func TestRewriteBodyForcesStreamAndBudget(t *testing.T) {
 	in := []byte(`{"model":"glm-5.2","stream":false,"max_tokens":100,"messages":[]}`)
-	out := rewriteBody(in, "")
+	out := rewriteBody(in)
 	s := string(out)
 	if !strings.Contains(s, `"stream":true`) {
 		t.Fatalf("stream not forced: %s", s)
@@ -82,7 +84,7 @@ func TestRewriteBodyForcesStreamAndBudget(t *testing.T) {
 
 func TestRewriteBodyStripsThinkingForGLM53(t *testing.T) {
 	in := []byte(`{"model":"glm-5.3","thinking":{"type":"disabled"},"messages":[]}`)
-	out := rewriteBody(in, "")
+	out := rewriteBody(in)
 	if strings.Contains(string(out), "thinking") {
 		t.Fatalf("thinking not stripped for glm-5.3: %s", out)
 	}
@@ -96,7 +98,7 @@ func TestClassifyHuaweiCodes(t *testing.T) {
 	}{
 		{200, `{"error":{"code":"ModelArts.81004"}}`, "model_blocked"},
 		{200, `{"error":{"code":"ModelArts.81111"}}`, "soft_rate"},
-		{401, `{"error_code":"APIG.1009"}`, "session_dead"},
+		{401, `{"error_code":"APIG.1009"}`, "account_fault"},
 		{200, `{"error":{"code":"ModelArts.81113","message":"exceeds the maximum size"}}`, "passthrough"},
 		{500, `oops`, "server"},
 	}
@@ -163,5 +165,56 @@ func TestAnyToUnixSec(t *testing.T) {
 	}
 	if got := anyToUnixSec(float64(1700000000000)); got != 1700000000 {
 		t.Fatalf("milliseconds not normalized: %d", got)
+	}
+}
+
+// 非推理模型（qwen3 系）不应被补 max_tokens 预算（不篡改用户显式语义）。
+func TestRewriteBodyNoBudgetForNonReasoning(t *testing.T) {
+	in := []byte(`{"model":"qwen3-32b","max_tokens":100,"messages":[]}`)
+	out := rewriteBody(in)
+	if !strings.Contains(string(out), `"max_tokens":100`) {
+		t.Fatalf("non-reasoning model max_tokens was changed: %s", out)
+	}
+}
+
+// glm-5.3 剥 thinking 后仍须带 stream_options.include_usage（否则 token 流水恒 0）。
+func TestRewriteBodyGLM53KeepsUsage(t *testing.T) {
+	in := []byte(`{"model":"glm-5.3","thinking":{"type":"disabled"},"messages":[]}`)
+	out := string(rewriteBody(in))
+	if strings.Contains(out, "thinking") {
+		t.Fatalf("thinking not stripped: %s", out)
+	}
+	if !strings.Contains(out, "include_usage") {
+		t.Fatalf("stream_options.include_usage missing after strip: %s", out)
+	}
+}
+
+// 流内 error 帧应产出实现 StreamErrorClassifier 的错误，供 handler 冷却账号。
+func TestStreamErrorClassifier(t *testing.T) {
+	body := `{"error":{"code":"ModelArts.81111","message":"TooManyRequests"}}`
+	se := &StreamError{Status: statusOfPayload(body), Body: body}
+	var sec provider.StreamErrorClassifier = se
+	if k := sec.Kind(); k != provider.ErrSoftRate {
+		t.Fatalf("stream error kind=%s want soft_rate", k)
+	}
+}
+
+// errorSniffer 应嗅探到带 error 键的 data 行。
+func TestErrorSnifferDetects(t *testing.T) {
+	stream := "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n" +
+		"data: {\"error\":{\"code\":\"81113\",\"message\":\"exceeds the maximum size\"}}\n\n" +
+		"data: [DONE]\n\n"
+	sn := &errorSniffer{src: strings.NewReader(stream)}
+	buf := make([]byte, 64)
+	for {
+		if _, err := sn.Read(buf); err != nil {
+			break
+		}
+	}
+	if sn.payload == "" {
+		t.Fatalf("sniffer did not capture error frame")
+	}
+	if k := classifyUpstream(statusOfPayload(sn.payload), sn.payload); k != provider.ErrPassthrough {
+		t.Fatalf("81113 should classify passthrough, got %s", k)
 	}
 }

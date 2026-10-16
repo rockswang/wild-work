@@ -36,8 +36,10 @@ func classifyUpstream(status int, body string) provider.ErrKind {
 		// 81004 无权限 / 81009 名字不认 → 模型级拒绝（账号未必坏，透传）
 		return provider.ErrModelBlocked
 	case status == http.StatusUnauthorized || status == http.StatusForbidden || reAuthFailed.MatchString(full):
-		// 整条凭据鉴权失败
-		return provider.ErrSessionDead
+		// 网关 Basic 凭据不过期，401/403 更像配置错误/临时问题（如 AK/SK 被撤、区域不符），
+		// 归 ErrAccountFault（轮换+软冷却）而非 ErrSessionDead——后者会 pool.Disable 永久禁用，
+		// 普通用户不会手工启用，等于把账号哑掉。
+		return provider.ErrAccountFault
 	case reBadRequest.MatchString(full) || status == http.StatusBadRequest:
 		if reUnsupportedPrm.MatchString(full) {
 			return provider.ErrBadParams

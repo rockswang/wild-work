@@ -17,9 +17,9 @@ import (
 // 推理预算常量（对齐 officeace2api/config.mjs）：
 // 上游把 max_tokens 当成「推理 + 正文」的总预算，推理模型的思维链会先把预算吃光 ⇒ 正文空。
 const (
-	tinyMaxTokens   = 16     // 小于此值原样透传
-	defaultMinMax   = 1024   // 推理预算追加量
-	maxTokensCeil   = 393216 // 全局上限
+	tinyMaxTokens = 16     // 小于此值原样透传
+	defaultMinMax = 1024   // 推理预算追加量
+	maxTokensCeil = 393216 // 全局上限
 )
 
 // glm53NoThinking：glm-5.3 系不吃 thinking 参数，需剥离后重试。
@@ -27,8 +27,16 @@ var glm53NoThinking = map[string]bool{
 	"glm-5.3": true, "glm-5.3-test": true, "glm-5.3-zx": true, "glm-5-test": true,
 }
 
-// stripWhenUnsupported 上游不认这些参数时剥离。
-var stripWhenUnsupported = []string{"thinking", "enable_thinking", "reasoning_effort", "stream_options"}
+// stripWhenUnsupported 上游不认这些参数时剥离（glm-5.3 系）。
+// 注意：**不含 stream_options** —— 它是本工具记账所需的 include_usage 载体，
+// 剥掉会让该模型 token 流水恒 0（见下方 rewriteBody 的注入顺序）。
+var stripWhenUnsupported = []string{"thinking", "enable_thinking", "reasoning_effort"}
+
+// isReasoningModel 判定是否推理模型（推理模型的 max_tokens 会被思维链吃光 ⇒ 需补预算）。
+// 已知非推理的是 qwen3-32b / qwen3-30b-a3b；其余（deepseek/glm/kimi/openpangu/longcat 系）按推理模型处理。
+func isReasoningModel(model string) bool {
+	return !strings.HasPrefix(strings.ToLower(model), "qwen3")
+}
 
 // chatStream 发对话请求：恒 stream:true，按模型改写 body。
 func (c *Client) chatStream(a *auth.Auth, body []byte) (io.ReadCloser, int, []byte, error) {
@@ -36,7 +44,7 @@ func (c *Client) chatStream(a *auth.Auth, body []byte) (io.ReadCloser, int, []by
 	if ac.BaseURL == "" {
 		return nil, 0, []byte("officeace: missing base_url"), fmt.Errorf("officeace: missing base_url")
 	}
-	out := rewriteBody(body, c.modelForAuth(a))
+	out := rewriteBody(body)
 	req, err := http.NewRequest(http.MethodPost, ac.chatURL(), bytes.NewReader(out))
 	if err != nil {
 		return nil, 0, nil, err
@@ -63,15 +71,13 @@ func (c *Client) chatStream(a *auth.Auth, body []byte) (io.ReadCloser, int, []by
 	return idle.Monitor(resp.Body, 300*time.Second, cancel), http.StatusOK, nil, nil
 }
 
-// modelForAuth 取该账号首选模型名（用于 body 中没有 model 时兜底）。当前恒空：model 由客户端传入。
-func (c *Client) modelForAuth(_ *auth.Auth) string { return "" }
-
-// rewriteBody 就地改写出站 body（不改动用户语义）：
-//  1. 强制 stream=true + stream_options.include_usage；
-//  2. glm-5.3 剥离 thinking；
-//  3. max_tokens 补足推理预算；
-//  4. temperature/top_p 夹取。
-func rewriteBody(body []byte, _ string) []byte {
+// rewriteBody 就地改写出站 body：
+//  1. 强制 stream=true；
+//  2. glm-5.3 剥离不认的参数（thinking/enable_thinking/reasoning_effort）；
+//  3. 注入 stream_options.include_usage（**在剥离之后**，保证 glm-5.3 也带上 usage）；
+//  4. 推理模型补足 max_tokens 推理预算（非推理模型不动）；
+//  5. temperature/top_p 夹取。
+func rewriteBody(body []byte) []byte {
 	var m map[string]any
 	if err := json.Unmarshal(body, &m); err != nil {
 		return body
@@ -80,19 +86,21 @@ func rewriteBody(body []byte, _ string) []byte {
 
 	// 1. 恒 stream
 	m["stream"] = true
-	if _, ok := m["stream_options"]; !ok {
-		m["stream_options"] = map[string]any{"include_usage": true}
-	}
 
-	// 2. glm-5.3 剥离 thinking
+	// 2. glm-5.3 剥离不认参数（先剥）
 	if glm53NoThinking[model] {
 		for _, k := range stripWhenUnsupported {
 			delete(m, k)
 		}
 	}
 
-	// 3. max_tokens 推理预算（仅对推理模型；此处保守地对所有给了 max_tokens 的请求补足）
-	if v, ok := m["max_tokens"].(float64); ok && v >= tinyMaxTokens {
+	// 3. 后注入 include_usage（不被上一步剥掉）
+	if _, ok := m["stream_options"]; !ok {
+		m["stream_options"] = map[string]any{"include_usage": true}
+	}
+
+	// 4. 推理模型补足 max_tokens 预算（非推理模型保持用户原值；<16 原样透传）
+	if v, ok := m["max_tokens"].(float64); ok && v >= tinyMaxTokens && isReasoningModel(model) {
 		ceiling := float64(maxTokensCeil)
 		n := v + float64(defaultMinMax)
 		if n > ceiling {
@@ -101,7 +109,7 @@ func rewriteBody(body []byte, _ string) []byte {
 		m["max_tokens"] = n
 	}
 
-	// 4. 夹取
+	// 5. 夹取
 	if v, ok := m["temperature"].(float64); ok {
 		if v < 0 {
 			v = 0
@@ -163,11 +171,12 @@ func (c *Client) fetchModels(a *auth.Auth) ([]provider.ModelInfo, error) {
 		if id == "" {
 			continue
 		}
+		// 上游 /models 只回 id，无任何能力声明 ⇒ 能力字段一律保持零值（未知），
+		// 不得编造 SupportsTools/SupportsReasoning（R49 / ContextFromAPI 哲学：
+		// 上游声明了才透出，未声明不编造）。
 		out = append(out, provider.ModelInfo{
-			ID:                 id,
-			Name:               id,
-			SupportsTools:      true,
-			SupportsReasoning:  true, // 华为网关多数为推理模型；未声明具体档位时不透出档位面
+			ID:   id,
+			Name: id,
 		})
 	}
 	return out, nil

@@ -50,8 +50,8 @@ type Auth struct {
 	// base_url / account_id / user_id / access_key / secret_key / security_token /
 	// project_id / cred_expires / dpop_priv / region 等，均以字符串保存。
 	// 只增不减、向后兼容（旧凭证无该字段 → nil，各渠道自行判空）。仅该类渠道使用。
-	Extra map[string]string `json:"extra,omitempty"`
-	UID   string
+	Extra        map[string]string `json:"extra,omitempty"`
+	UID          string
 	EnterpriseID string
 	Nickname     string
 	FilePath     string // 来源文件；refresh 后原子写回此处
@@ -196,10 +196,10 @@ func Parse(raw []byte) (*Auth, error) {
 			// baizhiCookie 同上：百智云会话 Cookie（控制台会话的上游来源）
 			BaizhiCookie string `json:"baizhiCookie"`
 			// extra 渠道扩展凭据袋（officeace 等；其余渠道空）
-			Extra map[string]string `json:"extra"`
-			UID          string `json:"uid"`
-			EnterpriseID string `json:"enterpriseId"`
-			Nickname     string `json:"nickname"`
+			Extra        map[string]string `json:"extra"`
+			UID          string            `json:"uid"`
+			EnterpriseID string            `json:"enterpriseId"`
+			Nickname     string            `json:"nickname"`
 		}
 		if err := json.Unmarshal(raw, &f); err != nil {
 			return nil, fmt.Errorf("storage_parse_error: %w", err)

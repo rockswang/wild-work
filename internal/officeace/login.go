@@ -415,8 +415,8 @@ func validateAndGateway(c *http.Client, tok *tokenResult, dpop *DPoPKey) (base, 
 		return "", "", "", "", "", fmt.Errorf("校验凭据失败 HTTP %d: %s", resp.StatusCode, truncate(rb, 300))
 	}
 	var out struct {
-		AccountID   string `json:"account_id"`
-		PrincipalID string `json:"principal_id"`
+		AccountID    string `json:"account_id"`
+		PrincipalID  string `json:"principal_id"`
 		Subscription struct {
 			ModelInfo struct {
 				ModelAPIURLBase string `json:"model_api_url_base"`

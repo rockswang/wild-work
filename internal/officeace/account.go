@@ -1,7 +1,6 @@
 package officeace
 
 import (
-	"encoding/base64"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -36,7 +35,7 @@ type Account struct {
 	ProjectID       string
 	CredExpiresAt   int64 // 临时凭据到期（Unix 秒；0=未知）
 	RefreshToken    string
-	RefreshExpire   int64 // refresh_token 到期（Unix 秒）
+	RefreshExpire   int64  // refresh_token 到期（Unix 秒）
 	DPoPPrivateJWK  string // DPoP 私钥 JWK（JSON 串）
 	Region          string
 	Source          string // 来源：disk / oauth-login
@@ -203,19 +202,6 @@ func parseInt64(s string) int64 {
 	return v
 }
 
-// decodeBase64Std 解码标准 base64（兼容有无 padding）。
-func decodeBase64Std(s string) (string, error) {
-	s = strings.TrimSpace(s)
-	if b, err := base64.StdEncoding.DecodeString(s); err == nil {
-		return string(b), nil
-	}
-	b, err := base64.RawStdEncoding.DecodeString(strings.TrimRight(s, "="))
-	if err != nil {
-		return "", err
-	}
-	return string(b), nil
-}
-
 // urlPathUnescape 是 url.PathUnescape 的薄封装（便于 discover 复用）。
 func urlPathUnescape(s string) (string, error) { return url.PathUnescape(s) }
 
@@ -227,40 +213,6 @@ func (ac *Account) chatURL() string { return trimSlash(ac.BaseURL) + "/chat/comp
 
 // modelsURL 返回模型目录端点（{base}/models）。
 func (ac *Account) modelsURL() string { return trimSlash(ac.BaseURL) + "/models" }
-
-// parseBasicAuthorization 从 "Basic base64(AK:SK)" 拆出 AK/SK；失败返回空。
-func parseBasicAuthorization(value string) (ak, sk string) {
-	v := strings.TrimSpace(value)
-	if len(v) < 7 || !strings.EqualFold(v[:6], "Basic ") {
-		return "", ""
-	}
-	dec, err := decodeBase64Std(v[6:])
-	if err != nil {
-		return "", ""
-	}
-	i := strings.IndexByte(dec, ':')
-	if i <= 0 {
-		return "", ""
-	}
-	return dec[:i], dec[i+1:]
-}
-
-// isRealAccountID 校验华为账号 ID 形态 <32hex>:<32hex>。
-func isRealAccountID(id string) bool {
-	if len(id) != 65 || id[32] != ':' {
-		return false
-	}
-	for i := 0; i < 65; i++ {
-		if i == 32 {
-			continue
-		}
-		c := id[i]
-		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')) {
-			return false
-		}
-	}
-	return true
-}
 
 // regionFromBaseURL 从网关 host 里猜 region（华为主机形如
 // modelgw-0004.officeace.cn-southwest-2.huaweicloud-agentarts.com ⇒ cn-southwest-2）。

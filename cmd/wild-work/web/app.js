@@ -1148,8 +1148,8 @@ async function startLogin(channel) {
 
 async function cancelLogin() {
   try {
-    stopOfficeAcePoll();
-    cancelOfficeAceLogin();
+    // 仅在 OfficeAce 流程进行中才调它的取消端点（否则对其它渠道是无谓的 400 噪音）。
+    if (oaPoll) { stopOfficeAcePoll(); cancelOfficeAceLogin(); }
     await api("/api/login/cancel", {});
     stopLoginPoll();
     $("loginOverlay").classList.add("hidden");

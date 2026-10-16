@@ -592,6 +592,12 @@ body {
 .badge.loomy { background: #1d4ed8; }
 .fees .ch-header.loomy td { color: #1d4ed8; }
 
+/* officeace 华为云果办渠道色（华为红） */
+.btn.primary.alt.officeace { background: #cf0a2c; border-color: #cf0a2c; }
+.btn.primary.alt.officeace:hover { background: #a9081f; }
+.badge.officeace { background: #cf0a2c; }
+.fees .ch-header.officeace td { color: #cf0a2c; }
+
 /* oczen：OpenCodeZen 匿名通道（暗灰蓝，与其它紫/青系区分，弱化「固定账号」观感） */
 .badge.oczen { background: #475569; }
 .fees .ch-header.oczen td { color: #475569; }

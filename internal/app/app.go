@@ -337,7 +337,8 @@ func (a *App) allStatuses() []pool.Status {
 var channelOrder = map[provider.Kind]int{
 	provider.Oczen: 0, provider.WorkBuddy: 1, provider.WorkBuddyAI: 2,
 	provider.QoderCN: 3, provider.QoderCOM: 4, provider.TraeWork: 5, provider.QwenWork: 6,
-	provider.GLM: 7,
+	provider.GLM:       7,
+	provider.OfficeAce: 8,
 }
 
 // feeChannelOrder 「模型列表和费率」面板的渠道分组顺序。
@@ -350,6 +351,7 @@ var feeChannelOrder = []provider.Kind{
 	provider.MonkeyCode,
 	provider.Raccoon,
 	provider.Loomy,
+	provider.OfficeAce,
 }
 
 // channelRank 渠道排序键：未知渠道排最后。
@@ -1479,6 +1481,17 @@ func (a *App) reloadAccounts() {
 		auths, err := auth.LoadClineDir(a.cfg.AuthDir)
 		if err != nil {
 			log.Printf("reload cline accounts: %v", err)
+		} else {
+			rt.Pool.SyncToDir(auths)
+		}
+	}
+	// OfficeAce：华为云果办，凭据由面板「浏览器登录」或「从客户端导入」写入 auths/。
+	// 两条添加路径（OAuth onDone / importOfficeAce）都依赖本分支把新账号同步进池，
+	// 缺了它账号要等 daemon 重启才出现（R34/R41 家族的「声明了却没接线」）。
+	if rt := a.runtime(provider.OfficeAce); rt != nil && rt.Pool != nil {
+		auths, err := auth.LoadOfficeAceDir(a.cfg.AuthDir)
+		if err != nil {
+			log.Printf("reload officeace accounts: %v", err)
 		} else {
 			rt.Pool.SyncToDir(auths)
 		}

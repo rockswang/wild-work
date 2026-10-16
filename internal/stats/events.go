@@ -60,14 +60,14 @@ var (
 	// （`raccoon checkin setting_info uid=… status=… claimed=… amount=…`），
 	// 语义也一致（结构化 status + 上游实发 amount），故共用本条正则。
 	reQoderClaimStatus = regexp.MustCompile(
-		`^(\d{4})/(\d{2})/(\d{2}) \d{2}:\d{2}:\d{2}\.\d+ (qodercn|qodercom|raccoon) checkin (?:daily|campaigns|setting_info) uid=(\S+) status=(\S+) claimed=(true|false) amount=(\d+) `)
+		`^(\d{4})/(\d{2})/(\d{2}) \d{2}:\d{2}:\d{2}\.\d+ (qodercn|qodercom|raccoon|officeace) checkin (?:daily|campaigns|setting_info|bonus) uid=(\S+) status=(\S+) claimed=(true|false) amount=(\d+) `)
 	// reCheckinShape 松形状探针（只服务「解析失效告警」，不参与记账）：只认上列 5 种
 	// **结果类**行的开头形状，不约束后续字段。上游改字段名/增删字段时严格正则会全数
 	// 失配（收入统计静默归零，比面板失效更隐蔽），而本探针仍会命中——两者一比即知
 	// 解析器已跟不上日志文案。刻意**不**匹配 start/failed/batch/credits/token invalid
 	// 等过程行（它们本就不记账，纳入会常态误报）。
 	reCheckinShape = regexp.MustCompile(
-		`^\d{4}/\d{2}/\d{2} \d{2}:\d{2}:\d{2}\.\d+ (?:checkin (?:result |platform=|uid=)|traework checkin (?:status|claim response) uid=|(?:qodercn|qodercom|raccoon) checkin (?:daily|campaigns|setting_info) uid=)`)
+		`^\d{4}/\d{2}/\d{2} \d{2}:\d{2}:\d{2}\.\d+ (?:checkin (?:result |platform=|uid=)|traework checkin (?:status|claim response) uid=|(?:qodercn|qodercom|raccoon|officeace) checkin (?:daily|campaigns|setting_info|bonus) uid=)`)
 )
 
 // RescanEventLog 全量重扫本进程日志文件并喂给事件解析器（幂等，可反复调用）。

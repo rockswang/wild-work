@@ -2019,3 +2019,36 @@ Cline 上游免费池的 ID 自带命名空间（`cline-free/*`），此前对�
 |--------|------|
 | [@ezjbc](https://github.com/ezjbc) | #118 思考强度档位注入（含面板可视化编辑与热更新） |
 | [@jianzhangg](https://github.com/jianzhangg) | #119 小浣熊 setting_info 签到、#120 自定义 OpenAI 兼容渠道、#121 自定义渠道 UI 打磨 |
+
+---
+
+# wild-work v2.7.4
+
+## 🎉 新渠道：华为云果办 OfficeAce（`officeace/*`，PR #122）
+
+把**华为云果办**（AgentArts 模型网关，本身 OpenAI 兼容）聚合进本工具，可多账号池化调度、
+统一记流水与运行统计。协议参考开源项目 [Q-shuang-dot/officeace2api](https://github.com/Q-shuang-dot/officeace2api)（MIT）。
+
+**能力**：
+- **对话**：`officeace/<model>` 路由；流式/非流式；恒以 `stream:true` 打上游，非流式本地聚合；
+  推理模型自适应补足 `max_tokens` 预算（思维链吃光预算会让正文为空），`glm-5.3` 系自动剥离
+  其不认的 `thinking` 参数。
+- **账号来源**（两路）：① 本机已登录的 OfficeAce 桌面端文件（`models.json` + 加密档案，
+  后者经 DPAPI/AES-256-GCM 解密取临时 AK/SK，仅 Windows）；② 面板「浏览器登录」走自助 OAuth
+  （华为云授权码 + PKCE + DPoP，跨平台，无需桌面端）。
+- **积分/签到**：控制面 V4/V11 华为签名查询套餐与奖励积分；每日签到走 `bonus/claim`。
+- **续期**：`refresh_token` 一次性轮换（单账号单飞 + 死名单，防止并发/重放），落盘持久化。
+- **模型列表**：`/v1/models` 以华为网关动态目录为准；拉取失败时回退内置静态表。
+
+**能力字段口径（R49）**：上游目录只返回模型 id、无任何能力声明，故 `SupportsTools` /
+`SupportsReasoning` 等一律不编造（保持未知）；思考档位面同样不编造。
+
+**已知限制（如实披露）**：合并时**无真实华为账号端到端实盘验证**——首次真实登录/续期/签到
+如遇上游字段与预期不符，需按实际响应微调；DPAPI 解密仅 Windows 生效，其它平台若不走自助登录
+则积分/签到降级（对话不受影响，网关 Basic 凭据不过期）。
+
+## 🐛 修复清单
+
+| PR | 问题 | 状态 |
+|---|---|---|
+| PR #122 | 新增华为云果办 OfficeAce 渠道（对话/积分/签到/OAuth 登录/DPAPI） | ✅ 本版新增 |

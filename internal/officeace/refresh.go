@@ -233,12 +233,18 @@ func containsCSV(list []string, v string) bool {
 	return false
 }
 
+// maxDeadTokens 死名单上限：refresh_token 一次性轮换会不断累积，长期运行需裁剪，
+// 避免 auth 文件单调变大。只保留最近 N 个（更早的已被服务器遗忘，留着无用）。
+const maxDeadTokens = 20
+
 func appendCSV(s, v string) string {
-	if v == "" || containsCSV(splitCSV(s), v) {
+	list := splitCSV(s)
+	if v == "" || containsCSV(list, v) {
 		return s
 	}
-	if strings.TrimSpace(s) == "" {
-		return v
+	list = append(list, v)
+	if len(list) > maxDeadTokens {
+		list = list[len(list)-maxDeadTokens:]
 	}
-	return s + "," + v
+	return strings.Join(list, ",")
 }
