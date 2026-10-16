@@ -75,10 +75,10 @@ summarize() {
     [ -d "$d" ] || continue
     ch=$(basename "$d")
     n=$(find "$d" -name '*.http' | wc -l)
-    # 取最新一份快照的 "# usage=" 行
+    # 取最新一份快照的汇总行：新格式在尾部 `# duration=… usage=…`，兼容旧格式头部 `# usage=`
     latest=$(ls -t "$d"*.http 2>/dev/null | head -1)
     hint="(no snapshot)"
-    [ -n "$latest" ] && hint=$(grep -am1 '^# usage=' "$latest" | sed 's/^# usage=//')
+    [ -n "$latest" ] && hint=$(grep -a '^# .*usage=' "$latest" | tail -1 | sed 's/^# .*usage=//')
     printf '%-12s %-6s %s\n' "$ch" "$n" "$hint"
   done
   echo
