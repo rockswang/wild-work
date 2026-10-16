@@ -996,6 +996,18 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 						log.Printf("stream error cooled platform=%s uid=%s kind=%s cooldown=%s",
 							rt.Kind, acct.UID, kind, h.cfg.HardCooldown)
 					case provider.ErrSessionDead:
+						// 单号渠道（loomy / 小浣熊 / MonkeyCode）流内登录态失效**不硬禁用**。
+						// 依据有二：① 单号渠道 Disable = 整条渠道下线（对齐 #92 对流内限流/
+						// 权益不足的处置）；② 实测上游会在 **HTTP 200** 上偶发报 100002
+						// （2026-10-16 抓包：同一 token 30s 后即可用、10/13 亦有同类孤立事件），
+						// 硬禁用会把一条健康渠道下线。客户端已通过 error 帧收到上游原文
+						// （如「登录已失效，请重新登录」），可操作性由客户端承担，是否重导
+						// 凭据留给用户判断。多号渠道仍按原逻辑禁用。
+						if len(rt.Pool.List()) <= 1 && !rt.SingleAccount {
+							log.Printf("stream session dead platform=%s uid=%s（单号渠道不硬禁用；已下发 error 帧，err=%v）",
+								rt.Kind, acct.UID, serr)
+							break
+						}
 						rt.Pool.Disable(acct.UID, "stream business error: session dead")
 						log.Printf("stream error disabled platform=%s uid=%s", rt.Kind, acct.UID)
 					default:

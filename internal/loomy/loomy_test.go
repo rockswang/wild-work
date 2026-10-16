@@ -400,3 +400,76 @@ func TestStreamAndAggregate(t *testing.T) {
 		t.Fatalf("聚合结果不对: %v", msg)
 	}
 }
+
+// TestStreamBusinessErrorBody 守门：上游把鉴权失效塞在 **HTTP 200 的纯 JSON 体**里
+// （整段不是 SSE），必须补一帧 error（**不补 [DONE]**）并把分类上抛。
+//
+// 修前行为：非 `data:` 行被 ssePayload 整体跳过 ⇒ 扫描无错 ⇒ 补 `[DONE]` 正常返回
+// ⇒ 客户端收到「没有任何内容的成功流」（表现为「回复突然断了」），handler 还
+// NoteSuccess + ledger 记 pt=0/ct=0，故障两侧都不可见（2026-10-16 抓包实证）。
+func TestStreamBusinessErrorBody(t *testing.T) {
+	in := `{"code":"100002","desc":"登录已失效，请重新登录","trace_id":"0d9c2f2d","data":{}}`
+
+	rec := httptest.NewRecorder()
+	_, err := Stream(rec, strings.NewReader(in), "loomy/DeepSeek-V4.1-Flash")
+	if err == nil {
+		t.Fatal("业务错误体必须上抛（否则 handler 当成功、ledger 记 pt=0/ct=0）")
+	}
+	var sec provider.StreamErrorClassifier
+	if !errors.As(err, &sec) {
+		t.Fatalf("错误未实现 StreamErrorClassifier（handler 无法据此处置）: %T", err)
+	}
+	if got := sec.Kind(); got != provider.ErrSessionDead {
+		t.Fatalf("Kind() = %v, want ErrSessionDead", got)
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, "登录已失效") {
+		t.Fatalf("必须把上游原文带给客户端: %s", body)
+	}
+	if !strings.Contains(body, `"code":"upstream_session_dead"`) {
+		t.Fatalf("缺少 upstream_session_dead 错误帧: %s", body)
+	}
+	if strings.Contains(body, "[DONE]") {
+		t.Fatalf("业务错误不得补 [DONE]（R36）: %s", body)
+	}
+}
+
+// TestStreamBusinessErrorBody020002 守门：020002（会话校验失败）同样按业务码识别。
+func TestStreamBusinessErrorBody020002(t *testing.T) {
+	in := `{"code":"020002","desc":"session invalid"}`
+	rec := httptest.NewRecorder()
+	_, err := Stream(rec, strings.NewReader(in), "loomy/spark-x")
+	var sec provider.StreamErrorClassifier
+	if !errors.As(err, &sec) || sec.Kind() != provider.ErrSessionDead {
+		t.Fatalf("020002 应判 ErrSessionDead, got %v", err)
+	}
+}
+
+// TestStreamEmptyStaysDone 反向守门：**正常的空流**（上游 200 但什么都没吐）
+// 不受新判定影响，仍按原语义补 [DONE] 正常收尾。
+func TestStreamEmptyStaysDone(t *testing.T) {
+	for _, in := range []string{"", "\n\n", "data: [DONE]\n\n"} {
+		rec := httptest.NewRecorder()
+		_, err := Stream(rec, strings.NewReader(in), "loomy/spark-x")
+		if err != nil {
+			t.Fatalf("空流不应报错（in=%q）: %v", in, err)
+		}
+		if !strings.Contains(rec.Body.String(), "[DONE]") {
+			t.Fatalf("空流应正常补 [DONE]（in=%q）: %s", in, rec.Body.String())
+		}
+	}
+}
+
+// TestStreamNormalBodyNotMisjudged 反向守门：正常 SSE 流里**正文含 code 字样**
+// （模型在写代码/解释报错）不得被误判成业务错误体。
+func TestStreamNormalBodyNotMisjudged(t *testing.T) {
+	in := "data: " + `{"choices":[{"index":0,"delta":{"content":"{\"code\":\"100002\"}"}}]}` + "\n\n" +
+		"data: [DONE]\n\n"
+	rec := httptest.NewRecorder()
+	if _, err := Stream(rec, strings.NewReader(in), "loomy/spark-x"); err != nil {
+		t.Fatalf("正常流不应报错: %v", err)
+	}
+	if strings.Contains(rec.Body.String(), "upstream_session_dead") {
+		t.Fatalf("正常流被误判成业务错误: %s", rec.Body.String())
+	}
+}
