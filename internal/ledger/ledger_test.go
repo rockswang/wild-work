@@ -127,6 +127,36 @@ func TestDiffCreditsTodayExpiryIsSpend(t *testing.T) {
 	}
 }
 
+// TestDiffCreditsTodayExpiryDisappearStillExpire 反向守门：到期日 = 今天、条目随后
+// 从上游列表**消失**（真正的到期清零）仍必须记 expire —— 上一条只把「当天还在用」
+// 的消耗改成 spend，不能连清零一起放过。WorkBuddy 的套餐/日包到期后上游不再返回
+// 该条目（快照里到期日早于今天的 key 全部消失即证），走的就是这条分支。
+func TestDiffCreditsTodayExpiryDisappearStillExpire(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "ledger")
+	l, _ := New(dir)
+	defer l.Close()
+
+	today := time.Now().In(expireLoc).Format("2006-01-02")
+	cur := []provider.ResourceItem{
+		{Name: "Bonus Pack", Key: "Bonus Pack|" + today, Remain: 52, ExpireAt: today, Usable: true},
+	}
+	l.DiffCredits("workbuddyai", "u4", 52, cur)
+	// 条目消失：到期清零
+	if n := l.DiffCredits("workbuddyai", "u4", 0, nil); n != 1 {
+		t.Fatalf("到期清零应记 1 条 expire，got %d", n)
+	}
+
+	l.Flush()
+	raw, _ := os.ReadFile(filepath.Join(dir, monthFile("credit", time.Now())))
+	var last CreditEntry
+	for _, line := range splitLines(raw) {
+		_ = unmarshal(line, &last)
+	}
+	if last.Kind != "expire" || last.Amount != -52 {
+		t.Fatalf("到期清零必须记 expire -52，got %s %d", last.Kind, last.Amount)
+	}
+}
+
 // TestDiffCreditsDuplicateKeys 同 key 多条目先聚合再差分（issue #38 回归）：
 // WorkBuddy 伪键「套餐名|到期日」可对应多条独立套餐。修复前每条都对比同一份
 // 旧快照 → 一次刷新重复记 spend、快照只留末条下次继续错。聚合后每 key 每次
