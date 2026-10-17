@@ -163,6 +163,11 @@
     TraeWork 是 `expire_time`（Unix 秒），Qoder 无此字段。均按 **UTC+8 墙钟**解析（`softRateResetLoc`），
     用 `time.Local` 会在非 UTC+8 机器上算错一天。上游未下发时 `ResourceItem.ExpireAt` 必须为空串，
     前端据此隐藏整列——**不得用零值时间冒充「永不过期」**。
+    - **两种写法并存，消费方必须同时支持**：`YYYY-MM-DD`（该日**全天可用**，次日 00:00 起失效；
+      全仓主口径，当日有效池走 `provider.ExpireDateToday()`）与 **RFC3339**（精确时刻，如 gemini 的
+      5 小时/周配额窗口重置）。判定统一走 `provider.ExpireInstant`（是否已失效）与
+      `provider.ExpiringWithin`（是否临期），**不要各自 Parse**——旧实现各处自解析且吞掉错误，
+      RFC3339 的条目被静默当成「永不过期」（2026-10-18 核对）。
 19. **401 必须自愈，不能只信本地 `expiresAt`**：上游刷新会作废旧 access token（refresh token 同步轮换）。若新 token 未落盘、
     或同一账号在别处被刷新，本地文件里的 token `expiresAt` 仍在未来，但上游已拒绝 → `NeedsRefresh` 恒为假、永不刷新、
     积分恒 0、明细恒空。因此积分/明细/费率路径遇 `ErrSessionDead` 必须「refresh + 落盘 + 重试一次」
