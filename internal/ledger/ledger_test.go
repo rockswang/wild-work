@@ -90,6 +90,43 @@ func TestDiffCreditsExpiredEntry(t *testing.T) {
 	}
 }
 
+// TestDiffCreditsTodayExpiryIsSpend 到期日 = 今天（当日有效池，如 loomy 每日积分）
+// 的余额下降必须归因 spend：当天可用到 23:59:59，不得显示成「过期」。
+// 回归 2026-10-18：expired() 旧口径把「今天到期」也算已过期，导致 loomy 每一次
+// 消耗都被记成 expire（面板显示「✖过期」而余额在减）。
+func TestDiffCreditsTodayExpiryIsSpend(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "ledger")
+	l, _ := New(dir)
+	defer l.Close()
+
+	today := time.Now().In(expireLoc).Format("2006-01-02")
+	item := func(remain int64) []provider.ResourceItem {
+		return []provider.ResourceItem{
+			{Name: "每日积分", Key: "每日积分", Remain: remain, ExpireAt: today, Usable: true},
+		}
+	}
+	l.DiffCredits("loomy", "u3", 1000, item(1000))
+	l.DiffCredits("loomy", "u3", 275, item(275))
+
+	l.Flush()
+	raw, _ := os.ReadFile(filepath.Join(dir, monthFile("credit", time.Now())))
+	var last CreditEntry
+	for _, line := range splitLines(raw) {
+		_ = unmarshal(line, &last)
+	}
+	if last.Kind != "spend" {
+		t.Fatalf("当日到期池的下降应归因 spend，got %s", last.Kind)
+	}
+	if last.Amount != -725 {
+		t.Fatalf("amount=%d want -725", last.Amount)
+	}
+
+	st := l.Query(7, nil)
+	if st.Credit.Spend != 725 || st.Credit.Expire != 0 {
+		t.Fatalf("spend=%d expire=%d want 725/0", st.Credit.Spend, st.Credit.Expire)
+	}
+}
+
 // TestDiffCreditsDuplicateKeys 同 key 多条目先聚合再差分（issue #38 回归）：
 // WorkBuddy 伪键「套餐名|到期日」可对应多条独立套餐。修复前每条都对比同一份
 // 旧快照 → 一次刷新重复记 spend、快照只留末条下次继续错。聚合后每 key 每次

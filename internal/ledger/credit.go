@@ -75,7 +75,13 @@ func itemKey(it provider.ResourceItem) string {
 	return it.Name
 }
 
-// expired 判定条目到期日是否已到（≤今天，UTC+8 墙钟）。
+// expired 判定条目到期日是否**已过**（早于今天，UTC+8 墙钟）。
+//
+// 到期日当天仍可用到 23:59:59，故「今天到期」**不算**已过期。旧实现用
+// `!t.After(today)` 把当天也算进去 ⇒ 对「当日有效」的池子（每日积分
+// ExpireAt = 当天，见 loomy）而言，当天每一次余额下降都会被归因成 expire
+// 而不是 spend，面板把真实消耗显示成「✖过期」（2026-10-18 生产实录）。
+//
 // ExpireAt 为空串（渠道未下发，如 Qoder）恒 false → 下降走 spend 口径。
 func expired(expireAt string, now time.Time) bool {
 	if expireAt == "" {
@@ -85,8 +91,9 @@ func expired(expireAt string, now time.Time) bool {
 	if err != nil {
 		return false
 	}
-	today := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, expireLoc)
-	return !t.After(today)
+	loc := now.In(expireLoc)
+	today := time.Date(loc.Year(), loc.Month(), loc.Day(), 0, 0, 0, 0, expireLoc)
+	return t.Before(today)
 }
 
 // DiffCredits 余额刷新后差分记账：cur 为本次 UserResourceDetail 拿到的条目，
