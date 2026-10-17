@@ -265,13 +265,23 @@ function renderCreditDetail() {
   const items = d.items.slice();
   // 临期判定与后端 ExpiringWithin 同口径：北京时间墙钟 now + 阈值天数，到期日当天零点前即临期。
   const expDays = state.expiring_days || 1;
-  const bjNow = Date.now() + new Date().getTimezoneOffset() * 60000 + 8 * 3600 * 1000;
-  const expDeadline = bjNow + expDays * 24 * 3600 * 1000;
+  const expDeadline = Date.now() + expDays * 24 * 3600 * 1000;
+  // expireAnchorUtc 到期锚点的真实 UTC 毫秒，与后端 provider.expireAnchor 同口径：
+  //   日期粒度（YYYY-MM-DD）= UTC+8 该日零点（后端「到期日 ≤ 明天」的宽松判据）；
+  //   RFC3339 = 精确时刻（如 gemini 的 5 小时/周配额窗口重置时间）。
+  // 解析不出返回 null（该条目无到期信息）。旧实现用 split("-") + Number()，遇到
+  // RFC3339 会得到 NaN 静默退化，故统一收口到这里。
+  const expireAnchorUtc = (s) => {
+    if (!s) return null;
+    const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(s);
+    if (m) return Date.UTC(+m[1], +m[2] - 1, +m[3]) - 8 * 3600 * 1000;
+    const t = Date.parse(s);
+    return Number.isNaN(t) ? null : t;
+  };
   // 排序：临期（可消耗、有剩余、窗口内到期）→ 可用 → 已用完/不可用/仅展示垫底；组内按到期日升序。
   const expUtcOf = (it) => {
-    if (!it.expire_at) return Infinity;
-    const [ey, em, ed] = it.expire_at.split("-").map(Number);
-    return ey && em && ed ? Date.UTC(ey, em - 1, ed) : Infinity;
+    const ms = expireAnchorUtc(it.expire_at);
+    return ms === null ? Infinity : ms;
   };
   const groupOf = (it) => (it.usable && it.remain > 0) ? (expUtcOf(it) < expDeadline ? 0 : 1) : 2;
   items.sort((a, b) => groupOf(a) - groupOf(b) || expUtcOf(a) - expUtcOf(b));
@@ -312,9 +322,8 @@ function renderCreditDetail() {
     // 整行淡红底 + 到期日红字 + 临期红章；已用完（remain=0）不标临期，避免与汇总口径打架。
     let expCell = "-", expCellCls = "";
     if (it.usable && it.remain > 0 && it.expire_at) {
-      const [ey, em, ed] = it.expire_at.split("-").map(Number);
-      if (ey && em && ed) {
-        const expUtc = Date.UTC(ey, em - 1, ed) - 8 * 3600 * 1000;
+      const expUtc = expireAnchorUtc(it.expire_at);
+      if (expUtc !== null) {
         if (expUtc < expDeadline) {
           expCell = `${esc(it.expire_at)}<span class="detail-exp-tag" title="${expDays} 天内到期，优先消耗">临期</span>`;
           expCellCls = ' class="detail-exp"';

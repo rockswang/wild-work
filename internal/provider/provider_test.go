@@ -26,6 +26,51 @@ func TestExpiringWithin(t *testing.T) {
 	}
 }
 
+// TestExpireInstant 失效时刻口径：日期粒度是「次日 00:00」，RFC3339 是精确时刻。
+// 这是 ledger「是否已过期」与面板「临期」共用的唯一解析入口，两种写法都要覆盖。
+func TestExpireInstant(t *testing.T) {
+	// 日期粒度：当天仍可用 ⇒ 失效时刻落在次日零点
+	got, ok := ExpireInstant("2026-10-18")
+	if !ok {
+		t.Fatal("日期粒度应可解析")
+	}
+	want := time.Date(2026, 10, 19, 0, 0, 0, 0, expireLoc)
+	if !got.Equal(want) {
+		t.Fatalf("日期粒度失效时刻 = %v，want %v（次日 00:00）", got, want)
+	}
+
+	// RFC3339：精确时刻，不做「次日」平移
+	got, ok = ExpireInstant("2026-10-18T15:00:00+08:00")
+	if !ok {
+		t.Fatal("RFC3339 应可解析")
+	}
+	want = time.Date(2026, 10, 18, 15, 0, 0, 0, expireLoc)
+	if !got.Equal(want) {
+		t.Fatalf("RFC3339 失效时刻 = %v，want %v（原样）", got, want)
+	}
+
+	// 空串 / 不可解析：ok=false，调用方按「无到期信息」处理
+	for _, s := range []string{"", "  ", "not-a-date", "2026-13-45"} {
+		if _, ok := ExpireInstant(s); ok {
+			t.Errorf("ExpireInstant(%q) 不应可解析", s)
+		}
+	}
+}
+
+// TestExpiringWithinRFC3339 临期统计要能吃 RFC3339（gemini 的窗口重置时间）。
+// 日期粒度的既有口径（今天/明天都算临期）由 TestExpiringWithin 锁住，这里只补新格式。
+func TestExpiringWithinRFC3339(t *testing.T) {
+	now := timeNow()
+	items := []ResourceItem{
+		{Name: "两小时后重置", Remain: 40, Usable: true, ExpireAt: now.Add(2 * time.Hour).Format(time.RFC3339)},
+		{Name: "两天后重置", Remain: 900, Usable: true, ExpireAt: now.Add(48 * time.Hour).Format(time.RFC3339)},
+		{Name: "不可解析", Remain: 500, Usable: true, ExpireAt: "bogus"},
+	}
+	if got := ExpiringWithin(items, 24*time.Hour); got != 40 {
+		t.Fatalf("expiring=%d want 40（只算 24h 内的 RFC3339 条目）", got)
+	}
+}
+
 func TestLogBody(t *testing.T) {
 	// 上游 400 信封（含尾部 extError 明细）必须整段保留——排障看的就是这一段。
 	body := `{"code":11133,"msg":"the request parameters were rejected by the model provider",` +

@@ -157,6 +157,37 @@ func TestDiffCreditsTodayExpiryDisappearStillExpire(t *testing.T) {
 	}
 }
 
+// TestDiffCreditsRFC3339Expiry RFC3339 的**精确**到期时刻：已过归 expire、未到归 spend。
+// gemini 的配额窗口重置时间就是这个格式，旧实现只认 YYYY-MM-DD ⇒ 解析失败后恒 false
+// （被当成「永不过期」）。这里把两个方向都锁住。
+func TestDiffCreditsRFC3339Expiry(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "ledger")
+	l, _ := New(dir)
+	defer l.Close()
+
+	now := time.Now()
+	past := now.Add(-time.Hour).In(expireLoc).Format(time.RFC3339)
+	future := now.Add(time.Hour).In(expireLoc).Format(time.RFC3339)
+
+	item := func(remain int64, exp string) []provider.ResourceItem {
+		return []provider.ResourceItem{
+			{Name: "配额窗口", Key: "win", Remain: remain, ExpireAt: exp, Usable: true},
+		}
+	}
+	// 已过到期时刻：下降归 expire
+	l.DiffCredits("gemini", "u5", 100, item(100, past))
+	l.DiffCredits("gemini", "u5", 40, item(40, past))
+	// 未到到期时刻：下降归 spend
+	l.DiffCredits("gemini", "u6", 100, item(100, future))
+	l.DiffCredits("gemini", "u6", 40, item(40, future))
+
+	l.Flush()
+	st := l.Query(7, nil)
+	if st.Credit.Expire != 60 || st.Credit.Spend != 60 {
+		t.Fatalf("expire=%d spend=%d want 60/60（已过→expire、未到→spend）", st.Credit.Expire, st.Credit.Spend)
+	}
+}
+
 // TestDiffCreditsDuplicateKeys 同 key 多条目先聚合再差分（issue #38 回归）：
 // WorkBuddy 伪键「套餐名|到期日」可对应多条独立套餐。修复前每条都对比同一份
 // 旧快照 → 一次刷新重复记 spend、快照只留末条下次继续错。聚合后每 key 每次

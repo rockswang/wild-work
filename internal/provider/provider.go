@@ -537,8 +537,14 @@ type ResourceItem struct {
 	Used   int64  `json:"used"`
 	Remain int64  `json:"remain"`
 
-	// ExpireAt 该条目到期时刻（RFC3339，UTC+8 墙钟）。空串表示上游未下发到期时间，
-	// 前端据此隐藏「有效期」列——不得用零值时间冒充「永不过期」。
+	// ExpireAt 该条目的到期时间。**两种写法并存，消费方须同时支持**：
+	//   - "YYYY-MM-DD"（UTC+8 墙钟）：该日**全天可用**，次日 00:00 起失效。全仓主口径，
+	//     当日有效类额度（每日发放池等）统一走 ExpireDateToday()；
+	//   - RFC3339（如 "2026-10-18T15:00:00+08:00"）：**精确时刻**，到点失效。需要时分
+	//     语义时才用（gemini 的 5 小时/周配额窗口重置时间就是这一类）。
+	// 空串表示上游未下发到期时间，前端据此隐藏「有效期」列——不得用零值时间冒充「永不过期」。
+	// 判定统一走 ExpireInstant（是否已失效）/ ExpiringWithin（是否临期），**不要各自 Parse**：
+	// 旧实现各处自解析且吞掉错误，导致 RFC3339 的条目被判成「永不过期」（2026-10-18 核对）。
 	ExpireAt string `json:"expire_at,omitempty"`
 	// Key 条目稳定标识（上游提供的 ID，如 TraeWork entitlement_id），
 	// 供 ledger 差分对账用；渠道无 ID 时留空，差分退回 Name 作伪键。
@@ -593,11 +599,53 @@ func ExpireDateToday() string {
 	return time.Now().In(expireLoc).Format("2006-01-02")
 }
 
+// ExpireInstant 把 ExpireAt 解析为**失效时刻**（UTC+8 墙钟）。
+//
+// 两种写法的语义差别（见 ResourceItem.ExpireAt）：
+//   - "YYYY-MM-DD"：该日全天可用 ⇒ 失效时刻 = **次日 00:00**；
+//   - RFC3339：精确时刻，到点失效。
+//
+// ok=false 表示空串或不可解析 —— 调用方按「无到期信息」处理：既不当「永不过期」，
+// 也不当「已过期」。
+func ExpireInstant(expireAt string) (time.Time, bool) {
+	s := strings.TrimSpace(expireAt)
+	if s == "" {
+		return time.Time{}, false
+	}
+	if t, err := time.ParseInLocation("2006-01-02", s, expireLoc); err == nil {
+		return t.AddDate(0, 0, 1), true
+	}
+	if t, err := time.Parse(time.RFC3339, s); err == nil {
+		return t.In(expireLoc), true
+	}
+	return time.Time{}, false
+}
+
+// expireAnchor 临期判定的**锚点**：日期粒度取该日 00:00（不是次日），RFC3339 取精确时刻。
+//
+// 与 ExpireInstant 只差日期粒度这一档，是为了保持 ExpiringWithin 的既有口径不变：
+// 「到期日 ≤ 明天」——今天到期/明天到期都算临期，后天起不算（24h 阈值下宽一档，
+// 给用户提前一天准备）。若改成失效时刻，明天到期的条目会从临期里消失，属于行为变更，
+// 不在本次（补 RFC3339 支持）范围内。
+func expireAnchor(expireAt string) (time.Time, bool) {
+	s := strings.TrimSpace(expireAt)
+	if s == "" {
+		return time.Time{}, false
+	}
+	if t, err := time.ParseInLocation("2006-01-02", s, expireLoc); err == nil {
+		return t, true
+	}
+	if t, err := time.Parse(time.RFC3339, s); err == nil {
+		return t.In(expireLoc), true
+	}
+	return time.Time{}, false
+}
+
 // ExpiringWithin 统计 horizon 时长内到期的**可消耗**积分小计（临期额度）。
 // 仅累计 Usable=true 且 ExpireAt 非空的条目——不可用池本工具消耗不到，
 // 临期与否不影响路由决策，混入会虚高临期值。
-// ExpireAt 是 YYYY-MM-DD 日期粒度（UTC+8 墙钟），精确到小时的 24h 判定无意义，
-// 实际口径为「到期日 ≤ 明天」：今天到期/明天到期都算临期，后天起不算。
+// 锚点落在 deadline 之前即视为临期（日期粒度取当天零点，见 expireAnchor）：
+// 实际口径为「到期日 ≤ 明天」——今天到期/明天到期都算临期，后天起不算。
 // ExpireAt 为空串（上游未下发，如 Qoder）或不可解析时不计入，调用方无需特判。
 func ExpiringWithin(items []ResourceItem, horizon time.Duration) int64 {
 	deadline := time.Now().In(expireLoc).Add(horizon)
@@ -606,8 +654,7 @@ func ExpiringWithin(items []ResourceItem, horizon time.Duration) int64 {
 		if !it.Usable || it.InfoOnly || it.ExpireAt == "" {
 			continue
 		}
-		// 日期解析到当天零点（UTC+8），零点落在 deadline 之前即视为临期
-		if t, err := time.ParseInLocation("2006-01-02", it.ExpireAt, expireLoc); err == nil && t.Before(deadline) {
+		if t, ok := expireAnchor(it.ExpireAt); ok && t.Before(deadline) {
 			expiring += it.Remain
 		}
 	}
