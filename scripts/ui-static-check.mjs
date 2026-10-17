@@ -43,6 +43,58 @@ const FAKE_STATE = {
       last_checkin_at: "2026-10-02 09:00",
       last_checkin_ok: true,
     },
+    // OfficeAce 假数据（场景 1.5）：两张卡片只差「凭据是否缺 refresh_token」这一个字段，
+    // 用来验证徽标**由该字段驱动**（而不是恒亮），否则徽标本身就是噪声。
+    {
+      uid: "01a149d8913679e5ba6de6275047897f:01a149d8913672db88d7a95fb3382d4d",
+      group: "officeace",
+      nickname: "缺凭据号",
+      credits: 0,
+      expiring_credits: 0,
+      unusable_credits: 0,
+      cooling: false,
+      until: "",
+      reason: "",
+      disabled: false,
+      last_checkin_at: "",
+      last_checkin_ok: false,
+      last_checkin_msg: "无临时凭据，需先续期/登录",
+      refresh_token_missing: true,
+      refresh_token_missing_reason: "缺 refresh_token：积分/签到不可用（测试用文案）",
+    },
+    // #134「登录态失效」假数据：2026-10-18 独立复核指出这条路**零覆盖**——
+    // 把 needRelogin 里的 session_dead 去掉、或整块删掉 sessionDeadTag，UI 检查仍「全部通过」。
+    // 故这里补一张 session_dead 卡片，锁住原行为（红徽标 + ⟳），与 officeace 的琥珀徽标并存。
+    {
+      uid: "qwenwork-session-dead-1",
+      group: "qwenwork",
+      nickname: "失效号",
+      credits: 0,
+      expiring_credits: 0,
+      unusable_credits: 0,
+      cooling: false,
+      until: "",
+      reason: "",
+      disabled: false,
+      last_checkin_at: "",
+      last_checkin_ok: false,
+      session_dead: true,
+      session_dead_reason: "登录态已失效（测试用文案）",
+    },
+    {
+      uid: "01a13f3d3ee6741d832a05b19fb0c028:01a13f3d3ee67da097f2cae2d1415761",
+      group: "officeace",
+      nickname: "正常号",
+      credits: 5500,
+      expiring_credits: 1000,
+      unusable_credits: 0,
+      cooling: false,
+      until: "",
+      reason: "",
+      disabled: false,
+      last_checkin_at: "2026-10-17 23:00",
+      last_checkin_ok: true,
+    },
   ],
   checkin_times: [],
   next_checkin: "-",
@@ -147,6 +199,66 @@ check(
   `实际 ${(cards.match(/冷却至/g) || []).length} 个`
 );
 check("健康号仍在（未被过滤）", cards.includes("健康号"));
+
+// ---- 场景 1.5：OfficeAce「缺 refresh_token」持久徽标（2026-10-17 用户实测要求）----
+// 为什么要有这个徽标：客户端导入只拿得到不过期的网关 Basic，拿不到换临时凭据所需的
+// refresh_token ⇒ 积分/签到永久不可用，且**不会自愈**（不是 401 那种能被 refresh 救回的
+// 形态）。原先只在导入那一刻弹一次提示文字，事后无从复查；「需重新登录」徽标又只认
+// session_dead ⇒ 这种账号在面板上看起来一切正常。以下断言锁住「该亮则亮、不该亮则不亮」。
+check("缺凭据号出现徽标「缺续期凭据」", cards.includes("缺续期凭据"));
+check("徽标带 warn 样式（与「需重新登录」的 bad 区分）", /tag warn"[^>]*>缺续期凭据/.test(cards));
+check("徽标 title 带补救路径提示", cards.includes("缺 refresh_token：积分/签到不可用"));
+check("缺凭据号给出一键重新登录入口（⟳ + startLogin('officeace')）",
+  /onclick="startLogin\('officeace'\)"/.test(cards));
+check("重新登录入口的 title 点明缺 refresh_token 场景",
+  cards.includes("本账号缺 refresh_token，积分/签到不可用"));
+// ⟳ 的**渠道分派**必须存在：OfficeAce 是两步流程（云端轮询捕获），不能打
+// `POST /api/login/start`（后端 StartLoginFor 不会为它拉起轮询）——2026-10-18 独立复核
+// 抓到的死按钮就是这个。这条断言把「卡片 ⟳ → startLogin → 分派到 OfficeAce 专属入口」
+// 这段接线锁住（真正的端到端对齐在 Go 侧 TestReloginChannelSetMatchesBackend）。
+{
+  const appSrc = readFileSync(new URL("../cmd/wild-work/web/app.js", import.meta.url), "utf8");
+  check("startLogin 对 officeace 分派到专属入口（防死按钮复发）",
+    /if \(channel === "officeace"\) return startOfficeAceWebLogin\(\);/.test(appSrc));
+  check("OfficeAce 专属入口打的是 officeace_auto 端点（而非 /api/login/start）",
+    appSrc.includes('api("/api/login/officeace_auto"'));
+}
+// 反例（防「徽标恒亮」这种假通过）：同渠道、只差该字段的账号不得带徽标与 ⟳。
+// 按 `<div class="acct-card` 切分取**该账号自己那张卡**，避免跨卡片误判。
+{
+  const cardOf = (name) =>
+    cards.split('<div class="acct-card').find((seg) => seg.includes(name)) || "";
+  const missingCard = cardOf("缺凭据号");
+  const normalCard = cardOf("正常号");
+  check("两张 OfficeAce 卡片都渲染出来了", missingCard !== "" && normalCard !== "");
+  check("缺凭据那张卡带徽标", missingCard.includes("缺续期凭据"));
+  check("缺凭据那张卡带 ⟳ 入口", missingCard.includes("startLogin('officeace')"));
+  check("正常号那张卡不带徽标（防徽标恒亮）", !normalCard.includes("缺续期凭据"));
+  check("正常号那张卡不带 ⟳ 重新登录入口", !normalCard.includes("startLogin('officeace')"));
+}
+check("非 officeace 账号不带「缺续期凭据」（渠道限定，避免误标）",
+  (cards.match(/缺续期凭据/g) || []).length === 1,
+  `实际 ${(cards.match(/缺续期凭据/g) || []).length} 个`);
+
+// ---- 场景 1.6：#134「登录态失效」原行为（2026-10-18 补，此前零覆盖）----
+// 独立复核用两个破坏性变异证明这条路没被守住：把 needRelogin 里的 session_dead 去掉、
+// 或整块删掉 sessionDeadTag，UI 检查都仍「全部通过」。故补这张 session_dead 卡片与断言。
+{
+  const cardOf = (name) =>
+    cards.split('<div class="acct-card').find((seg) => seg.includes(name)) || "";
+  const deadCard = cardOf("失效号");
+  const healthyCard = cardOf("健康号");
+  check("登录态失效账号渲染出来了", deadCard !== "");
+  check("失效号带「需重新登录」徽标（#134 不回归）", deadCard.includes("需重新登录"));
+  check("失效号徽标用 bad 样式（与缺凭据的 warn 区分）", /tag bad"[^>]*>需重新登录/.test(deadCard));
+  check("失效号徽标 title 用 session_dead_reason", deadCard.includes("登录态已失效（测试用文案）"));
+  check("失效号带 ⟳ 一键重新登录（#134 不回归）", deadCard.includes("startLogin('qwenwork')"));
+  check("失效号不带「缺续期凭据」徽标（两种状态互不串味）", !deadCard.includes("缺续期凭据"));
+  check("普通健康号既无「需重新登录」也无 ⟳", !healthyCard.includes("需重新登录") && !healthyCard.includes("startLogin("));
+  check("「需重新登录」全文只出现一次（不误标他人）",
+    (cards.match(/需重新登录/g) || []).length === 1,
+    `实际 ${(cards.match(/需重新登录/g) || []).length} 个`);
+}
 
 // ---- 场景 2：渠道汇总条 ----
 T.renderSummary();
@@ -896,6 +1008,42 @@ for (const [label, re] of uniq) {
 
   for (const [label, pass, extra] of need3) {
     console.log(`  ${pass ? "✅" : "❌"} ${label}${!pass && extra ? `  ← ${extra}` : ""}`);
+    if (!pass) failed++;
+  }
+}
+
+// ---- Qoder 双区签到：结果必须按 msg 区分「领到了」与「还没发」（2026-10-18）----
+// 背景：campaigns 路径有三个都是 ok=true 的结果（真领到 / 今日已领 / 上游还没发可领活动），
+// 旧 toast 一律写「签到成功：…」，把 no_campaign 也说成成功 —— 这是 10-17「签到没实现」
+// 误判的来源之一。断言 checkinToast 存在，且 checkin() 走它而不是内联三元表达式。
+{
+  const need = [
+    ["checkinToast 存在（按 msg 区分签到结果）", /function checkinToast\(/.test(raw)],
+    ["checkin 走 checkinToast（不再内联「签到成功：」）",
+      /toast\(checkinToast\(r\)\)/.test(raw) && !/toast\(r\.ok \? `签到成功：/.test(raw)],
+    ["checkinToast 区分「今日已领过」", /今日已领过/.test(raw)],
+    ["checkinToast 区分「暂未领到」", /暂未领到/.test(raw)],
+    // 独立复核（2026-10-18）抓到：ok=true 但 msg 是「领取失败 http 400」时旧实现仍说「暂未领到」，
+    // 等于换了说法的假成功。断言失败判据存在且排在「含 +N」之前。
+    ["checkinToast 有失败档（ok=true 的真失败不得说成「暂未领到」）", /签到失败：/.test(raw) && /CHECKIN_FAIL_RE = \/.+\/i;/.test(raw)],
+    // 2026-10-18 用户实测定性：活动资格由上游按账号授予，不是每个号都有。
+    // 无资格的 msg 既不含「失败」也不含错误码，若不单独成档会落到兜底被说成「暂未领到」，
+    // 再叠加「窗口内会自动重试」⇒ 用户白等一个永远不来的结果（「以为工具没实现」的最后来源）。
+    ["无领取资格档存在（该状态不得说成「暂未领到」）",
+      /CHECKIN_NO_ELIGIBILITY_RE = \/.+\;/.test(raw) && /无领取资格：/.test(raw)],
+    ["无资格判据先于失败判据（否则会先被兜底/失败分支吃掉）",
+      raw.indexOf('CHECKIN_NO_ELIGIBILITY_RE.test(msg)') > 0 &&
+      raw.indexOf('CHECKIN_NO_ELIGIBILITY_RE.test(msg)') < raw.indexOf('CHECKIN_FAIL_RE.test(msg)')],
+    ["checkin() 对无资格不再说「会自动重试」（先判无资格，再判 retryable）",
+      raw.indexOf('CHECKIN_NO_ELIGIBILITY_RE.test(r.msg') > 0 &&
+      raw.indexOf('CHECKIN_NO_ELIGIBILITY_RE.test(r.msg') < raw.indexOf('!r.ok && r.retryable')],
+    ["失败判据先于 \\+N 判据（否则「领取失败 http 400」会被数字命中）",
+      raw.indexOf('CHECKIN_FAIL_RE.test(msg)') > 0 && raw.indexOf('CHECKIN_FAIL_RE.test(msg)') < raw.indexOf('/\\+-?\\d+/.test(msg)')],
+    ["qodercom 不在无签到集合（campaigns 活动路径已实装）", !/NO_EXPLICIT_CHECKIN[^)]*"qodercom"/.test(raw)],
+    ["qodercn 不在无签到集合", !/NO_EXPLICIT_CHECKIN[^)]*"qodercn"/.test(raw)],
+  ];
+  for (const [label, pass] of need) {
+    console.log(`  ${pass ? "✅" : "❌"} ${label}`);
     if (!pass) failed++;
   }
 }

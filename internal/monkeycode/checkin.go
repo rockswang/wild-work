@@ -1,57 +1,54 @@
-// checkin.go MonkeyCode「签到领积分」（2026-10-17 接入）。
+// checkin.go MonkeyCode「签到领积分」——**三步无感验证码**流程（2026-10-17 实测重写）。
 //
-// # 取证（离线，未打真实上游；AGENTS §0.1）
+// # 为什么重写
 //
-// 端点、方法与域**有证据**：
+// 旧实现是「POST + 空 body + 猜测字段名」，**必然失败**：上游回
 //
-//	POST {consoleBase}/api/v1/users/wallet/checkin
+//	{"code":10701,"message":"兑换验证码失败"}
 //
-// 来源 1（端点全路径）：`%LOCALAPPDATA%\MonkeyCode\monkeycode-desktop.exe`
-// （Tauri 壳，Rust 字符串）明文含 `/api/v1/users/wallet/checkin`，
-// 且与 `/api/v1/users/wallet`（本包 wallet 已实测可用）、`/api/v1/users/subscription`
-// 相邻——三者同属「控制台用户接口」，故**域 = 控制台域**（不是代理域、不是百智云域）。
+// 这与本工具自身日志逐字一致（`data/app.log` 里三个账号全天都在报这一条），
+// 也就是用户看到的「签到领不到积分」。
 //
-// 来源 2（调用入口）：同一二进制含 Tauri 命令名 `mc_checkin` 与 IPC 权限项
-// `allow-mc-checkin`——签到是**客户端主动发起的命令**（不是被动拉取钱包时顺带领取，）
+// # 真实契约（三步，全部实测）
 //
-// 来源 3（交互文案）：同机 WebView2 的 V8 字节码缓存
-// `%LOCALAPPDATA%\com.chaitin.baizhi.monkeycode\EBWebView\Default\Code Cache\js\3bc38ab58a8847fe_0`
-// 含 i18n 键 `account.usage.checkin` → "Check in +{reward}"、
-// `account.usage.checkinBusy` → "Checking in…"、`account.usage.checkedIn` → "Checked in today"。
-// 即：回执含本次发放额（展示文案里的 reward），且存在「今日已签」的独立终态。
+//	① GET {console}/api/v1/users/wallet/checkin
+//	     → {"code":0,"message":"success","data":{"checked_in":false}}
+//	   `checked_in` 表示**今日是否已签到**。已签 = 幂等收工，不再打后面两步。
 //
-// 鉴权：控制台 Cookie（`monkeycode_ai_session`）——与 wallet 同域同 Cookie；签到不涉及对话，
-// 故 oma_ key 与 omas_ 签名都**不参与**。
+//	② 未签 → 领一张一次性验证码（Cap.js 工作量证明，**无需人工交互**，可自动完成）
+//	     POST {console}/api/v1/public/captcha/challenge  body={}
+//	       → {"challenge":{"c":50,"s":32,"d":3},"expires":…,"token":"…"}
+//	     本地解 PoW（见 captcha.go）
+//	     POST {console}/api/v1/public/captcha/redeem     {"token":…,"solutions":[…]}
+//	       → {"success":true,"token":"<id>:<ver>","expires":…}
 //
-// # 未确认（不得当成已知事实；改动前请先补一份真实抓包）
+//	③ POST {console}/api/v1/users/wallet/checkin       {"captcha_token":"<② 的 token>"}
+//	     → {"code":0,"message":"success","data":{"checked_in":true}}
 //
-//  1. **方法**。二进制里只有路径串，没有方法。按「领红包/领奖励」的 REST 惯例取 POST；
-//     若上游实际是 GET，表现为 404/405（落成 CheckinError，可重试，**不会假成功**），
-//     不会被误判成已领或领到。改这里只需动 sendCheckin 的一行。
-//  2. **请求体**。取空 body：钱包接口是同站 GET+Cookie、无 body；签到不需要参数。
-//  3. **响应字段名**。下面的 `checkinData` 是一次**兼容式建模**：金额、已领标记、活动标记
-//     各给了 2~3 个候选字段名（reward/amount/credit；already_checked_in/checked_in_today；
-//     active/enabled），取值时「有一个算一个」。这样做不是拍脑袋——是为了在字段名猜错时
-//     **安全降级**：金额全缺 → 判「领到但金额未知」（Amount=0，调度器降级差分记账）；
-//     已领标记全缺 → 判「已领」；活动标记全缺 → 不判无活动。三条都不会把失败说成成功。
-//     **但真正的字段名仍需一次抓包确认**（尤其「已领」标记：猜错会让每天都显示已领）。
-//  4. **成功码**。按同站信封取 `code == 0` 为成功；`code == 0` 之外的 0/200 之类宽容值
-//     见 okCode。若上游用 HTTP 状态表达失败、body 无 code，则取 HTTP 2xx 成功。
-//  5. **毫积分单位**。金额按钱包口径当**毫积分**（console 前端 `balance/1e3` 再 ceil）处理，
-//     与 UserResourceDetail 的「积分」展示口径一致。
+// # 四条实测事实（直接决定实现形态，改动前务必先读）
+//
+//  1. **请求字段名是 `captcha_token`**（蛇形）。带 `captcha` / `token` / 空 body 一律 10701。
+//  2. **回包不含金额**（首签与重复签都只有 `checked_in:true`）⇒ Amount 恒为 0，
+//     金额一律交给调度器的 wallet 差分记账兜底（`CheckinClaimed` 允许 Amount=0）。
+//  3. **POST 幂等且不可用作「是否刚领到」的判据**：今日已领时再 POST 仍回
+//     `code=0, data.checked_in=true` 且余额不变。⇒「已领」只能看①的 `checked_in`。
+//  4. 单账号首签实测让钱包 `balance` 从 100000 → 200000（**毫积分**）⇒ +100 积分，
+//     与 `state-monkeycode.json` 的 credits 口径（balance/1000）自洽。
+//
+// # 鉴权
+//
+// 三步都只认控制台 Cookie（`monkeycode_ai_session`）；oma_ key 与 omas_ 签名均不参与。
+// 401 仍按不变量 19 处理：用百智云会话现派生一份控制台会话，**只重试一次**。
 //
 // # 状态机（provider.CheckinReport）
 //
-//	领取成功 granted>0                 → CheckinClaimed（Amount=换算后积分）
-//	领到但回执无金额字段（字段名过时） → CheckinClaimed（Amount=0，调度器回退差分；带 error 留痕）
-//	回执**明确**声明发放额 0           → CheckinError（可重试；没拿到积分不冒充领到）
-//	已领标记 / HTTP 409 / 业务码 409   → CheckinAlready（当日完成，不再重试）
-//	无活动（标记 / 业务码 404 / HTTP404）→ CheckinNoCampaign（窗口内重试）
-//	5xx / 429 / 网络 / 形状突变        → CheckinError + error（可重试）
-//	其它 4xx（403/422…）               → CheckinError（可重试；**带分类** error）
-//	401（控制台会话失效）              → *provider.Error{ErrSessionDead}
-//	   （先用百智云会话现派生一份再**只重试一次**；派生失败才把 401 抛出去）
-//	无控制台 Cookie                    → CheckinNoToken（本地判定，不发请求）
+//	① checked_in==true                  → CheckinAlready（今日已领，不再重试）
+//	③ code==0 且 checked_in==true        → CheckinClaimed（Amount=0，差分记账）
+//	可达但 checked_in 非真                → CheckinError（可重试；不冒充成功）
+//	401（续期后仍拒）                     → CheckinError + *provider.Error{ErrSessionDead}
+//	429                                  → 分类错误（ErrSoftRate 优先于余额类，R15）
+//	5xx / 网络 / 形状突变                 → CheckinError（可重试）
+//	无控制台 Cookie                       → CheckinNoToken（本地判定，不发请求）
 package monkeycode
 
 import (
@@ -67,14 +64,9 @@ import (
 	"wild-work/internal/provider"
 )
 
-// errCheckinParsed 区分「没拿到可解析的成功回执」与其它 IO 错误。
-//
-// 用带类型的 *provider.Error{ErrClient} 而不是裸 errors.New：签到失败会进调度器日志，
-// 有分类才能一眼看出是「本工具的形状假设过时」还是「上游真故障」。
-// ErrClient 不进 ErrSessionDead 分支（调度器不会为它去续期会话）。
-func errCheckinParsed(detail string) error {
-	return &provider.Error{Kind: provider.ErrClient, Msg: shortText(detail, 160)}
-}
+// ---------------------------------------------------------------------------
+// 回包形状
+// ---------------------------------------------------------------------------
 
 // checkinEnvelope 控制台统一信封（同 walletResponse 的形状）。
 type checkinEnvelope struct {
@@ -83,65 +75,46 @@ type checkinEnvelope struct {
 	Data    json.RawMessage `json:"data"`
 }
 
-// checkinData 签到回执的 data 段（⚠️ 字段名为兼容式候选，见文件头「未确认 ③」）。
+// checkinData 签到相关回执的 data 段。
 //
-// 金额与三个标记全用**指针**：必须能区分「上游没给这个字段」与「上游明确给了 0 / false」。
-// 这两者在签到语义里结论完全不同（见 interpretCheckin ④）——裸 int64 会把二者揉成 0。
+// 只有 `checked_in` 一个字段——这是**实测**结论：官方客户端反编译里那个函数也只按
+// 这一个键去遍历 JSON map，且 exe 中不存在 reward/amount/balance 等字段字面量
+// （金额由前端从透传 JSON 里取，Rust 不解析）。
+//
+// 用指针是为了区分「上游没给这个字段」与「上游明确给了 false」——前者是形状突变，
+// 不能当成「未签到」去盲目发起领取。
 type checkinData struct {
-	// 本次发放额（毫积分）。三个候选名任一非 nil 即视为上游作了声明。
-	Reward *int64 `json:"reward"`
-	Amount *int64 `json:"amount"`
-	Credit *int64 `json:"credit"`
-	// 已领标记：为 true 表示本次没有新发放（今天已经领过）。
-	AlreadyCheckedIn *bool `json:"already_checked_in"`
-	CheckedInToday   *bool `json:"checked_in_today"`
-	// 去重后的**当日是否已领**标记（部分网关换名字下发）。
-	Already   *bool `json:"already"`
-	AlreadyUp *bool `json:"already_claimed"`
-	// 活动标记：显式 false 表示当前没有可领的签到活动。
-	Active  *bool `json:"active"`
-	Enabled *bool `json:"enabled"`
-	// Balance 回执里顺带下发的余额（毫积分），仅用于文案，不参与判定。
-	Balance int64 `json:"balance"`
+	CheckedIn *bool `json:"checked_in"`
 }
 
-// grantMillis 本次发放额（毫积分），以及「上游到底有没有声明金额」。
+// captchaChallengeResp Cap.js 挑战回包（`POST /api/v1/public/captcha/challenge`）。
+type captchaChallengeResp struct {
+	Challenge struct {
+		C int `json:"c"` // 挑战数（默认 50）
+		S int `json:"s"` // salt 长度（hex 字符，默认 32）
+		D int `json:"d"` // 难度（target 前缀 hex 位数；Cap 官方默认 4，MonkeyCode 实测下发 3）
+	} `json:"challenge"`
+	Expires int64  `json:"expires"`
+	Token   string `json:"token"`
+}
+
+// captchaRedeemResp 验证码兑换回包（`POST /api/v1/public/captcha/redeem`）。
 //
-// 后者是关键：声明了（哪怕声明成 0）就按声明判；没声明（字段全缺）说明本项目
-// 对这些字段名的假设可能过时了 —— 那就按「领到了但金额未知」处理，绝不编造金额。
-func (d checkinData) grantMillis() (millis int64, declared bool) {
-	for _, p := range []*int64{d.Reward, d.Amount, d.Credit} {
-		if p == nil {
-			continue
-		}
-		declared = true
-		if *p > 0 {
-			return *p, true
-		}
-	}
-	return 0, declared
+// 注意它不是控制台信封：**没有 code 字段**，用 `success` + `message` 表达结果。
+type captchaRedeemResp struct {
+	Success bool   `json:"success"`
+	Message string `json:"message"`
+	Token   string `json:"token"`
+	Expires int64  `json:"expires"`
 }
 
-// already 报告回执是否明确表达「今日已领」（任一标记为 true）。
-func (d checkinData) already() bool {
-	for _, p := range []*bool{d.AlreadyCheckedIn, d.CheckedInToday, d.Already, d.AlreadyUp} {
-		if p != nil && *p {
-			return true
-		}
-	}
-	return false
-}
-
-// inactive 报告回执是否明确表达「没有可领的活动」（任一标记为 false，且**没有**已领标记）。
+// errCheckinParsed 区分「没拿到可解析的成功回执」与其它 IO 错误。
 //
-// 只有指针非 nil 才算结论：字段缺失 ≠ 无活动（形状突变时宁可判未知、去重试）。
-func (d checkinData) inactive() bool {
-	for _, p := range []*bool{d.Active, d.Enabled} {
-		if p != nil && !*p {
-			return true
-		}
-	}
-	return false
+// 用带类型的 *provider.Error{ErrClient} 而不是裸 errors.New：签到失败会进调度器日志，
+// 有分类才能一眼看出是「本工具的形状假设过时」还是「上游真故障」。
+// ErrClient 不进 ErrSessionDead 分支（调度器不会为它去续期会话）。
+func errCheckinParsed(detail string) error {
+	return &provider.Error{Kind: provider.ErrClient, Msg: shortText(detail, 160)}
 }
 
 // ---------------------------------------------------------------------------
@@ -185,156 +158,202 @@ func (c *Client) DailyCheckinReport(a *auth.Auth) (provider.CheckinReport, error
 			"账号缺少控制台 Cookie，无法签到（在客户端重新登录后再次导入即可）", nil)
 	}
 
-	st, raw, err := c.sendCheckin(cookie)
+	// ① 查今日状态。已签即收工——这条既是幂等短路，也是「已领」的唯一可信判据。
+	st, raw, state, err := c.fetchCheckinState(a, cookie)
+	if err != nil {
+		return ret(provider.CheckinError, 0, "签到状态查询失败："+shortText(err.Error(), 80), err)
+	}
+	if st >= 400 {
+		return c.reportTransportError(ret, st, raw)
+	}
+	if state == nil {
+		return ret(provider.CheckinError, 0, "签到状态回执无法解析（上游形状可能已变更）",
+			errCheckinParsed(string(raw)))
+	}
+	if state.CheckedIn == nil {
+		// 信封成功但没有 checked_in 字段：形状突变，宁可重试也不猜。
+		return ret(provider.CheckinError, 0, "签到状态回执缺少 checked_in（上游形状可能已变更）",
+			errCheckinParsed("data="+string(raw)))
+	}
+	if *state.CheckedIn {
+		return ret(provider.CheckinAlready, 0, "今日已领取", nil)
+	}
+
+	// ② 未签 → 领一张一次性验证码（无感 PoW，无需人工交互）。
+	verify, cerr := c.obtainCaptchaToken(a, cookie)
+	if cerr != nil {
+		if pe, ok := cerr.(*provider.Error); ok && pe.Kind == provider.ErrSessionDead {
+			return ret(provider.CheckinError, 0, "控制台会话失效，待刷新后重试", pe)
+		}
+		return ret(provider.CheckinError, 0, "取签到验证码失败："+shortText(cerr.Error(), 80), cerr)
+	}
+
+	// ③ 带验证码领取。字段名实测为 captcha_token，写错就是 10701。
+	payload, _ := json.Marshal(map[string]string{"captcha_token": verify})
+	st, raw, err = c.consoleAuthed(a, cookie, http.MethodPost, epWalletCheckin, payload)
 	if err != nil {
 		return ret(provider.CheckinError, 0, "签到请求失败："+shortText(err.Error(), 80), err)
 	}
-	// 401 → 控制台会话可能只是过期（≈6 天），用百智云会话（≈29 天）现派生一份再**重试一次**。
-	// 这是纯 HTTP 两步（见 deriveConsoleSession），不涉及跨端伪装。
-	if st == http.StatusUnauthorized {
-		fresh, derr := c.deriveConsoleSession(a)
-		if derr != nil {
-			// 派生不可用：401 按类型化 session dead 抛出，让调度器/用户知道要重新登录。
-			perr := &provider.Error{Kind: provider.ErrSessionDead, Status: st,
-				Msg: fmt.Sprintf("控制台会话已失效（%s）；自动续期失败：%v", shortText(string(raw), 80), derr)}
-			return ret(provider.CheckinError, 0, "控制台会话失效，待刷新后重试", perr)
-		}
-		adoptConsoleCookie(a, fresh)
-		if st, raw, err = c.sendCheckin(fresh); err != nil {
-			return ret(provider.CheckinError, 0, "签到请求失败："+shortText(err.Error(), 80), err)
-		}
-		if st == http.StatusUnauthorized {
-			perr := &provider.Error{Kind: provider.ErrSessionDead, Status: st,
-				Msg: "控制台会话续期后仍被拒绝：" + shortText(string(raw), 120)}
-			return ret(provider.CheckinError, 0, "控制台会话失效，待刷新后重试", perr)
-		}
+	if st >= 400 {
+		return c.reportTransportError(ret, st, raw)
 	}
-
-	return c.interpretCheckin(st, raw, ret)
-}
-
-// interpretCheckin 把一次签到的 (HTTP 状态, 原始回包) 翻译成结构化状态。
-//
-// 判定顺序是刻意的（错一步就是假成功或假失败）：
-//
-//	① HTTP 409 / 业务码 409            → 已领（唯一能被信任的「已领」信号）
-//	② HTTP 401 / 429 / 5xx / 其它 4xx  → 分类错误（429 在 Classify 里优先于余额类，R15）
-//	③ 解析信封失败                     → 形状突变，可重试错误
-//	④ 业务码为成功码：看已领标记 → 无活动标记 → 发放额
-//	⑤ 业务码 404                       → 无活动（可重试）
-//	⑥ 其它业务码                       → 可重试错误
-func (c *Client) interpretCheckin(st int, raw []byte,
-	ret func(provider.CheckinStatus, int64, string, error) (provider.CheckinReport, error),
-) (provider.CheckinReport, error) {
 	var env checkinEnvelope
-	parsed := json.Unmarshal(raw, &env) == nil
-
-	// ① 已领：HTTP 409 优先于一切（不在下面任何分支里就可能被 4xx 分支吃掉）。
-	if st == http.StatusConflict {
-		return ret(provider.CheckinAlready, 0, "今日已领取", nil)
-	}
-	if parsed && env.Code == codeAlready {
-		return ret(provider.CheckinAlready, 0, "今日已领取", nil)
-	}
-
-	// ② 传输层/状态码错误（成功码不在此列：有些网关以 HTTP 200 + 非零 code 表达业务结果）。
-	if st >= 400 && !(parsed && okCode(env.Code)) {
-		if st == http.StatusNotFound && noCampaignCode(env.Code, parsed) {
-			return ret(provider.CheckinNoCampaign, 0, "暂无签到活动（活动可能尚未开放）", nil)
-		}
-		kind := c.Classify(st, string(raw))
-		perr := &provider.Error{Kind: kind, Status: st,
-			Msg: shortText(string(raw), 200)}
-		if st == http.StatusNotFound && !parsed {
-			// 404 且无信封：多半是端点/方法不对（见文件头「未确认 ①」），提示到根因上。
-			return ret(provider.CheckinError, 0, "签到接口返回 404（端点或方法可能已变更，需重新取证）", perr)
-		}
-		if kind == provider.ErrSessionDead {
-			return ret(provider.CheckinError, 0, "控制台会话失效，待刷新后重试", perr)
-		}
-		return ret(provider.CheckinError, 0, fmt.Sprintf("签到失败 HTTP %d", st), perr)
-	}
-
-	// ③ 信封解析失败：不允许往下猜（宁可重试，不可假成功）。
-	if !parsed {
+	if json.Unmarshal(raw, &env) != nil {
 		return ret(provider.CheckinError, 0, "签到回执无法解析（上游形状可能已变更）",
 			errCheckinParsed(string(raw)))
 	}
-
-	// ④ 成功码。
-	if okCode(env.Code) {
-		var d checkinData
-		if len(env.Data) > 0 {
-			if err := json.Unmarshal(env.Data, &d); err != nil {
-				// data 存在但不是对象/字段类型不符：同样按形状突变处理。
-				return ret(provider.CheckinError, 0, "签到回执 data 无法解析（上游形状可能已变更）",
-					errCheckinParsed("data="+string(env.Data)))
-			}
-		}
-		if d.already() {
-			return ret(provider.CheckinAlready, 0, alreadyMsg(d), nil)
-		}
-		if d.inactive() {
-			return ret(provider.CheckinNoCampaign, 0, "暂无签到活动（活动可能尚未开放）", nil)
-		}
-		millis, declared := d.grantMillis()
-		if granted := milliCredits(millis); granted > 0 {
-			return ret(provider.CheckinClaimed, granted, fmt.Sprintf("签到成功 +%d 积分", granted), nil)
-		}
-		// data 整个缺失：形状突变（连「领没领到」都无从判断）。
-		if len(env.Data) == 0 {
-			return ret(provider.CheckinError, 0, "签到回执缺少 data（上游形状可能已变更）",
-				errCheckinParsed("data 缺失"))
-		}
-		if !declared {
-			// 上游没声明任何金额字段：按「领到了，但金额读不出来」处理。
-			// claimed + Amount=0 正是 provider.CheckinClaimed 允许的语义（调度器降级差分记账）；
-			// 仍带一条 error 留痕，提示字段名假设可能已过时。**绝不编造金额。**
-			return ret(provider.CheckinClaimed, 0, "签到成功（上游未回填发放额，按差分记账）",
-				fmt.Errorf("monkeycode：签到 code=0 但回执无金额字段，形状假设可能过时（%s）",
-					shortText(string(env.Data), 160)))
-		}
-		// 上游**明确**给了 0：没拿到积分（额度已满/奖励已领走）。不得报 claimed。
-		return ret(provider.CheckinError, 0, "签到未发放积分（上游回执金额为 0）",
-			fmt.Errorf("monkeycode：签到 code=0 但声明发放额为 0（%s）", shortText(string(raw), 160)))
+	if env.Code != codeOK {
+		perr := &provider.Error{Kind: c.Classify(st, string(raw)), Status: st, Msg: shortText(string(raw), 200)}
+		return ret(provider.CheckinError, 0, fmt.Sprintf("签到失败 code=%d", env.Code), perr)
 	}
-
-	// ⑤ 无活动：业务码 404（含 HTTP 2xx 信封里的 404）。
-	if noCampaignCode(env.Code, true) {
-		return ret(provider.CheckinNoCampaign, 0, "暂无签到活动（活动可能尚未开放）", nil)
+	var d checkinData
+	if len(env.Data) > 0 {
+		if err := json.Unmarshal(env.Data, &d); err != nil {
+			return ret(provider.CheckinError, 0, "签到回执 data 无法解析（上游形状可能已变更）",
+				errCheckinParsed("data="+string(env.Data)))
+		}
 	}
-
-	// ⑥ 其它业务码：可重试错误，原文留痕。
-	return ret(provider.CheckinError, 0, fmt.Sprintf("签到失败 code=%d", env.Code),
-		fmt.Errorf("monkeycode：签到业务失败 code=%d message=%s", env.Code, shortText(env.Message, 120)))
+	if d.CheckedIn == nil || !*d.CheckedIn {
+		// code=0 但没把状态置为已签：上游没真正发放。不得报成功。
+		return ret(provider.CheckinError, 0, "签到未生效（上游回执 checked_in 非真）",
+			fmt.Errorf("monkeycode：签到 code=0 但 checked_in 未置真（%s）", shortText(string(raw), 160)))
+	}
+	// 金额：上游回包不含金额，恒为 0 ⇒ 由调度器的 wallet 差分记账兜底（既有机制）。
+	return ret(provider.CheckinClaimed, 0, "签到成功（金额由积分差分记账）", nil)
 }
 
-// alreadyMsg 已领时的文案（带上回执里的余额，方便用户直观确认积分仍在）。
-func alreadyMsg(d checkinData) string {
-	if d.Balance > 0 {
-		return fmt.Sprintf("今日已领取（积分余额 %d）", milliCredits(d.Balance))
+// reportTransportError 处理 HTTP >= 400 的签到请求（按 Classify 分类，401 走类型化 session dead）。
+func (c *Client) reportTransportError(
+	ret func(provider.CheckinStatus, int64, string, error) (provider.CheckinReport, error),
+	st int, raw []byte,
+) (provider.CheckinReport, error) {
+	kind := c.Classify(st, string(raw))
+	perr := &provider.Error{Kind: kind, Status: st, Msg: shortText(string(raw), 200)}
+	if kind == provider.ErrSessionDead {
+		return ret(provider.CheckinError, 0, "控制台会话失效，待刷新后重试", perr)
 	}
-	return "今日已领取"
+	return ret(provider.CheckinError, 0, fmt.Sprintf("签到失败 HTTP %d", st), perr)
 }
 
 // ---------------------------------------------------------------------------
-// 请求
+// 三步流程的各个子步骤
 // ---------------------------------------------------------------------------
 
-// sendCheckin 发一次签到请求，返回 (HTTP 状态, 原始回包)。
+// fetchCheckinState 第①步：GET 签到状态。返回 (HTTP 状态, 原始回包, 解析后的 data)。
 //
-// 只用 c.HTTP（有总超时）：签到是一次性的短请求，不像对话那样需要无总超时。
-func (c *Client) sendCheckin(cookie string) (int, []byte, error) {
-	req, err := http.NewRequest(http.MethodPost, c.console()+epWalletCheckin, bytes.NewReader(nil))
+// data 为 nil 表示信封或 data 段解析失败（调用方按形状突变处理）。
+func (c *Client) fetchCheckinState(a *auth.Auth, cookie string) (int, []byte, *checkinData, error) {
+	st, raw, err := c.consoleAuthed(a, cookie, http.MethodGet, epWalletCheckin, nil)
+	if err != nil {
+		return 0, nil, nil, err
+	}
+	if st >= 400 {
+		return st, raw, nil, nil
+	}
+	var env checkinEnvelope
+	if json.Unmarshal(raw, &env) != nil || env.Code != codeOK {
+		return st, raw, nil, nil
+	}
+	var d checkinData
+	if len(env.Data) > 0 {
+		if err := json.Unmarshal(env.Data, &d); err != nil {
+			return st, raw, nil, nil
+		}
+	}
+	return st, raw, &d, nil
+}
+
+// obtainCaptchaToken 第②步：解 Cap.js 工作量证明并兑换一枚一次性验证码。
+//
+// 返回的字符串直接作为 `captcha_token` 提交（形态 `<id>:<ver>`）。
+// 全程不需要人工交互——这不是图形验证码，而是可计算的工作量证明（见 captcha.go）。
+func (c *Client) obtainCaptchaToken(a *auth.Auth, cookie string) (string, error) {
+	st, raw, err := c.consoleAuthed(a, cookie, http.MethodPost, epCaptchaChallenge, []byte("{}"))
+	if err != nil {
+		return "", err
+	}
+	if st >= 400 {
+		return "", &provider.Error{Kind: c.Classify(st, string(raw)), Status: st,
+			Msg: "验证码挑战失败：" + shortText(string(raw), 160)}
+	}
+	var ch captchaChallengeResp
+	if err := json.Unmarshal(raw, &ch); err != nil {
+		return "", errCheckinParsed("challenge=" + string(raw))
+	}
+	if ch.Token == "" || ch.Challenge.C <= 0 {
+		return "", errCheckinParsed("challenge 缺字段：" + string(raw))
+	}
+
+	solutions, err := capSolve(ch.Token, ch.Challenge.C, ch.Challenge.S, ch.Challenge.D)
+	if err != nil {
+		return "", err
+	}
+	payload, err := json.Marshal(map[string]any{"token": ch.Token, "solutions": solutions})
+	if err != nil {
+		return "", err
+	}
+	st, raw, err = c.consoleAuthed(a, cookie, http.MethodPost, epCaptchaRedeem, payload)
+	if err != nil {
+		return "", err
+	}
+	var rd captchaRedeemResp
+	if st >= 400 || json.Unmarshal(raw, &rd) != nil || !rd.Success || rd.Token == "" {
+		// 兑换失败时把原始回包留在 error 里（不含凭据），便于定位是形状变了还是被风控。
+		return "", &provider.Error{Kind: c.Classify(st, string(raw)), Status: st,
+			Msg: "验证码兑换失败：" + shortText(string(raw), 160)}
+	}
+	return rd.Token, nil
+}
+
+// consoleAuthed 发一次控制台请求；遇 401 用百智云会话现派生一份再**只重试一次**（不变量 19）。
+//
+// 三步流程共用：控制台会话只有约 6 天寿命，而派生它的百智云会话约 29 天，
+// 所以这里自愈能显著减少「用户什么都不做就永久 401」的情况。
+func (c *Client) consoleAuthed(a *auth.Auth, cookie, method, path string, body []byte) (int, []byte, error) {
+	st, raw, err := c.consoleRequest(cookie, method, path, body)
 	if err != nil {
 		return 0, nil, err
 	}
-	// 请求头与 wallet 同构：同域同 Cookie，Accept 用 JSON。空 body 也显式声明长度，
-	// 免得个别网关把「无 Content-Length 的 POST」当分块请求拒掉。
+	if st != http.StatusUnauthorized {
+		return st, raw, nil
+	}
+	fresh, derr := c.deriveConsoleSession(a)
+	if derr != nil {
+		return st, raw, &provider.Error{Kind: provider.ErrSessionDead, Status: st,
+			Msg: fmt.Sprintf("控制台会话已失效（%s）；自动续期失败：%v", shortText(string(raw), 80), derr)}
+	}
+	adoptConsoleCookie(a, fresh)
+	st, raw, err = c.consoleRequest(fresh, method, path, body)
+	if err != nil {
+		return 0, nil, err
+	}
+	if st == http.StatusUnauthorized {
+		return st, raw, &provider.Error{Kind: provider.ErrSessionDead, Status: st,
+			Msg: "控制台会话续期后仍被拒绝：" + shortText(string(raw), 120)}
+	}
+	return st, raw, nil
+}
+
+// consoleRequest 发一次控制台 HTTP 请求，返回 (HTTP 状态, 原始回包)。
+//
+// 只用 c.HTTP（有总超时）：签到是一条短请求链，不像对话那样需要无总超时。
+func (c *Client) consoleRequest(cookie, method, path string, body []byte) (int, []byte, error) {
+	var rdr io.Reader
+	if body != nil {
+		rdr = bytes.NewReader(body)
+	}
+	req, err := http.NewRequest(method, c.console()+path, rdr)
+	if err != nil {
+		return 0, nil, err
+	}
 	req.Header.Set("Cookie", CookieNameConsole+"="+cookie)
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("User-Agent", userAgent)
-	req.ContentLength = 0
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	// 空 body 的请求也显式声明长度，免得个别网关把「无 Content-Length 的请求」当分块请求拒掉。
+	req.ContentLength = int64(len(body))
 
 	resp, err := c.HTTP.Do(req)
 	if err != nil {
@@ -345,19 +364,8 @@ func (c *Client) sendCheckin(cookie string) (int, []byte, error) {
 	return resp.StatusCode, raw, nil
 }
 
-// okCode 报告业务码是否为「成功」。
-//
-// 同站钱包接口的成功码是 0（实测）；这里额外宽容 200（部分网关直接复用 HTTP 码）。
-// **不宽容 1**：拿不准时宁可走 ⑥ 变成可重试错误，也不要冒险把失败当成功。
-func okCode(code int) bool { return code == 0 || code == http.StatusOK }
-
-// code Already 控制台信封里「今日已签」的业务码（推断：与 HTTP 409 同义）。
-const codeAlready = http.StatusConflict
-
-// noCampaignCode 业务码是否表达「无活动」。
-func noCampaignCode(code int, parsed bool) bool {
-	return parsed && code == http.StatusNotFound
-}
+// codeOK 控制台信封的成功码（wallet 与签到实测均为 0）。
+const codeOK = 0
 
 // shortText 截断文本用于日志/错误信息（脱敏：签到回包不含凭据，但保守截断）。
 func shortText(s string, n int) string {

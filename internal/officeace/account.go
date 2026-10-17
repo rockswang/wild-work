@@ -229,24 +229,39 @@ func trimSlash(u string) string { return strings.TrimRight(strings.TrimSpace(u),
 //
 // 故存盘一律存裸 host，各端点按需自行拼前缀。旧凭据里已带 /v2 的也在这里剥掉，
 // 无需用户重新登录（向后兼容）。
+//
+// 归一规则保守（合并 upstream/master 时并入，来源：本地分支 `fix/officeace-credential-chain`
+// 的 `gatewayRootOf`，2026-10-17 独立复核抓出的退化输入）：剥完若为空（例如入参恰好就是
+// `"/v2"`）则**原样返回**——不能让 base 变成空串，否则会拼出 `"/v1/subscription"` 这种
+// 无主机地址。大小写不敏感由 EqualFold 保证（`/V2` 同样剥）。
 func bareGateway(u string) string {
 	u = trimSlash(u)
 	// 只剥最后一段 `/v2`；更深的路径（理论上不存在）保持原样，不猜。
-	if strings.HasSuffix(u, "/v2") {
-		return strings.TrimSuffix(u, "/v2")
+	if len(u) >= 3 && strings.EqualFold(u[len(u)-3:], "/v2") {
+		if root := strings.TrimRight(u[:len(u)-3], "/"); root != "" {
+			return root
+		}
 	}
 	return u
 }
+
+// dataBase 返回本账号的**数据面**基址（裸 host + `/v2`，即 chatURL/modelsURL 的前缀）。
+//
+// 合并 upstream/master 时并入（来源：本地 `fix/officeace-credential-chain`）：
+// 把「数据面拼 /v2」与「控制面用裸 host」的差异收口到一处方法，避免各调用点各写一遍
+// trimSlash+"/v2" 而漏掉归一（quota.go 的控制面走 `c.gatewayBase()` → `bareGateway`）。
+func (ac *Account) dataBase() string { return bareGateway(ac.BaseURL) + "/v2" }
 
 // chatURL 返回对话端点（网关 OpenAI 兼容：{base}/v2/chat/completions）。
 //
 // 必须带 `/v2`（issue #152 实测）：上游下发的是裸 host，而 OpenAI 兼容面挂在 `/v2`
 // 之下——不带则 `GET {host}/models` 与 `POST {host}/chat/completions` 均返回
 // APIG.0101「The API does not exist or has not been published」。
-func (ac *Account) chatURL() string { return trimSlash(ac.BaseURL) + "/v2/chat/completions" }
+// 这里改走 dataBase()：入参可能自带 `/v2`（导入路径），必须先去重再拼，否则拼出 `/v2/v2`。
+func (ac *Account) chatURL() string { return ac.dataBase() + "/chat/completions" }
 
 // modelsURL 返回模型目录端点（{base}/v2/models）。理由同 chatURL。
-func (ac *Account) modelsURL() string { return trimSlash(ac.BaseURL) + "/v2/models" }
+func (ac *Account) modelsURL() string { return ac.dataBase() + "/models" }
 
 // regionFromBaseURL 从网关 host 里猜 region（华为主机形如
 // modelgw-0004.officeace.cn-southwest-2.huaweicloud-agentarts.com ⇒ cn-southwest-2）。

@@ -94,7 +94,7 @@ func dataRoots(installDirs []string) []string {
 	return out
 }
 
-// installRoots 计算安装根目录候选（环境变量 + 各盘常见目录）。
+// installRoots 计算安装根目录候选（环境变量 + 各盘常见目录 + Windows per-user 位置）。
 func installRoots(installDirs []string) []string {
 	var out []string
 	add := func(p string) {
@@ -116,6 +116,28 @@ func installRoots(installDirs []string) []string {
 		add(d)
 	}
 	add(os.Getenv("OFFICEACE_INSTALL_DIR"))
+	// Windows per-user 安装位置：Electron 系桌面端的默认落点，**不在**各盘 Program Files 里。
+	// 实测本机为 %LOCALAPPDATA%\Programs\OfficeAce（缺此候选 ⇒ 加密档案目录全 miss ⇒ 导入无临时 AK/SK）。
+	// 非 Windows 下这些路径不存在，add 的 os.Stat 判定自然跳过（不 panic）。
+	programsRoots := []string{}
+	if v := strings.TrimSpace(os.Getenv("LOCALAPPDATA")); v != "" {
+		programsRoots = append(programsRoots, v)
+	}
+	// 兜底：%LOCALAPPDATA% 缺失时自行推导 <用户目录>\AppData\Local
+	//（**不是** os.UserConfigDir() 的父目录——那是 AppData\Roaming 的上级 AppData，拼出的
+	// AppData\Programs\OfficeAce 并不存在）。
+	if len(programsRoots) == 0 {
+		if v := localAppDataCandidate(); v != "" {
+			programsRoots = append(programsRoots, v)
+		}
+	}
+	for _, base := range programsRoots {
+		add(filepath.Join(base, "Programs", "OfficeAce"))
+		add(filepath.Join(base, "OfficeAce"))
+	}
+	if v := strings.TrimSpace(os.Getenv("APPDATA")); v != "" {
+		add(filepath.Join(v, "OfficeAce"))
+	}
 	mids := []string{"软件", "Program Files", "Program Files (x86)", "Apps"}
 	// Windows 盘符候选（非 Windows 下 os.Stat 失败，自然跳过）。
 	for _, drive := range []string{`C:\`, `D:\`, `E:\`, `F:\`} {
@@ -126,6 +148,27 @@ func installRoots(installDirs []string) []string {
 	// macOS：应用在 /Applications/OfficeAce.app，配置通常在 home/.office-claw（已在 dataRoots）。
 	add("/Applications/OfficeAce.app")
 	return out
+}
+
+// localAppDataCandidate 推导 %LOCALAPPDATA%（<用户目录>\AppData\Local），供环境变量缺失时兜底。
+//
+// 两级推导（都不依赖 LOCALAPPDATA 本身）：
+//  1. %USERPROFILE%\AppData\Local —— Windows 标准位置；
+//  2. os.UserConfigDir()（Windows 上 = %APPDATA% = <用户目录>\AppData\Roaming）的同级 Local：
+//     filepath.Join(UserConfigDir(), "..", "Local") 并 Clean ⇒ <用户目录>\AppData\Local。
+//
+// 注意：**不能**用 filepath.Dir(UserConfigDir())——那是 AppData 本身，会拼出
+// <用户目录>\AppData\Programs\OfficeAce（不存在）。非 Windows 上 UserConfigDir 通常是
+// $XDG_CONFIG_HOME/~/.config，这里只是推导候选；路径不存在时由 add 的 os.Stat 过滤，不 panic。
+func localAppDataCandidate() string {
+	if p := strings.TrimSpace(os.Getenv("USERPROFILE")); p != "" {
+		return filepath.Join(p, "AppData", "Local")
+	}
+	cfg, err := os.UserConfigDir()
+	if err != nil || strings.TrimSpace(cfg) == "" {
+		return ""
+	}
+	return filepath.Join(filepath.Clean(cfg), "..", "Local")
 }
 
 // routingStateDirs 返回数据根下可能存放 models.json 的目录候选。

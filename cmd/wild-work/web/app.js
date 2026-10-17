@@ -791,7 +791,10 @@ const noCheckinText = (g) => NO_CHECKIN_TAG[g] || "无签到";
 // 运行期可增删，故运行时以后端下发的 custom_channels 动态判定（isCustomGroup）。
 const NO_CREDITS_BUILTIN = new Set(["oczen", "kilo", "cline"]);
 // 支持跳转登录编排的渠道：登录态失效时卡片显示 ⟳ 重新登录入口（#134）。
-const RELOGIN_CHANNELS = new Set(["workbuddy", "workbuddyai", "traework", "qoder", "qodercn", "qodercom", "qwenwork", "raccoon"]);
+// officeace 一并纳入（2026-10-17）：它除了「登录态失效」，还有「缺 refresh_token」
+// 这种**不能自愈**的形态（客户端导入只拿得到不过期的网关 Basic），此时同样只能重新登录
+// 才能恢复积分/签到 —— 徽标与 ⟳ 入口由同一处逻辑驱动（见 renderAccounts 的 needRelogin）。
+const RELOGIN_CHANNELS = new Set(["workbuddy", "workbuddyai", "traework", "qoder", "qodercn", "qodercom", "qwenwork", "raccoon", "officeace"]);
 
 // creditsText 账号卡片的积分文案。
 // 拆成「可用 / 不可用 / 临期」三个数字：渠道（如 TraeWork）会下发官方客户端专用的
@@ -1015,8 +1018,26 @@ function renderAccounts() {
     const sessionDeadTag = a.session_dead
       ? `<span class="tag bad" title="${esc(a.session_dead_reason || "登录态已失效，请重新登录")}">需重新登录</span>`
       : "";
-    const reloginBtn = a.session_dead && RELOGIN_CHANNELS.has(a.group)
-      ? `<span class="icon-op" title="重新登录（跳转登录页换新凭据，成功后自动补签）" onclick="startLogin('${a.group}')">⟳</span>`
+    // 凭据缺 refresh_token（目前只有 OfficeAce，见后端 refreshTokenMissing）：
+    // 性质与「登录态失效」不同 —— 不是被上游拒了，而是本地根本没这条凭据，
+    // **不会自愈**，所以徽标要**持久**显示（原先只在导入那一刻弹一次提示，事后无从复查）。
+    // 用 warn 色与 bad 区分：前者「还能对话，但积分/签到不可用」，后者「登录已失效」。
+    const missingRT = Boolean(a.refresh_token_missing);
+    const missingRTTag = missingRT
+      ? `<span class="tag warn" title="${esc(a.refresh_token_missing_reason || "凭据缺 refresh_token：积分/签到不可用，需重新登录或重新导入")}">缺续期凭据</span>`
+      : "";
+    const needRelogin = Boolean(a.session_dead) || missingRT;
+    const reloginTitle = missingRT
+      ? "重新登录（本账号缺 refresh_token，积分/签到不可用；登录成功后自动补签）"
+      : "重新登录（跳转登录页换新凭据，成功后自动补签）";
+    // 一键重新登录：沿用既有内联 onclick 形态（本仓无 CSP 头，全文件已有 10 处同款写法）。
+    // 渠道差异由 `startLogin` 内部**分派**：OfficeAce 是「华为云授权码 + 云端轮询捕获」的
+    // 两步流程，必须走 startOfficeAceWebLogin（→ POST /api/login/officeace_auto），不能走
+    // 一次性的 POST /api/login/start。2026-10-18 修正：先前 OfficeAce 的 ⟳ 直接打
+    // /api/login/start，而后端 StartLoginFor 未登记 officeace ⇒ 点了只弹
+    // `unknown login provider officeace`（死按钮，独立复核抓出）。
+    const reloginBtn = needRelogin && RELOGIN_CHANNELS.has(a.group)
+      ? `<span class="icon-op" title="${reloginTitle}" onclick="startLogin('${a.group}')">⟳</span>`
       : "";
     const ops = fixedAcct
       ? `${channelHelp}<span class="icon-op off" title="固定账号，不可停用/删除" onclick="return false">🔒</span>`
@@ -1047,7 +1068,7 @@ function renderAccounts() {
       <div class="acct-uid">UID: ${esc(shortUid(a.uid))}</div>
       <div class="acct-mid">
         <div class="acct-credits${noCredits ? "" : " clickable"}" data-uid="${a.uid}"${noCredits ? "" : ` onclick="showCreditDetail(event,'${a.uid}')" title="点击查看积分明细（含分页）" role="button" tabindex="0" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();showCreditDetail(event,'${a.uid}')}"`}>${creditsText(a)}</div>
-        <div class="acct-checkin">${coolingTag}${sessionDeadTag}${checkinTag}</div>
+        <div class="acct-checkin">${coolingTag}${sessionDeadTag}${missingRTTag}${checkinTag}</div>
       </div>
     </div>`;
   }).join("");
@@ -1350,13 +1371,48 @@ function friendlyCheckinMsg(m) {
   return /401|unauthorized|登录已失效|登录已过期/i.test(m || "")
     ? m + "（该账号登录已过期，点账号卡片右上角 ⟳ 重新登录）" : m;
 }
+// checkinToast 签到后的提示文案。
+// 为什么不能一律写「签到成功」：Qoder 双区的 campaigns 路径有三个**都是 ok=true** 的结果——
+// 真领到（msg「签到成功 +100」）/ 今日已领（msg「今日已领取 +100」）/ 上游还没发可领活动
+// （no_campaign，msg 是诊断摘要）。旧文案把第三种也说成「签到成功：上游未下发可领取活动…」，
+// 读起来像领到了，是 10-17「签到没实现」误判的来源之一。这里按 msg 区分，绝不越权声称。
+//
+// 第三档再分「失败」与「暂未领到」：后端在 ok=true 下也可能给出失败形态的 msg
+// （如「领取失败 http 400: …」「claim parse: …」），那是**真失败**，说成「暂未领到」
+// 等于换了说法的假成功。判据放在兜底分支之前，不给「先被 +N 命中」的机会。
+const CHECKIN_FAIL_RE = /失败|http \d{3}|error|无法解析|parse|未知状态|401|403|500/i;
+// 第五档「无领取资格」（2026-10-18 用户实测定性）：该活动由**上游按账号授予资格**，
+// 不是每个号都有；没资格的号在官方客户端里同样看不到入口。后端会直说「该账号无积分
+// 领取活动资格……不是本工具的问题，重试无意义」。
+// 为什么必须单独成档：这条 msg 既不含「失败」也不含错误码，会落到兜底分支被说成
+// 「暂未领到」，再叠加下面那句「窗口内会自动重试」——对一个永远不会有结果的账号，
+// 等于让用户一直等一个不会发生的事。这正是「以为工具没实现」的最后一处来源。
+const CHECKIN_NO_ELIGIBILITY_RE = /无积分领取活动资格|无领取资格/;
+function checkinToast(r) {
+  const msg = r.msg || "";
+  if (!r.ok) return `签到：${friendlyCheckinMsg(msg)}`;
+  if (/^今日已领取/.test(msg)) return `今日已领过：${msg}（剩余 ${r.remain}）`;
+  // 注意「领取失败 http 400」里也可能带数字，故失败判据必须先于「含 +N」判据。
+  if (CHECKIN_NO_ELIGIBILITY_RE.test(msg)) return `无领取资格：${msg}`;
+  if (CHECKIN_FAIL_RE.test(msg)) return `签到失败：${friendlyCheckinMsg(msg)}`;
+  if (/^签到成功/.test(msg) || /\+-?\d+/.test(msg)) return `签到成功：${msg}（剩余 ${r.remain}）`;
+  return `暂未领到：${msg}（剩余 ${r.remain}）`;
+}
 async function checkin(uid) {
   try {
     const r = await api("/api/account/checkin", { uid });
-    // 未达成且可重试（活动尚未创建/上游瞬时故障）：说明会在签到窗口内自动重试，
-    // 避免用户看到「无可用签到活动」误以为失败。
-    if (!r.ok && r.retryable) toast(`暂未领到：${r.msg}（10:00–12:00 窗口内会自动重试）`);
-    else toast(r.ok ? `签到成功：${r.msg}（剩余 ${r.remain}）` : `签到：${friendlyCheckinMsg(r.msg)}`);
+    // 无资格优先于「可重试」：该状态 retryable 仍为 true（上游可能在当天补发资格，
+    // 窗口内重试是免费的），但对**当前**这个账号说「会自动重试」会让人白等，
+    // 故这里明说「无需重试」并点出这不是工具故障。
+    if (CHECKIN_NO_ELIGIBILITY_RE.test(r.msg || "")) {
+      toast(`无领取资格：${r.msg}`);
+    } else if (!r.ok && r.retryable) {
+      // 未达成且可重试（活动尚未创建/上游瞬时故障）：说明会在签到窗口内自动重试，
+      // 避免用户看到「无可用签到活动」误以为失败。
+      toast(`暂未领到：${r.msg}（10:00–12:00 窗口内会自动重试）`);
+    } else {
+      toast(checkinToast(r));
+    }
     delete detailCache[uid]; // 签到改变余额，旧明细缓存会与新顶层打架
     loadState();
   } catch (e) { toast(e.message); }
@@ -1633,6 +1689,13 @@ async function importLocal(channel) {
 }
 
 async function startLogin(channel, accountLabel) {
+  // 渠道分派：OfficeAce 是**两步**流程（华为云授权码 + 云端轮询捕获），专属入口是
+  // startOfficeAceWebLogin（→ POST /api/login/officeace_auto）。它与下面
+  // `POST /api/login/start` 的形态不同——后者一次调用就返回 auth_url，且后端
+  // StartLoginFor 不会为 officeace 拉起轮询。这里收口成一个入口，卡片上的 ⟳
+  // 与「添加账号」都走同一条路，避免再出现「前端能点、后端不认」的死按钮。
+  // （2026-10-18：卡片 ⟳ 曾直接 startLogin('officeace') 而只弹 unknown login provider。）
+  if (channel === "officeace") return startOfficeAceWebLogin();
   try {
     const r = await api("/api/login/start", { channel, account_label: accountLabel || "" });
     const url = r.auth_url;

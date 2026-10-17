@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -436,6 +437,12 @@ func loomyClientSessionPath() (string, error) {
 //
 // 与其它导入渠道不同，本渠道一个桌面端可能挂多个华为账号（多份 routing_state/users/<uid>），
 // 因此逐账号导入。网关凭据（Basic AK/SK）只是对话入口；积分/签到所需的临时凭据需后续续期获取。
+//
+// ⚠️ 同一个 uid 的 auth 文件也是**本工具自助登录**的落盘位置（internal/officeace/login.go），
+// 而导入侧通常没有临时 AK/SK / refresh_token / dpop_priv（只从桌面端文件发现网关 Basic）。
+// 因此写入前若目标文件已存在，必须走 writeOfficeAceAuth 的**按字段合并**：否则一次导入就会把
+// 浏览器登录的成果清空 —— 实证后果是 extra.access_key 与 auth.refreshToken 变空，积分查询用
+// **空 AK** 签名（订阅接口 401 APIG.0303 "app not found, appkey "），签到退化「无临时凭据」。
 func (a *App) importOfficeAce() (*ImportLocalResult, error) {
 	accs, err := officeace.Discover(nil)
 	if err != nil {
@@ -445,28 +452,34 @@ func (a *App) importOfficeAce() (*ImportLocalResult, error) {
 		return nil, fmt.Errorf("未找到本机 OfficeAce 客户端凭据：请先安装并登录 OfficeAce 桌面端，且至少发起过一次对话")
 	}
 	firstUID, firstFile := "", ""
-	withRT := 0
+	keptCred, noRT := 0, 0
 	for _, acc := range accs {
 		ex := acc.Export()
-		if ex.RefreshToken != "" {
-			withRT++
-		}
 		doc := authDoc{
 			Auth: authSection{
 				AccessToken: ex.AccessToken,
 				// refresh_token 必须落盘（否则 ~2h 后临时凭据到期，积分/签到永久无法续期，
-				// 而对话不受影响 ⇒ 极隐蔽）。缺它时为空串，面板会以「无临时凭据」提示。
+				// 而对话不受影响 ⇒ 极隐蔽）。缺它时为空串，面板会以「无临时凭据」提示；
+				// 若本工具已登录过该账号，writeOfficeAceAuth 会保留既有的 refresh_token。
 				RefreshToken: ex.RefreshToken,
 				// 网关 Basic 凭据不过期；续期是临时凭据的事，故这里用远期到期避免误触刷新。
-				ExpiresAt: time.Now().AddDate(50, 0, 0).Unix(),
+				// （目标文件已存在且留有 OAuth 临时凭据/refresh_token 时，合并会改用与它们匹配的到期时间；
+				// 该哨兵只对「纯网关 Basic 导入」生效——见 mergeOfficeAceDoc 的三级优先级。）
+				ExpiresAt: officeAceImportedSentinel(),
 				ApiHost:   ex.ApiHost,
 				Extra:     ex.Extra,
 			},
 			Account: accountSection{UID: ex.UID, Nickname: ex.Nickname},
 		}
-		file, err := a.writeAuthFile("officeace", ex.UID, doc)
-		if err != nil {
-			return nil, err
+		file, info, merr := a.writeOfficeAceAuth(ex.UID, doc)
+		if merr != nil {
+			return nil, merr
+		}
+		if info.KeptCredential {
+			keptCred++
+		}
+		if !info.HasRefreshToken {
+			noRT++
 		}
 		if firstUID == "" {
 			firstUID, firstFile = ex.UID, filepath.Base(file)
@@ -475,12 +488,316 @@ func (a *App) importOfficeAce() (*ImportLocalResult, error) {
 	a.reloadAccounts()
 	a.afterAccountAdded(provider.OfficeAce)
 	note := fmt.Sprintf("已导入 %d 个 OfficeAce 账号", len(accs))
-	if withRT < len(accs) {
+	if keptCred > 0 {
+		// 区分「导入本来就没有」与「已保留既有凭据」：保留下来的账号通常不需要重新登录
+		// （其 refresh_token/临时凭据仍在）。措辞精确到「凭据」，因为 expiresAt 会被**纠正**为
+		// 那批凭据自己的到期时间（而不是原样沿用），这点差异对排障有意义（见 mergeOfficeAceDoc）。
+		note += fmt.Sprintf("（其中 %d 个保留了本工具已保存的 OAuth 凭据，未被本次导入的网关凭据覆盖；其到期时间已按保留凭据自己的到期对齐）", keptCred)
+	}
+	if noRT > 0 {
 		// 无 refresh_token 的账号只能对话，积分/签到会退化成「无临时凭据」（需在本工具重新登录）。
-		note += fmt.Sprintf("（其中 %d 个未取得 refresh_token，积分/签到需在本工具重新登录一次）", len(accs)-withRT)
+		// 判据是**合并后**的结果（info.HasRefreshToken），故「本次导入没带、但旧文件里有」的账号不计入。
+		note += fmt.Sprintf("（其中 %d 个未取得 refresh_token，积分/签到需在本工具重新登录一次）", noRT)
 	}
 	note += "；每日签到的临时凭据约 2 小时有效，wild-work 会自动续期"
 	return &ImportLocalResult{Channel: "officeace", UID: firstUID, File: firstFile, Note: note}, nil
+}
+
+// officeAceMergeInfo 描述一次 OfficeAce 凭据写入中「保留旧值」的情况（供提示文案与回归测试断言）。
+type officeAceMergeInfo struct {
+	Merged           bool // 目标文件已存在，本次走了按字段合并（而非全新写入）
+	KeptCredential   bool // 保留了既有的 OAuth 临时凭据（见 officeAceOAuthCredKeys）
+	KeptRefreshToken bool // 保留了既有的 refresh_token（导入侧为空）
+	KeptExpiresAt    bool // 最终 expiresAt ≠ 导入侧给的值（即被合并规则改写过；仅用于测试断言与提示）
+	HasRefreshToken  bool // 写盘后该账号是否仍有 refresh_token
+}
+
+// officeAceOAuthCredKeys 是 OAuth 登录产物里的**凭据类**扩展字段。
+//
+// 说明：所有 extra 字段都遵循同一条规则（导入值非空 → 用导入值；导入值为空 → 保留旧值），
+// 这个列表只用于判定「本次是否保留了 OAuth 凭据」——它决定 expiresAt 的取值口径与提示文案。
+// 刻意**不含死名单** dead_tokens：它是黑名单不是凭据，保留它本身不构成「已保留凭据」。
+var officeAceOAuthCredKeys = []string{
+	"access_key",     // 临时 AK：积分/签到签名用（空 AK ⇒ 订阅接口 401 APIG.0303 "app not found, appkey "）
+	"secret_key",     // 临时 SK
+	"security_token", // 临时 STS token
+	"project_id",     // 控制面项目
+	"cred_expires",   // 临时凭据到期（与 auth.expiresAt 配对）
+	"refresh_expire", // refresh_token 到期
+	"dpop_priv",      // DPoP 私钥 JWK（续期必需，丢了只能重新登录）
+}
+
+// writeOfficeAceAuth 写 OfficeAce 凭据：目标文件已存在时**按字段合并**后原子写回，否则全新写入。
+//
+// 合并规则（仅在旧文件存在时生效；字段 → 优先级）：
+//
+//	字段                                       优先级
+//	auth.accessToken（网关 Basic）              导入值；导入为空 → 保留旧值
+//	auth.refreshToken                          导入值；导入为空 → 保留旧值
+//	auth.domain/apiHost/machine*               导入值；导入为空 → 保留旧值
+//	auth.expiresAt                             见下（不是简单的导入优先）
+//	extra.base_url / models / account_id /
+//	  user_id / label / region / source        导入值（导入路径是这些字段的权威来源）；
+//	                                           导入为空 → 保留旧值
+//	extra 的 OAuth 凭据类字段（见
+//	  officeAceOAuthCredKeys）与 dead_tokens   导入值；导入为空/缺失 → 保留旧值
+//	account.uid / enterpriseId / nickname      导入值；导入为空 → 保留旧值
+//
+// **空值绝不覆盖已有值**；expiresAt 的特殊规则（它必须与**本次实际生效的那批凭据**自洽，
+// 不能沿用导入侧的 +50 年远期哨兵）—— 四级优先，与 mergeOfficeAceDoc 里的实现逐条对应：
+//   - ① 本次生效的 extra 里有临时凭据（access_key 非空）**且有** cred_expires
+//     ⇒ 取 cred_expires（唯一与手里这批 AK/SK 真实匹配的值，约 2h）；
+//   - ② 有临时凭据但**缺** cred_expires ⇒ 取一个 1 小时的保守值，让它尽快续期去补出真值
+//     （**不得**落哨兵：那等于宣称一个约 2h 就过期的凭据永不过期）；
+//   - ③ 无临时凭据但有 refresh_token ⇒ 取 min(extra.refresh_expire, 旧的非哨兵 expiresAt)，
+//     两者都是真值口径时取更早的（宁早刷新，不把真值往后推）；
+//   - ④ 都没有（纯网关 Basic 导入）⇒ 采用导入侧的远期值（网关凭据确实不过期）。
+//
+// 目标文件存在但读不出/解析不了时返回错误**中止导入**（绝不静默覆盖）：宁可让用户看见失败，
+// 也不能把登录成果悄悄清掉。
+func (a *App) writeOfficeAceAuth(uid string, imported authDoc) (string, officeAceMergeInfo, error) {
+	info := officeAceMergeInfo{}
+	path := a.authFilePath("officeace", uid)
+	if fileExists(path) {
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			return "", info, fmt.Errorf("已有 OfficeAce 凭据不可读（%s），为避免覆盖登录成果已中止导入：%w", filepath.Base(path), err)
+		}
+		// 0 字节/纯空白文件没有任何凭据可保留（例如上次写盘被中断留下的空壳），
+		// 按「目标不存在」处理 —— 否则用户会被一个空文件永久挡住导入。
+		if len(strings.TrimSpace(string(raw))) > 0 {
+			prev, perr := parseAuthDoc(raw)
+			if perr != nil {
+				return "", info, fmt.Errorf("已有 OfficeAce 凭据无法解析（%s），为避免覆盖登录成果已中止导入（确认无需保留后可手动删除该文件再导入）：%w", filepath.Base(path), perr)
+			}
+			imported, info = mergeOfficeAceDoc(prev, imported)
+			info.Merged = true
+		}
+	}
+	info.HasRefreshToken = strings.TrimSpace(imported.Auth.RefreshToken) != ""
+	file, err := a.writeAuthFile("officeace", uid, imported)
+	if err != nil {
+		return "", info, err
+	}
+	return file, info, nil
+}
+
+// parseAuthDoc 解析磁盘上的 auth 文件（嵌套形 {"auth":{…},"account":{…}} 为准，兼容扁平形）。
+//
+// 刻意不复用 auth.Parse：它对 accessToken 为空**直接报错**，而被导入清空过的文件正是这种形态 ——
+// 用它会让人既丢了凭据又无法再导入（必须先手动删文件）。这里只有「JSON 本身不可解析」才报错，
+// 由调用方据此中止导入（不静默覆盖）。
+func parseAuthDoc(raw []byte) (authDoc, error) {
+	var doc authDoc
+	var probe map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &probe); err != nil {
+		return doc, err
+	}
+	if _, nested := probe["auth"]; nested {
+		if err := json.Unmarshal(raw, &doc); err != nil {
+			return doc, err
+		}
+		return doc, nil
+	}
+	// 扁平形（面板手建/旧版）：字段与 auth 段同级，account 字段同理。
+	var flat struct {
+		authSection
+		accountSection
+	}
+	if err := json.Unmarshal(raw, &flat); err != nil {
+		return doc, err
+	}
+	doc.Auth, doc.Account = flat.authSection, flat.accountSection
+	return doc, nil
+}
+
+// mergeOfficeAceDoc 按字段合并「本工具已有凭据」与「从客户端导入的凭据」（规则见 writeOfficeAceAuth）。
+func mergeOfficeAceDoc(prev, imported authDoc) (authDoc, officeAceMergeInfo) {
+	info := officeAceMergeInfo{}
+	out := imported
+	p, im := prev.Auth, imported.Auth
+
+	// ---- auth 段：逐字段「导入非空则采用导入值，否则保留旧值」 ----
+	out.Auth.AccessToken = pickNonEmpty(im.AccessToken, p.AccessToken) // 网关 Basic：导入为准
+	if strings.TrimSpace(im.RefreshToken) == "" && strings.TrimSpace(p.RefreshToken) != "" {
+		info.KeptRefreshToken = true
+	}
+	out.Auth.RefreshToken = pickNonEmpty(im.RefreshToken, p.RefreshToken)
+	out.Auth.Domain = pickNonEmpty(im.Domain, p.Domain)
+	out.Auth.ApiHost = pickNonEmpty(im.ApiHost, p.ApiHost)
+	out.Auth.MachineID = pickNonEmpty(im.MachineID, p.MachineID)
+	out.Auth.DeviceID = pickNonEmpty(im.DeviceID, p.DeviceID)
+	out.Auth.MachineToken = pickNonEmpty(im.MachineToken, p.MachineToken)
+	out.Auth.MachineType = pickNonEmpty(im.MachineType, p.MachineType)
+	out.Auth.SigningSecret = pickNonEmpty(im.SigningSecret, p.SigningSecret)
+	out.Auth.ConsoleCookie = pickNonEmpty(im.ConsoleCookie, p.ConsoleCookie)
+	out.Auth.BaizhiCookie = pickNonEmpty(im.BaizhiCookie, p.BaizhiCookie)
+
+	// ---- extra 段：导入非空覆盖，空值保留旧值 ----
+	out.Auth.Extra = mergeOfficeAceExtra(p.Extra, im.Extra)
+	for _, k := range officeAceOAuthCredKeys {
+		if strings.TrimSpace(p.Extra[k]) != "" && strings.TrimSpace(im.Extra[k]) == "" {
+			info.KeptCredential = true
+			break
+		}
+	}
+	// source 是**取证标记**：本次保留了 OAuth 登录产物时不得把它改写成 "disk"，
+	// 否则事后诊断会把「登录得来的凭据」误读成「从客户端导入的凭据」。
+	if info.KeptCredential && strings.TrimSpace(p.Extra["source"]) == "oauth-login" {
+		out.Auth.Extra["source"] = p.Extra["source"]
+	}
+
+	// ---- account 段 ----
+	out.Account.UID = pickNonEmpty(imported.Account.UID, prev.Account.UID)
+	out.Account.EnterpriseID = pickNonEmpty(imported.Account.EnterpriseID, prev.Account.EnterpriseID)
+	out.Account.Nickname = pickNonEmpty(imported.Account.Nickname, prev.Account.Nickname)
+
+	// ---- expiresAt：与**本次实际生效的那批凭据**对齐（2026-10-17 独立复核修订 + 用户实测补强）----
+	//
+	// 只要合并结果里带着临时凭据（无论它来自导入值还是被保留的旧值），expiresAt 就必须取
+	// 该凭据自己的 `extra.cred_expires`（约 2h），**不能**沿用导入侧的 +50 年哨兵 —— 否则
+	// 落盘值会与 cred_expires 自相矛盾，而通用自动续期路径（`auth.NeedsRefresh()` 只看
+	// `expiresAt`）对 officeace 将永不触发（积分/签到路径因为 refresh.go 的 `ensureCredential`
+	// 另行按 cred_expires 判定才没立刻坏，等于把「2 小时后失效」悄悄推到 refresh_token 到期那天）。
+	// 旧写法把这条对齐放在 `KeptCredential` 分支里，于是修复「导入能拿到凭据」之后的主路径
+	// （导入自带 access_key/cred_expires ⇒ KeptCredential=false）反而漏配 —— 正是复核指出的缺陷。
+	//
+	// 三级优先级（2026-10-17 用户实测补强；2026-10-18 独立复核再补两处）：
+	//   ① 有临时凭据 + 有 cred_expires ⇒ 取 cred_expires（唯一与「手里这批 AK/SK」真实匹配的值）；
+	//   ② 有临时凭据但**缺 cred_expires** ⇒ **不得落哨兵**：手里握着一个真实但寿命未知的
+	//      AK/SK，写 +50 年等于宣称「它永不过期」——事实相反。取一个较短的到期（见
+	//      `officeAceCredWithoutExpiryGrace`）让它尽快走一次续期去补出真实到期时刻；
+	//      （复核指出的漏洞：闸门只要求 access_key 非空而 cred_expires 可以缺失，此时
+	//       旧写法会落哨兵，面板还会宣称「到期时间已按保留凭据自己的到期对齐」——假话。
+	//       INV「有 access_key ⇒ 非哨兵」在真实写路径上曾可复现，本分支就是补它。）
+	//   ③ 无临时凭据但保留了 refresh_token ⇒ 取 `min(refresh_expire, 旧真值 expiresAt)`：
+	//      两者都是真值口径时取**更早**的，避免把真值往后推成「欠刷新窗口」
+	//      （复核 MED-3：旧写法一律取 refresh_expire，会把一个真实 2h 的 expiresAt 推到 30 天后）。
+	//   ④ 都没有（纯网关 Basic 导入）⇒ 才写远期哨兵，且**沿用导入值本身**（不再跨秒重算）。
+	hasCred := strings.TrimSpace(out.Auth.Extra["access_key"]) != ""
+	ce := parseUnixSec(out.Auth.Extra["cred_expires"])
+	re := parseUnixSec(out.Auth.Extra["refresh_expire"])
+	prevExp := prev.Auth.ExpiresAt
+	if hasCred && ce > 0 {
+		out.Auth.ExpiresAt = ce
+	} else if hasCred {
+		out.Auth.ExpiresAt = time.Now().Unix() + officeAceCredWithoutExpiryGrace
+	} else if strings.TrimSpace(out.Auth.RefreshToken) != "" && (re > 0 || (prevExp > 0 && !isFarFutureExpiry(prevExp))) {
+		out.Auth.ExpiresAt = minPositive(re, prevExp)
+	} else {
+		// 纯网关 Basic 导入（无临时凭据、也无 refresh_expire 可对齐）：哨兵是本场景的正确取值
+		// ——网关凭据确实不过期，写它可避免误触「必然失败的刷新」。
+		// 用导入值本身（而非重新算一次 now+50 年）以保证**确定性**：两者正常情况下同值，
+		// 但跨秒重算会产生 1 秒差异，让 `KeptExpiresAt` 变成偶发 true（测试会随机红）。
+		if imported.Auth.ExpiresAt > 0 {
+			out.Auth.ExpiresAt = imported.Auth.ExpiresAt
+		} else {
+			out.Auth.ExpiresAt = officeAceImportedSentinel()
+		}
+	}
+	info.KeptExpiresAt = out.Auth.ExpiresAt != imported.Auth.ExpiresAt
+	return out, info
+}
+
+// mergeOfficeAceExtra 合并 extra 袋：导入非空值覆盖旧值，导入空值/缺失一律保留旧值。
+func mergeOfficeAceExtra(prev, imported map[string]string) map[string]string {
+	if len(prev) == 0 && len(imported) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(prev)+len(imported))
+	for k, v := range prev {
+		if strings.TrimSpace(v) != "" {
+			out[k] = v
+		}
+	}
+	for k, v := range imported {
+		if strings.TrimSpace(v) != "" {
+			out[k] = v
+		}
+	}
+	return out
+}
+
+// pickNonEmpty 返回第一个非空白值（导入值优先，导入为空则回落旧值）。
+func pickNonEmpty(primary, fallback string) string {
+	if strings.TrimSpace(primary) != "" {
+		return primary
+	}
+	return fallback
+}
+
+// parseUnixSec 解析 Unix 秒字符串（空/非法返回 0）。
+func parseUnixSec(s string) int64 {
+	v, err := strconv.ParseInt(strings.TrimSpace(s), 10, 64)
+	if err != nil || v <= 0 {
+		return 0
+	}
+	return v
+}
+
+// ---------------------------------------------------------------------------
+// 远期哨兵（auth.expiresAt）——「这条凭据不会自己过期」的显式标记
+// ---------------------------------------------------------------------------
+
+// officeAceFarFutureExpiry 是导入型渠道给 `auth.expiresAt` 写的**远期哨兵值**：
+// 表示「该凭据本身不过期，不要按 expiresAt 触发刷新」。
+//
+// 取值（`time.Now().AddDate(50, 0, 0).Unix()`）刻意保留为动态表达式（见调用处），
+// 本常量只用于**识别**，不用于写入。
+//
+// 为什么需要识别（2026-10-17 实机取证，issue 现场）：
+// OfficeAce 有**两层**凭据——网关 Basic（不过期）与临时 AK/SK（约 2h）。导入只拿得到
+// 网关 Basic 时写哨兵是正确的；但同一账号随后若被 OAuth 登录或合并补上临时凭据，
+// **哨兵值必须让位给 `extra.cred_expires`**，否则 `auth.NeedsRefresh()` 恒为假，
+// 通用续期路径对该账号永不触发（实测：某账号 `expiresAt` 停在 +50 年、而临时凭据
+// 每 2 小时被 officeace 自己的 `ensureCredential` 轮换，两者长期自相矛盾）。
+//
+// 判定口径偏保守：只要**明显超出正常生命周期**（> 10 年）就视为哨兵——这样连**历史
+// 遗留**的哨兵值（含未来可能换个表达式的写法）也能被识别并纠正，而不必精确等值匹配。
+const officeAceSentinelMinSeconds = 10 * 365 * 24 * 3600
+
+// isFarFutureExpiry 判断 expiresAt 是否属于「远期哨兵」（>10 年）。0/负值不算。
+func isFarFutureExpiry(exp int64) bool {
+	if exp <= 0 {
+		return false
+	}
+	return exp-time.Now().Unix() > officeAceSentinelMinSeconds
+}
+
+// officeAceCredWithoutExpiryGrace：手里有临时凭据（access_key 非空）却**没有**
+// `extra.cred_expires` 时，给 expiresAt 取一个较短的保守值（1 小时）。
+//
+// 为什么不落哨兵：哨兵的语义是「这条凭据不会自己过期」，而网关 Basic 才是那种凭据；
+// 临时 AK/SK 约 2 小时必过期。写成哨兵会让 `NeedsRefresh()` 永不触发，等于把一个
+// 「寿命未知的真实凭据」长期当成永不过期（独立复核用 512 组合穷举 + 真实写路径样本
+// 复现过这一组合）。取 1 小时是为了**尽快触发一次续期**，由 refresh 路径把真实到期
+// （`cred_expires`）补出来——那之后本函数不再参与。
+const officeAceCredWithoutExpiryGrace = 3600
+
+// minPositive 返回两个值中**更早**的那个正数（都非正时返回 0）。
+// 用于「取更保守的到期」：宁可早刷新，也不要把真实到期往后推（欠刷新窗口）。
+func minPositive(a, b int64) int64 {
+	switch {
+	case a > 0 && b > 0:
+		if a < b {
+			return a
+		}
+		return b
+	case a > 0:
+		return a
+	default:
+		return b
+	}
+}
+
+// officeAceImportedSentinel 返回「本次导入」给 auth.expiresAt 写的远期哨兵值。
+// 与调用处同源，避免识别与写入两处各写一份表达式而漂移。
+func officeAceImportedSentinel() int64 { return time.Now().AddDate(50, 0, 0).Unix() }
+
+// authFilePath 返回渠道凭据文件路径（writeAuthFile 与「写前读旧值合并」共用同一命名规则，
+// 避免两处各拼一次路径而漂移）。
+func (a *App) authFilePath(prefix, uid string) string {
+	return filepath.Join(a.cfg.AuthDir, prefix+"-"+sanitizeUID(uid)+".json")
 }
 
 // writeAuthFile 原子写 auth 文件（tmp + rename，0600），文件名前缀即渠道 Kind。
@@ -493,7 +810,7 @@ func (a *App) writeAuthFile(prefix, uid string, doc authDoc) (string, error) {
 		return "", err
 	}
 	raw = append(raw, '\n')
-	file := filepath.Join(a.cfg.AuthDir, prefix+"-"+sanitizeUID(uid)+".json")
+	file := a.authFilePath(prefix, uid)
 	tmp := file + ".tmp"
 	if err := os.WriteFile(tmp, raw, 0o600); err != nil {
 		return "", fmt.Errorf("写入凭据失败：%w", err)
