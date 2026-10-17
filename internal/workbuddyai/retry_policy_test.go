@@ -13,10 +13,25 @@ const body14003 = `{"code":14003,"msg":"too many requests","requestId":"r1",` +
 	`"displayMsg":{"en":"Too many requests. Please retry later."},` +
 	`"displayTips":{"en":"Wait about a minute before retry, or switch to a less busy model."}}`
 
-// TestRetryPolicyAllowsRetry 判据取结构化 retry_policy.retry，不是英文文案。
+// body14003Actions 同一 14003 的上游改版形态（2026-10-17 生产日志实测）：
+// retry_policy 字段消失，可重试语义改由 actions 数组表达（含 "RETRY"）。
+const body14003Actions = `{"code":14003,"msg":"too many requests","requestId":"r1",` +
+	`"displayMsg":{"en":"Model busy. Please switch models or retry later"},` +
+	`"displayTips":{"en":"This model is currently saturated. Please switch to another model or wait a moment and retry."},` +
+	`"actions":["SWITCH_MODEL","SUBMIT_FEEDBACK","RETRY"]}`
+
+// TestRetryPolicyAllowsRetry 判据取结构化信号（retry_policy.retry 或 actions 含 RETRY），不是英文文案。
 func TestRetryPolicyAllowsRetry(t *testing.T) {
 	if !retryPolicyAllowsRetry([]byte(body14003)) {
 		t.Error("14003 带 retry_policy.retry=true，应判定为可重试")
+	}
+	if !retryPolicyAllowsRetry([]byte(body14003Actions)) {
+		t.Error("14003 actions 含 RETRY（2026-10-17 改版形态），应判定为可重试")
+	}
+	// actions 只有 SWITCH_MODEL 是「换模型」语义，不代表同请求可重发
+	switchOnly := `{"code":14003,"actions":["SWITCH_MODEL","SUBMIT_FEEDBACK"]}`
+	if retryPolicyAllowsRetry([]byte(switchOnly)) {
+		t.Error("actions 无 RETRY 不应判定为可重试")
 	}
 	// 缺 retry_policy（普通 429 / 6004 用量配额）→ 不可重试
 	noPolicy := `{"code":429,"msg":"too many requests","requestId":"r1"}`
@@ -47,6 +62,8 @@ func TestRetryDecisionMatrix(t *testing.T) {
 		wantRate bool
 	}{
 		{"14003 显式可重试", 429, body14003, nil, true, true},
+		{"14003 actions 形态可重试", 429, body14003Actions, nil, true, true},
+		{"14003 actions 只有换模型", 429, `{"code":14003,"actions":["SWITCH_MODEL"]}`, nil, false, false},
 		{"429 无 policy", 429, `{"code":429,"msg":"nope"}`, nil, false, false},
 		{"6004 用量配额", 429, `{"code":6004,"msg":"usage exceeds frequency limit"}`, nil, false, false},
 		{"502", 502, `<html>502</html>`, nil, true, false},
@@ -99,6 +116,39 @@ func TestChatStreamRetriesDeclaredRetryable429(t *testing.T) {
 	rc.Close()
 	if calls != 2 {
 		t.Fatalf("expect 2 attempts (1 x 429-retryable + 1 ok), got %d", calls)
+	}
+}
+
+// TestChatStreamRetriesActionDeclared429 actions 含 RETRY 的 429（上游改版形态）
+// 与 retry_policy.retry=true 同等待遇：请求内重试一次再定论。
+func TestChatStreamRetriesActionDeclared429(t *testing.T) {
+	withFastRateLimitBackoff(t)
+
+	var calls int
+	srv := testServer(func(w http.ResponseWriter, r *http.Request, n int) {
+		calls = n
+		if n == 1 {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusTooManyRequests)
+			_, _ = w.Write([]byte(body14003Actions))
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: [DONE]\n\n"))
+	})
+	defer srv.Close()
+
+	c := NewWithBase(srv.URL)
+	rc, status, _, err := c.ChatStream(testAuth(), []byte(`{"model":"hy3","messages":[]}`))
+	if err != nil {
+		t.Fatalf("err = %v", err)
+	}
+	if status != 200 || rc == nil {
+		t.Fatalf("want 200 after retry, got status=%d rc=%v", status, rc)
+	}
+	rc.Close()
+	if calls != 2 {
+		t.Fatalf("expect 2 attempts (1 x 429-actions-RETRY + 1 ok), got %d", calls)
 	}
 }
 

@@ -49,13 +49,15 @@ func retryableStatus(status int) bool {
 
 // retryPolicyAllowsRetry 判定上游是否在响应体里显式声明「这个错误可以重试」。
 //
-// WorkBuddyAI 网关对瞬时拥塞返回的 429 带结构化字段：
+// WorkBuddyAI 网关对瞬时拥塞返回的 429  historically 带结构化字段：
 //
 //	{"code":14003,"msg":"too many requests","retry_policy":{"retry":true},
 //	 "displayTips":{"en":"Wait about a minute before retry, or switch to a less busy model."}}
 //
-// 判据取结构化 `retry_policy.retry` 而非英文文案：`displayTips` 的措辞会随
-// 上游改版漂移（6004 与 14003 就是同语义两种措辞），而 `retry_policy` 是协议级承诺。
+// 2026-10-17 上游形态漂移：14003 不再下发 retry_policy，改为 actions 数组
+// （当晚生产实测："actions":["SWITCH_MODEL","SUBMIT_FEEDBACK","RETRY"]）。
+// 两种结构化信号任一命中即视为上游声明可重试；判据始终不取英文文案
+// （displayMsg/displayTips 措辞会随上游改版漂移，6004 与 14003 就是同语义两种措辞）。
 //
 // 为什么必须理会它：2026-10-12 生产实测，state v4 显示 14003 落到**账号级**冷却，
 // 两个账号在 18~48s 内相继中招 → 双双冷却 → 无健康账号 → 客户端拿到
@@ -69,11 +71,22 @@ func retryPolicyAllowsRetry(body []byte) bool {
 		RetryPolicy struct {
 			Retry bool `json:"retry"`
 		} `json:"retry_policy"`
+		Actions []string `json:"actions"`
 	}
 	if err := json.Unmarshal(body, &env); err != nil {
 		return false
 	}
-	return env.RetryPolicy.Retry
+	if env.RetryPolicy.Retry {
+		return true
+	}
+	// 只认 RETRY 元素：SWITCH_MODEL 单独出现是「换模型」语义，
+	// 不代表同一请求可以原样重发。
+	for _, a := range env.Actions {
+		if strings.EqualFold(strings.TrimSpace(a), "RETRY") {
+			return true
+		}
+	}
+	return false
 }
 
 // retryDecision 单点判断「这次失败是否值得重试」。
