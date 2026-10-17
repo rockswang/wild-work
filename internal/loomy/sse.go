@@ -50,14 +50,14 @@ func Stream(w http.ResponseWriter, r io.Reader, model string) (map[string]any, e
 	if loopguard.Enabled() {
 		guard = loopguard.NewDefault()
 	}
-
-	sc := newSSEScanner(r)
-	// 上游可能整段不是 SSE（HTTP 200 + 纯 JSON 业务错误体，见 streamerr.go）：
-	// 记录「是否透传过有效帧」与「被跳过的原文」，供流结束时判定。
+	// 上游可能整段不是 SSE（HTTP 200 + 纯 JSON 业务错误体）：记录「是否透传过有效帧」
+	// 与「被跳过的原文」，供流结束时兜底判定（覆盖多行信封 / 非 `{` 开头行）。
 	var (
 		sawFrame bool
 		skipped  strings.Builder
 	)
+
+	sc := newSSEScanner(r)
 	for sc.Scan() {
 		line := sc.Text()
 		payload, ok := ssePayload(line)
@@ -72,7 +72,7 @@ func Stream(w http.ResponseWriter, r io.Reader, model string) (map[string]any, e
 				}
 			}
 			// 同时留存非 SSE 原文：若整段都不是 SSE（多行信封、或错误体不满足单行判定），
-			// 由流末的统一判定兜底（R75）。上限见 streamSniffLimit。
+			// 由流末的统一判定兜底（R82）。上限见 streamSniffLimit。
 			if !sawFrame && skipped.Len() < streamSniffLimit {
 				skipped.WriteString(line)
 				skipped.WriteByte('\n')

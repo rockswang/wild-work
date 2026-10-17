@@ -95,6 +95,13 @@ func Classify(status int, body string) ErrKind {
 			return ErrSessionDead
 		}
 	}
+	// 网关层认证拦截页（APISIX/openresty 的 HTML 401）：与「上游业务码拒绝」同义，
+	// 都是 access token 被拒 ⇒ 归 ErrSessionDead 才能触发 refresh + 重试一次的自愈
+	// （不变量 19）。不识别时会落到下方 ErrClient，自愈静默失效（2026-10-17 现场）。
+	// 判据集中在 IsGatewayAuthPage（窄而确定），见 gateway.go 的取证说明。
+	if status == http.StatusUnauthorized && IsGatewayAuthPage(body) {
+		return ErrSessionDead
+	}
 	// 429 + 业务码 14018 = 账号积分耗尽（上游把「余额耗尽」也走 429 返回）：
 	// 按硬冷却弃号，等次日签到恢复。必须放在 429 兜底之前。
 	// 只认结构化业务码，不靠文案：429 body 高频带 "quota exceeded" 这类跨计费/限流
@@ -181,6 +188,19 @@ func Classify(status int, body string) ErrKind {
 	}
 	// HTTP 200 但业务 code 非 0 且含余额关键词的情况已被上面 hardMarkers 捕获。
 	return ErrNone
+}
+
+// errorFromBody 把「HTTP ≥400 + 原始响应体」统一转成带分类的 *Error。
+//
+// 网关 HTML 认证页（见 gateway.go）在这里被换成可行动文案：原始 HTML 对用户零信息量，
+// 却会被 `shortErr` 截成半截 `<html><head><title>401 Authori…` 塞进面板 toast 与日志。
+func errorFromBody(status int, body string) *Error {
+	kind := Classify(status, body)
+	msg := truncate(body, 200)
+	if kind == ErrSessionDead && IsGatewayAuthPage(body) {
+		msg = GatewayAuthHint
+	}
+	return &Error{Kind: kind, Status: status, Msg: msg}
 }
 
 // apiEnvelope 上游统一信封。
@@ -310,8 +330,7 @@ func (c *Client) doJSONWith(client *http.Client, req *http.Request) (json.RawMes
 	defer resp.Body.Close()
 	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if resp.StatusCode >= 400 {
-		kind := Classify(resp.StatusCode, string(raw))
-		return nil, &Error{Kind: kind, Status: resp.StatusCode, Msg: truncate(string(raw), 200)}
+		return nil, errorFromBody(resp.StatusCode, string(raw))
 	}
 	var env apiEnvelope
 	if err := json.Unmarshal(raw, &env); err != nil {
@@ -458,7 +477,10 @@ func (c *Client) FetchModels(a *auth.Auth) ([]ModelInfo, error) {
 	defer resp.Body.Close()
 	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("models api status %d: %s", resp.StatusCode, truncate(string(raw), 120))
+		// 必须返回**类型化**错误（而非裸 fmt.Errorf）：401 时 handler/app 靠
+		// errors.As 取 ErrSessionDead 才能走「refresh + 重试」，模型面才不会
+		// 卡在 5min 负缓存里反复静默失败（不变量 19 的同族缺口）。
+		return nil, errorFromBody(resp.StatusCode, string(raw))
 	}
 	var env struct {
 		Code int `json:"code"`
@@ -765,7 +787,8 @@ func (c *Client) FetchModelPricing(a *auth.Auth) ([]provider.ModelPricing, error
 	defer resp.Body.Close()
 	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("pricing api status %d: %s", resp.StatusCode, truncate(string(raw), 120))
+		// 同上：类型化错误，401 才能被 refreshIfSessionDead 接住并自愈。
+		return nil, errorFromBody(resp.StatusCode, string(raw))
 	}
 	var env struct {
 		Code int `json:"code"`

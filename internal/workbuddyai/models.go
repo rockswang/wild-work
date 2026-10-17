@@ -14,6 +14,7 @@ import (
 
 	"wild-work/internal/auth"
 	"wild-work/internal/provider"
+	"wild-work/internal/upstream"
 )
 
 // catalogModel 目录原始模型条目。
@@ -123,7 +124,9 @@ func (c *Client) fetchCatalog(a *auth.Auth) ([]catalogModel, error) {
 	defer resp.Body.Close()
 	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("models api status %d: %s", resp.StatusCode, truncate(string(raw), 120))
+		// 类型化错误：401（网关 HTML 拦截页或业务码）归 ErrSessionDead，
+		// 上层才能 refresh + 重试（不变量 19）；裸 fmt.Errorf 会让自愈失效。
+		return nil, errorFromBody(resp.StatusCode, string(raw))
 	}
 	var env catalogResp
 	if err := json.Unmarshal(raw, &env); err != nil {
@@ -224,7 +227,8 @@ func (c *Client) fetchV3Catalog(a *auth.Auth) ([]catalogModel, error) {
 	defer resp.Body.Close()
 	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("v3 config status %d: %s", resp.StatusCode, truncate(string(raw), 120))
+		// 同上：类型化错误，保证 401 能触发自愈（不变量 19）。
+		return nil, errorFromBody(resp.StatusCode, string(raw))
 	}
 	var env catalogResp
 	if err := json.Unmarshal(raw, &env); err != nil {
@@ -465,6 +469,12 @@ func Classify(status int, body string) provider.ErrKind {
 		if strings.Contains(body, m) {
 			return provider.ErrSessionDead
 		}
+	}
+	// 网关层认证拦截页（APISIX/openresty 的 HTML 401）：语义与业务码拒绝相同，
+	// 都是 access token 被拒 ⇒ ErrSessionDead 才能触发 refresh + 重试。
+	// 判据复用国内版的 IsGatewayAuthPage（窄而确定，见 upstream/gateway.go）。
+	if status == http.StatusUnauthorized && upstream.IsGatewayAuthPage(body) {
+		return provider.ErrSessionDead
 	}
 	// 429 优先于 hardRule：限流 body 高频带 "quota exceeded"。
 	if status == http.StatusTooManyRequests {

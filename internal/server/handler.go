@@ -332,6 +332,31 @@ func (h *Handler) evictStickyLocked() {
 	}
 }
 
+// recoverSession 遇上游 ErrSessionDead 时先试一次 token refresh（不变量 19）。
+//
+// 为什么不能在 handler 里直接 Disable：本地 expiresAt 与上游真实状态可能不同步——
+// 同一账号在另一实例/官方客户端刷新过（refresh token 轮换）但本进程未落盘时，
+// 本地看起来完全健康，上游却已拒绝旧 access token。此时 refresh 一步就能救回，
+// 直接 Disable 会把一个完全正常的账号永久停掉（需人工重登）。
+// 只有 refresh 也失败（会话真被吊销，如 invalid_grant）才回到 Disable 路径。
+//
+// 成功必须 SaveAtomic：refresh token 会轮换，不落盘则下次启动重回死锁（不变量 20）。
+func (h *Handler) recoverSession(rt *Runtime, acct *auth.Auth, respBody []byte) bool {
+	if acct == nil || acct.RefreshTokenValue() == "" {
+		return false
+	}
+	log.Printf("session dead, refreshing platform=%s uid=%s body=%s", rt.Kind, acct.UID, truncateBody(respBody))
+	if err := rt.Upstream.RefreshToken(acct); err != nil {
+		log.Printf("session dead refresh failed platform=%s uid=%s err=%v", rt.Kind, acct.UID, err)
+		return false
+	}
+	if serr := acct.SaveAtomic(); serr != nil {
+		log.Printf("session dead refresh save failed platform=%s uid=%s err=%v", rt.Kind, acct.UID, serr)
+	}
+	log.Printf("session dead recovered platform=%s uid=%s expires_at=%d", rt.Kind, acct.UID, acct.ExpiresAt)
+	return true
+}
+
 // stickySuccess 粘性路由成功：递增请求计数并刷新最近使用时间。
 func (h *Handler) stickySuccess(rt *Runtime, model string) {
 	h.stickyMu.Lock()
@@ -952,8 +977,18 @@ func (h *Handler) serveRotation(
 					log.Printf("account cooldown platform=%s uid=%s model=%s", rt.Kind, acct.UID, model)
 				}
 			case provider.ErrSessionDead:
-				// 登录态失效不再混入「停用」：标记 SessionDead（挑号跳过 + 面板徽标 +
-				// 重新登录入口），与用户手动停用（Disable）分离（#134）。
+				// 先试一次 refresh：本地 token 可能只是在别处被轮换（不变量 19）。
+				// 成功 ⇒ 解除本轮的「已尝试」标记并重试本号（单号渠道若不清标记，
+				// pick 会直接空手而归 → 白变 503），且不施加任何标记。
+				// 失败 ⇒ 上游已吊销会话（invalid_grant 之类），才落 SessionDead 标记
+				// （R76：标记而非 Disable，与用户手动停用分离、重登后按 mtime 自动清除）。
+				if h.recoverSession(rt, acct, respBody) {
+					delete(tried, acct.UID)
+					lastErr = fmt.Errorf("upstream %s (http %d): 已刷新 token，重试本号", kind, status)
+					lastStatus = 0 // 不再透传这条已自愈的响应
+					lastBody = nil
+					continue
+				}
 				rt.Pool.MarkSessionDead(acct.UID, truncateBody(respBody))
 				log.Printf("session dead marked platform=%s uid=%s", rt.Kind, acct.UID)
 			case provider.ErrNotFound:

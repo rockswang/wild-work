@@ -2506,3 +2506,48 @@ WorkBuddy 国内版新增 `CheckinReporter` 实现：先只读查 `checkin-activ
 | [@lzmuhioin](https://github.com/lzmuhioin) | issue #142 局域网复制链接失效；PR #143 评审给出 `noopener` 返回值实测 |
 | [@yanghuan](https://github.com/yanghuan) | issue #152 officeace 网关 base 前缀（附完整实测矩阵）；issue #153 授权页文案 |
 | [@jianzhangg](https://github.com/jianzhangg) | v2.8.2 硬冷却截到每日发奖窗口 + 面板 24h 制 |
+# wild-work v2.9.1 — 网关 HTML 401 识别 + 对话路径 401 先自愈再落标记（R78）
+
+## 🔐 「刷新积分 成功 30 / 失败 2」的根因：网关 HTML 401 被当成了普通客户端错误
+
+**现象**：两个 WorkBuddyCN 账号自某刻起每次刷新积分都失败，日志只有
+`err=upstream client (http 401): <html><head><title>401 Authorization Required</title>…`；
+同一时段模型列表与费率也 401，面板数据长期陈旧。
+
+**根因**：上游 APISIX 网关在**认证之前**拦下请求，返回的是 HTML 页而不是业务信封
+（`{"code":…,"msg":…}`）。错误分类只认业务码 `12153`，于是这种 401 落到「其它 4xx」
+= `ErrClient` ⇒ 三条自愈链全部静默失效：
+
+| 路径 | 修复前 | 修复后 |
+|---|---|---|
+| 积分/明细（`refreshIfSessionDead`） | 不触发（分类不对） | 401 → refresh + 重试一次 |
+| 目录/费率（`FetchModels`/`FetchModelPricing`） | 返回裸 `fmt.Errorf`，连分类都没有 | 类型化错误 → 同上自愈 |
+| 对话（handler） | 一遇 401 直接 `pool.Disable` | **先试 refresh**，成功则重试本号不施加惩罚；失败才落 R76 的 SessionDead 标记 |
+
+**独立取证**（各账号只发 1 次账单请求 + ≤1 次 refresh）：token 的 JWT 签名用
+`codebuddy.cn` 的 JWKS 验签通过、`exp` 仍在未来，但账单/目录/对话一律回网关 401
+⇒ 服务端判死会话；refresh 返回 `code 12153 / invalid_grant: Session doesn't have
+required client` ⇒ 会话已被吊销，重试永远无效。
+
+## 🧭 面板不再只报「失败 2」
+
+- 失败原因翻成可行动文案：`需重新登录（refresh 也失败：…）`，不再把整段 openresty
+  HTML 截成半截标签塞给用户。
+- 「刷新积分」toast 直接点名失败账号与原因（最多列 2 个 + 超出计数）。
+- 账号自愈成功后自动清除该提示。
+
+## 判据边界（防误伤）
+
+- 只有 `401 + 以 `<` 开头 + 含 `<html` + 含 `401 Authorization Required`` 才认；
+  业务 JSON、JSON 里嵌 HTML 片段、纯文本一律不认。
+- **403 的网关页不归 session dead**（403 有独立语义，误判会让账号被误标失效）。
+- 判据宁可漏判（退回 `ErrClient`，行为同修复前）也不误判——误判会让账号被误标失效
+  （需重新登录才解除）。
+
+## 验证
+
+- `go build ./... && go vet ./... && go test ./...` 全绿；`scripts/ui-static-check.mjs` 通过。
+- 新增回归：`internal/upstream/gateway_test.go`、`internal/workbuddyai/gateway_test.go`、
+  `internal/server/session_dead_recover_test.go`、`internal/app/creditrefresh_test.go`（追加）。
+- 实盘探针 `internal/upstream/live_gateway401_test.go`（`-tags live`，每账号 1 次账单 + ≤1 次
+  refresh）：吊销号正确报 `session_dead` + 可行动文案，健康号正常成功（无误判）。

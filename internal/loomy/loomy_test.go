@@ -402,6 +402,29 @@ func (r *errAfterReader) Read(p []byte) (int, error) {
 	return n, nil
 }
 
+// TestStreamRecognizesMultilineBusinessEnvelope 守门流末兜底：
+// 上游用**多行** JSON（或错误体不以 `{` 开头）表达业务失败时，单行判定命中不了，
+// 由「整段无有效 SSE 帧」的统一判定兜底 —— 同样必须写错误帧、不补 [DONE]、上抛语义化错误。
+func TestStreamRecognizesMultilineBusinessEnvelope(t *testing.T) {
+	body := "{\n  \"code\": \"100002\",\n  \"desc\": \"登录已失效，请重新登录\"\n}"
+	rec := httptest.NewRecorder()
+	_, err := Stream(rec, strings.NewReader(body), "loomy/glm-5.2")
+	if err == nil {
+		t.Fatal("多行业务信封必须上抛错误，实际 nil（客户端会看到空回答）")
+	}
+	var sec provider.StreamErrorClassifier
+	if !errors.As(err, &sec) || sec.Kind() != provider.ErrSessionDead {
+		t.Fatalf("err = %v，want StreamErrorClassifier{ErrSessionDead}", err)
+	}
+	out := rec.Body.String()
+	if !strings.Contains(out, "session_dead") {
+		t.Errorf("应向客户端写出错误帧，实际 body=%q", out)
+	}
+	if strings.Contains(out, "[DONE]") {
+		t.Error("失败时不得补 [DONE]（R36：不伪装正常收尾）")
+	}
+}
+
 func TestTraceparentShape(t *testing.T) {
 	tp := traceparent()
 	parts := strings.Split(tp, "-")

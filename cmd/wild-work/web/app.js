@@ -880,11 +880,32 @@ async function refreshAll() {
   try {
     const r = await api("/api/account/refresh_all", {});
     detailCache = {}; // 顶层已全部更新，全部明细缓存作废
-    toast(r.busy ? "已有刷新任务进行中" : `积分刷新完成：成功 ${r.ok} / 失败 ${r.failed}`);
+    // 无积分概念的渠道（oczen/cline/自定义）后端不参与统计，无需前端再补偿数
+    toast(r.busy ? "已有刷新任务进行中"
+      : r.failed > 0 ? `积分刷新完成：成功 ${r.ok} / 失败 ${r.failed}${failedDetail(r)}`
+      : `积分刷新完成：全部成功（${r.ok} 个）`);
     loadState();
   } catch (e) { toast(e.message); } finally {
     $("btnRefreshAll").disabled = false;
   }
+}
+
+// failedDetail 把失败账号拼成 toast 后缀：只报「失败 N」时用户无从知道
+// 是哪几个号、为什么失败（典型：两个号的 refresh token 被上游吊销，
+// 重试永远无效，必须重新登录）。取前 2 个 + 超出计数，避免 toast 过长。
+function failedDetail(r) {
+  const names = [];
+  for (const [ch, ps] of Object.entries(r.platforms || {})) {
+    for (const a of ps.accounts || []) {
+      if (a.ok) continue;
+      const who = (state.accounts || []).find((x) => x.uid === a.uid);
+      const label = `${chLabel(ch)}·${who ? (who.nickname || shortUid(a.uid)) : shortUid(a.uid)}`;
+      names.push({ label, msg: a.msg || "未知错误" });
+    }
+  }
+  if (!names.length) return "";
+  const head = names.slice(0, 2).map((n) => `${n.label}（${n.msg}）`).join("；");
+  return `：${head}${names.length > 2 ? ` 等 ${names.length} 个` : ""}`;
 }
 
 // ---------- 登录 ----------

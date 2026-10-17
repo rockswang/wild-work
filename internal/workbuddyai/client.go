@@ -20,6 +20,7 @@ import (
 
 	"wild-work/internal/auth"
 	"wild-work/internal/provider"
+	"wild-work/internal/upstream"
 )
 
 // Client 国际版上游 HTTP 客户端。Base 可覆盖以便测试。
@@ -271,6 +272,20 @@ func refreshHeaders(req *http.Request, a *auth.Auth) {
 // 信封与错误
 // ---------------------------------------------------------------------------
 
+// errorFromBody 把「HTTP ≥400 + 原始响应体」统一转成带分类的 *provider.Error。
+//
+// 网关 HTML 认证页在这里被换成可行动文案：原始 HTML 对用户零信息量，
+// 却会被截成半截 `<html><head><title>401 Authori…` 塞进面板与日志。
+// 与国内版 upstream.errorFromBody 同口径（两渠道 Classify 语义必须一致）。
+func errorFromBody(status int, body string) *provider.Error {
+	kind := Classify(status, body)
+	msg := truncate(body, 200)
+	if kind == provider.ErrSessionDead && upstream.IsGatewayAuthPage(body) {
+		msg = upstream.GatewayAuthHint
+	}
+	return &provider.Error{Kind: kind, Status: status, Msg: msg}
+}
+
 // apiEnvelope 上游统一信封。
 type apiEnvelope struct {
 	Code int             `json:"code"`
@@ -287,7 +302,7 @@ func (c *Client) doJSON(req *http.Request) (json.RawMessage, error) {
 	defer resp.Body.Close()
 	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if resp.StatusCode >= 400 {
-		return nil, &provider.Error{Kind: Classify(resp.StatusCode, string(raw)), Status: resp.StatusCode, Msg: truncate(string(raw), 200)}
+		return nil, errorFromBody(resp.StatusCode, string(raw))
 	}
 	var env apiEnvelope
 	if err := json.Unmarshal(raw, &env); err != nil {

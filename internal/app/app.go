@@ -59,7 +59,7 @@ import (
 )
 
 // Version 版本号。
-const Version = "2.9.0"
+const Version = "2.9.1"
 
 const (
 	loginTimeout   = 5 * time.Minute
@@ -2053,7 +2053,15 @@ func (a *App) refreshIfSessionDead(rt *Runtime, au *auth.Auth, err error) bool {
 		return nil
 	})
 	if rerr != nil {
+		// 把刷新失败的原因带到上层：此前只打日志，面板只显示上游 401 原文，
+		// 用户无法区分「网络抖一下重试即可」与「会话被吊销必须重新登录」。
+		// 典型吊销形态（2026-10-17 实测）：
+		//   code 12153 / invalid_grant: Session doesn't have required client
+		// 这种重试永远不会成功，必须明说。
 		log.Printf("session dead refresh failed platform=%s uid=%s err=%v", rt.Kind, au.UID, rerr)
+		// 落 R76 的 SessionDead 标记（不是 Disable）：挑号跳过 + 面板「需重新登录」徽标 +
+		// 重登后按 auth 文件 mtime 自动清除。原因用提炼过的短句，面板直接可读。
+		rt.Pool.MarkSessionDead(au.UID, sessionDeadCause(rerr))
 		return false
 	}
 	return true
@@ -2245,8 +2253,13 @@ func (a *App) RefreshCredits(uid string) (int64, error) {
 	usable, expiring, unusable, err := a.creditTotals(rt, au)
 	if err != nil {
 		log.Printf("credits refresh failed platform=%s uid=%s err=%v", rt.Kind, uid, err)
+		// refresh 也失败时把可行动原因带回面板（否则前端只能看到上游 401 原文）。
+		if st, ok := rt.Pool.Status(uid); ok && st.SessionDead && st.SessionDeadReason != "" {
+			return 0, fmt.Errorf("需重新登录（refresh 也失败：%s）", st.SessionDeadReason)
+		}
 		return 0, err
 	}
+	rt.Pool.ClearSessionDead(uid)
 	log.Printf("credits refresh success platform=%s uid=%s remain=%d expiring=%d unusable=%d", rt.Kind, uid, usable, expiring, unusable)
 	return usable, nil
 }
@@ -2296,9 +2309,19 @@ func (a *App) RefreshAll() RefreshSummary {
 			if usable, _, _, err := a.creditTotals(rt, au); err == nil {
 				ps.OK++
 				ps.Accounts = append(ps.Accounts, AccountRefresh{UID: st.UID, OK: true, Remain: usable})
+				rt.Pool.ClearSessionDead(st.UID)
 			} else {
 				ps.Failed++
-				ps.Accounts = append(ps.Accounts, AccountRefresh{UID: st.UID, OK: false, Msg: shortErr(err)})
+				msg := shortErr(err)
+				// refresh 也失败（会话被吊销）：给出可行动文案，而不是上游 HTML/401 原文。
+				// 面板 toast 只需一行就能告诉用户「该重登了」而不是「再点一次刷新」。
+				//
+				// 必须重新读一次状态：st 是循环开始时的快照，而 SessionDead 标记是
+				// 本次刷新失败之后才落的（读快照会恒 miss，文案退化回上游原文）。
+				if cur, ok := rt.Pool.Status(st.UID); ok && cur.SessionDead && cur.SessionDeadReason != "" {
+					msg = "需重新登录（refresh 也失败：" + cur.SessionDeadReason + "）"
+				}
+				ps.Accounts = append(ps.Accounts, AccountRefresh{UID: st.UID, OK: false, Msg: msg})
 				log.Printf("credits refresh failed platform=%s uid=%s err=%v", rt.Kind, st.UID, err)
 			}
 		}
@@ -4284,6 +4307,43 @@ func shortUID(uid string) string {
 		return uid
 	}
 	return uid[:10] + "…"
+}
+
+// sessionDeadCause 把上游 refresh 失败原文提炼成一句人话。
+//
+// 为什么要提炼：上游回的是整包 JSON（`{"code":12153,"msg":"12153:refresh token is
+// invalid","requestId":"…"}`），直接塞进 toast 会被 shortErr 截成半截，用户只能看到
+// `refresh 也失败：upstream session_dead (http 401): {"code":12153,"msg":"12153:refresh to…`。
+// 这里只取 `msg` 字段（无则用分类名），并去掉上游重复的 `12153:` 前缀。
+func sessionDeadCause(err error) string {
+	if err == nil {
+		return ""
+	}
+	var ue *provider.Error
+	if errors.As(err, &ue) {
+		if i := strings.Index(ue.Msg, `{"code"`); i >= 0 {
+			var env struct {
+				Code int    `json:"code"`
+				Msg  string `json:"msg"`
+			}
+			if json.Unmarshal([]byte(ue.Msg[i:]), &env) == nil && env.Msg != "" {
+				return strings.TrimSpace(stripCodePrefix(env.Msg, env.Code))
+			}
+		}
+		if ue.Msg != "" {
+			return shortErr(errors.New(ue.Msg))
+		}
+	}
+	return shortErr(err)
+}
+
+// stripCodePrefix 去掉上游在 msg 里重复的业务码前缀（`12153:refresh token is invalid`）。
+func stripCodePrefix(msg string, code int) string {
+	if code <= 0 {
+		return msg
+	}
+	p := strconv.Itoa(code) + ":"
+	return strings.TrimSpace(strings.TrimPrefix(msg, p))
 }
 
 func shortErr(err error) string {
