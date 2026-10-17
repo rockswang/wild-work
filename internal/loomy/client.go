@@ -534,7 +534,16 @@ func parsePoints(rec pointsRecord) (int64, []provider.ResourceItem) {
 		items = append(items, provider.ResourceItem{Name: "积分", Total: *base, Remain: *base, Usable: true})
 	}
 	if daily != nil {
-		items = append(items, provider.ResourceItem{Name: "每日积分", Total: *daily, Remain: *daily, Usable: true})
+		// 每日池「当日有效」：上游只下发数值、不下发到期时间，按渠道规则静态补今天。
+		// ExpiringWithin 判定「到期日零点 < now+horizon」，今天到期必然计入临期；
+		// 前端「有效期」列与 ledger 差分同用 YYYY-MM-DD 粒度（UTC+8 墙钟）。
+		items = append(items, provider.ResourceItem{
+			Name:     "每日积分",
+			Total:    *daily,
+			Remain:   *daily,
+			Usable:   true,
+			ExpireAt: provider.ExpireDateToday(),
+		})
 	}
 	if v := rec.Data.AvailableBalance; v != nil {
 		return *v, items

@@ -584,6 +584,15 @@ func Summarize(items []ResourceItem) (usable, unusable int64) {
 // expireLoc 各渠道 ExpireAt 的统一墙钟口径（见各渠道 softRateResetLoc，固定 UTC+8）。
 var expireLoc = time.FixedZone("UTC+8", 8*60*60)
 
+// ExpireDateToday 返回 UTC+8 墙钟下的今天日期（YYYY-MM-DD）。
+//
+// 供渠道为「当日有效」类额度（如每日发放池）填 ExpireAt —— 这类额度上游只下发数值、
+// 不下发到期时间，但语义上当天结束即作废。统一走本函数可保证与 ExpiringWithin、
+// 前端「有效期」列、ledger 差分共用同一日期粒度与时区，避免各渠道各自算。
+func ExpireDateToday() string {
+	return time.Now().In(expireLoc).Format("2006-01-02")
+}
+
 // ExpiringWithin 统计 horizon 时长内到期的**可消耗**积分小计（临期额度）。
 // 仅累计 Usable=true 且 ExpireAt 非空的条目——不可用池本工具消耗不到，
 // 临期与否不影响路由决策，混入会虚高临期值。
