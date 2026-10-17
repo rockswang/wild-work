@@ -1025,6 +1025,40 @@ body {
 .badge.officeace { background: #cf0a2c; }
 .fees .ch-header.officeace td { color: #cf0a2c; }
 
+/* kilo：Kilo AI 免费池（深青绿；同为免密渠道，需与 oczen 的灰蓝区分开） */
+.badge.kilo { background: #0f766e; }
+.fees .ch-header.kilo td { color: #0f766e; }
+
+/* minimax：MiniMax Code（紫，与既有紫/青系渠道区分） */
+.btn.primary.alt.minimax { background: #7c3aed; border-color: #7c3aed; }
+.btn.primary.alt.minimax:hover { background: #6d28d9; }
+.badge.minimax { background: #7c3aed; }
+.fees .ch-header.minimax td { color: #7c3aed; }
+
+/* lobsterai：LobsterAI（有道龙虾，橙；与 officeace 的华为红区分开） */
+.btn.primary.alt.lobsterai { background: #ea580c; border-color: #ea580c; }
+.btn.primary.alt.lobsterai:hover { background: #c2410c; }
+.badge.lobsterai { background: #ea580c; }
+.fees .ch-header.lobsterai td { color: #ea580c; }
+
+/* zcode：ZCode（智谱，青蓝；与 glm 的色区分开） */
+.btn.primary.alt.zcode { background: #0891b2; border-color: #0891b2; }
+.btn.primary.alt.zcode:hover { background: #0e7490; }
+.badge.zcode { background: #0891b2; }
+.fees .ch-header.zcode td { color: #0891b2; }
+
+/* gemini：Gemini（Google，蓝） */
+.btn.primary.alt.gemini { background: #2563eb; border-color: #2563eb; }
+.btn.primary.alt.gemini:hover { background: #1d4ed8; }
+.badge.gemini { background: #2563eb; }
+.fees .ch-header.gemini td { color: #2563eb; }
+
+/* codearts：CodeArts（华为云，玫红；与 officeace 的华为红区分开） */
+.btn.primary.alt.codearts { background: #db2777; border-color: #db2777; }
+.btn.primary.alt.codearts:hover { background: #be185d; }
+.badge.codearts { background: #db2777; }
+.fees .ch-header.codearts td { color: #db2777; }
+
 /* ==========================================================================
    响应式适配（手机/平板竖屏）
    —— 原实现只有「卡片改单列 / 使用卡 2 列」两条窄屏规则，其余区块在手机竖屏

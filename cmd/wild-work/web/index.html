@@ -53,9 +53,10 @@
         </div>
         <!-- 中间弹性空白由 flex:1 撑开 -->
         <div class="pa-spacer"></div>
-        <!-- 右组：渠道添加三列 grid，整体靠右；保持两行，第4列留白（体验渠道不占主位） -->
+        <!-- 右组：渠道添加四列 grid，整体靠右；第4列在行2留白（体验渠道不占主位） -->
         <!-- 布局：行1 = WorkBuddyCN | QoderCN | TraeWork | 智谱清言(体验)；行2 = WorkBuddyAI | QoderCOM | 千问办公 | 留空
-             行3 = 商汤小浣熊 | Loomy | MonkeyCode | Cline；行4 = OfficeAce -->
+             行3 = 商汤小浣熊 | Loomy | MonkeyCode | Cline；行4 = OfficeAce | MiniMax | LobsterAI | ZCode
+             行5 = Gemini | CodeArts（Kilo 免密免费池：无账号可加，启动时自动注入） -->
         <!-- 旧 Qoder 渠道已下线（代码保留，仅删界面入口） -->
         <div class="pa-group pa-right">
           <button class="btn primary" id="btnAddWB" style="grid-column:1;grid-row:1">＋ WorkBuddyCN</button>
@@ -70,6 +71,11 @@
           <button class="btn primary alt monkeycode" id="btnAddMonkeyCode" style="grid-column:3;grid-row:3">＋ MonkeyCode</button>
           <button class="btn primary alt cline" id="btnAddCline" style="grid-column:4;grid-row:3" title="免费池渠道：粘贴官方 API Key，须为多个独立账号各自的 Key">＋ Cline</button>
           <button class="btn primary alt officeace" id="btnAddOfficeAce" style="grid-column:1;grid-row:4" title="华为云果办：从本机 OfficeAce 客户端导入或自助 OAuth 登录">＋ OfficeAce</button>
+          <button class="btn primary alt minimax" id="btnAddMiniMax" style="grid-column:2;grid-row:4" title="MiniMax Code（中国版）：设备码授权登录，支持多账号">＋ MiniMax</button>
+          <button class="btn primary alt lobsterai" id="btnAddLobsterAI" style="grid-column:3;grid-row:4" title="LobsterAI（有道龙虾）：本机回调授权登录，支持多账号">＋ LobsterAI</button>
+          <button class="btn primary alt zcode" id="btnAddZCode" style="grid-column:4;grid-row:4" title="ZCode（智谱）：设备授权登录；积分领取依赖网页验证码，本工具不自动领取">＋ ZCode</button>
+          <button class="btn primary alt gemini" id="btnAddGemini" style="grid-column:1;grid-row:5" title="Gemini（Google Code Assist）：本机回调授权登录，支持多账号">＋ Gemini</button>
+          <button class="btn primary alt codearts" id="btnAddCodeArts" style="grid-column:2;grid-row:5" title="CodeArts（华为云）：PKCE 授权登录，支持多账号；免费额度按 UTC+8 自然日重置">＋ CodeArts</button>
         </div>
       </div>
     </div>
@@ -136,6 +142,14 @@
     <div class="modal-title" id="lcTitle">添加账号</div>
     <div class="modal-body">
       <p id="lcMsg">点击下方按钮将打开浏览器窗口，请按照指示正常登录，登录成功后关闭浏览器窗口即可。</p>
+      <!-- 账号标识输入行：只对「上游不提供稳定身份字段」的渠道显示（当前是 CodeArts）。
+           留空 = 覆盖该渠道已有账号；填写 = 作为独立账号并存。默认隐藏，由 promptLogin 控制显隐。 -->
+      <div class="hidden" id="lcLabelRow" style="margin-top:10px">
+        <div id="lcLabelHint" style="font-size:12px;margin-bottom:4px;opacity:.8">账号标识（可选）</div>
+        <input type="text" id="lcAccountLabel" maxlength="32" autocomplete="off"
+               style="width:100%;box-sizing:border-box;padding:6px 8px"
+               placeholder="留空 = 覆盖已有账号；填写 = 作为独立账号新增">
+      </div>
     </div>
     <div class="modal-actions">
       <button class="btn small" id="btnLoginConfirmCancel">取消</button>

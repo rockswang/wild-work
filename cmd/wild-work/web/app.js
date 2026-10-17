@@ -400,8 +400,8 @@ function renderTopbar() {
 }
 
 // 渠道显示名与 CSS 短类名（后端 group / 费率 channel 均为 provider.Kind）。
-const CH_LABEL = { workbuddy: "WorkBuddyCN", workbuddyai: "WorkBuddyAI", traework: "TraeWork", traecode: "TraeCode", qoder: "Qoder", qodercn: "QoderCN", qodercom: "QoderCOM", qwenwork: "千问办公", glm: "智谱清言", raccoon: "商汤小浣熊", loomy: "Loomy", monkeycode: "MonkeyCode", oczen: "OpenCodeZen", cline: "Cline", officeace: "OfficeAce" };
-const CH_CLASS = { workbuddy: "wb", workbuddyai: "wbai", traework: "trae", traecode: "traecode", qoder: "qoder", qodercn: "qodercn", qodercom: "qodercom", qwenwork: "qwenwork", glm: "glm", raccoon: "raccoon", loomy: "loomy", monkeycode: "monkeycode", oczen: "oczen", cline: "cline", officeace: "officeace" };
+const CH_LABEL = { workbuddy: "WorkBuddyCN", workbuddyai: "WorkBuddyAI", traework: "TraeWork", traecode: "TraeCode", qoder: "Qoder", qodercn: "QoderCN", qodercom: "QoderCOM", qwenwork: "千问办公", glm: "智谱清言", raccoon: "商汤小浣熊", loomy: "Loomy", monkeycode: "MonkeyCode", oczen: "OpenCodeZen", kilo: "Kilo", minimax: "MiniMax", lobsterai: "LobsterAI", zcode: "ZCode", gemini: "Gemini", codearts: "CodeArts", cline: "Cline", officeace: "OfficeAce" };
+const CH_CLASS = { workbuddy: "wb", workbuddyai: "wbai", traework: "trae", traecode: "traecode", qoder: "qoder", qodercn: "qodercn", qodercom: "qodercom", qwenwork: "qwenwork", glm: "glm", raccoon: "raccoon", loomy: "loomy", monkeycode: "monkeycode", oczen: "oczen", kilo: "kilo", minimax: "minimax", lobsterai: "lobsterai", zcode: "zcode", gemini: "gemini", codearts: "codearts", cline: "cline", officeace: "officeace" };
 const chLabel = (k) => CH_LABEL[k] || "WorkBuddy";
 const chClass = (k) => CH_CLASS[k] || "wb";
 // chNameOf 数据驱动的渠道名（用量面板 / 流水 / 图表）：命中显示名则用显示名，
@@ -451,10 +451,10 @@ const hasWebLogin = (ch) => WEB_LOGIN_CHANNELS.has(ch);
 const NO_CHECKIN_TAG = { workbuddyai: "自动领日活奖励", oczen: "不支持", cline: "无签到" };
 const noCheckinText = (g) => NO_CHECKIN_TAG[g] || "无签到";
 // 无积分概念的渠道：积分区域显示「不适用」，并隐藏刷新积分/明细入口。
-// 内建名单只有 oczen（匿名通道）与 cline（官方无余额端点，UserResource 恒 0）；
+// 内建名单：oczen / kilo（免密免费池，无账号与余额端点）、cline（官方无余额端点，UserResource 恒 0）；
 // 自定义渠道（R66）同样无积分，但渠道名是用户配置的、运行期可增删，
 // 故运行时以后端下发的 custom_channels 动态判定（isCustomGroup）。
-const NO_CREDITS_BUILTIN = new Set(["oczen", "cline"]);
+const NO_CREDITS_BUILTIN = new Set(["oczen", "kilo", "cline"]);
 
 // creditsText 账号卡片的积分文案。
 // 拆成「可用 / 不可用 / 临期」三个数字：渠道（如 TraeWork）会下发官方客户端专用的
@@ -470,7 +470,10 @@ function creditsText(a) {
   if (a.credits_stale) {
     return `<span class="credit-stale" title="余额口径已过期（旧版本状态文件），正在自动刷新…">待刷新</span>`;
   }
-  let html = `<span class="credit-num">${a.credits}</span><span>可用积分</span>`;
+  // 计量单位由后端下发：ZCode 等渠道的额度是 **token 口径**（credits_unit="token"），
+  // 混进「积分」文案会让人把它当余额看（用户 2026-10-17 的要求：Token 与积分分开显示）。
+  const unit = a.credits_unit === "token" ? "Token" : "积分";
+  let html = `<span class="credit-num">${a.credits}</span><span>可用${unit}</span>`;
   if ((a.expiring_credits || 0) > 0) {
     html += `<span class="credit-expiring"> (临期${a.expiring_credits})</span>`;
   }
@@ -490,7 +493,7 @@ function modelCoolingTag(a) {
 }
 
 // 渠道汇总固定顺序（与添加按钮布局一致；traecode 是别名池不单独出现，qoder 下线仅存量兜底）
-const CH_SUMMARY_ORDER = ["workbuddy", "workbuddyai", "traework", "qodercn", "qodercom", "qwenwork", "glm", "cline", "officeace", "oczen", "qoder"];
+const CH_SUMMARY_ORDER = ["workbuddy", "workbuddyai", "traework", "qodercn", "qodercom", "qwenwork", "glm", "minimax", "lobsterai", "zcode", "gemini", "codearts", "cline", "officeace", "kilo", "oczen", "qoder"];
 
 // renderSummary 渠道积分汇总条：每渠道一行「可用总积分 / 临期」，末尾合计。
 // 数据全部来自 state.accounts（pool 实时值），与账号卡片同源；
@@ -899,11 +902,23 @@ const NO_CHECKIN_LOGIN_HINT = {
   glm: "（登录后请按下方指引复制 refresh_token 粘贴回来）",
   cline: "（无需登录：在 app.cline.bot 注册账号，Account / API Keys → Create API Key 后粘贴即可；Key 不过期也不轮换）",
   officeace: "（凭据来自本机已登录的 OfficeAce 客户端；每日签到的临时凭据约 2 小时有效，本工具会自动续期）",
+  minimax: "（设备码授权：点「浏览器登录」后在新页面确认授权，本工具会自动轮询直到完成；可重复添加多个账号）",
+  lobsterai: "（本机回调授权：点「浏览器登录」后在有道页面完成登录，浏览器会跳回本机完成授权；支持多个账号）",
+  zcode: "（设备授权：点「浏览器登录」后在智谱页面完成授权，本工具会轮询直到完成；⚠️ 本渠道的积分领取依赖网页验证码，本工具不自动领取）",
+  gemini: "（本机回调授权：点「浏览器登录」后完成 Google 账号授权，浏览器会跳回本机；支持多个账号。⚠️ 额度以「配额窗口剩余百分比」呈现，不是积分数）",
+  codearts: "（PKCE 授权：点「浏览器登录」后在华为云授权页完成授权，浏览器会跳回本机；支持多个账号。⚠️ 免费额度按 UTC+8 自然日重置）",
 };
 function promptLogin(channel) {
   pendingChannel = channel;
   const name = chLabel(channel);
   pendingAction = isImportLocal(channel) ? "import" : "login";
+  // 「账号标识」输入行：只对**上游不提供稳定身份字段**的渠道显示（当前仅 CodeArts）。
+  // 留空 = 覆盖该渠道已有账号；填写 = 作为独立账号并存（后端按 UID 复用/新建）。
+  const labelRow = $("lcLabelRow");
+  if (labelRow) {
+    labelRow.classList.toggle("hidden", channel !== "codearts");
+    if (channel === "codearts") $("lcAccountLabel").value = "";
+  }
   // 次按钮默认隐藏，只在「两条路都通」的渠道（小浣熊）里显示。
   const altBtn = $("btnLoginAlt");
   altBtn.classList.add("hidden");
@@ -960,6 +975,24 @@ function promptLogin(channel) {
     return;
   }
 
+  // CodeArts（华为云）：授权页必须避开日常浏览器里的华为云登录态（否则永远被授权成已登录的
+  // 那个账号），后端用**无痕窗口**打开；同时要用户填「账号标识」区分多个华为账号。
+  if (channel === "codearts") {
+    $("lcTitle").textContent = "添加 CodeArts 账号";
+    $("lcMsg").innerHTML = `点击「登录 CodeArts」会打开一个<b>无痕浏览器窗口</b> —— `
+      + `无痕会话不带日常浏览器的华为云登录态（否则你只会被授权成<b>已登录的那个</b>账号）。`
+      + `请在其中登录<b>你想要添加的那个</b>华为账号。`
+      + `<div class="glm-warn" style="margin-top:10px">`
+      + `<div class="glm-warn-title">为什么要填「账号标识」</div>`
+      + `华为云不回传账号身份信息，本工具无法自动分辨「同一账号重新登录」与「另一个账号」。`
+      + `所以：<b>留空</b> = 覆盖已有的 CodeArts 账号；<b>填写</b>（例如“工作号”）= 作为独立账号并存。`
+      + `以后重登同一个账号时填<b>同一个标识</b>，就会覆盖它而不是再新增一个。`
+      + `</div>`;
+    $("btnLoginConfirm").textContent = "登录 CodeArts";
+    $("loginConfirmOverlay").classList.remove("hidden");
+    return;
+  }
+
   // 纯导入型渠道：文案与动作都不同（读本机客户端凭据，而不是打开浏览器登录）。
   if (isImportLocal(channel)) {
     $("lcTitle").textContent = "导入 " + name + " 账号";
@@ -983,7 +1016,7 @@ function confirmLogin() {
   if (pendingAction === "import") importLocal(pendingChannel);
   // OfficeAce 自助登录走专用端点（华为云 OAuth），与其它渠道的 /api/login/start 不同。
   else if (pendingChannel === "officeace") startOfficeAceWebLogin();
-  else startLogin(pendingChannel);
+  else startLogin(pendingChannel, loginLabelValue());
 }
 
 // importLocal 从本机已登录的官方客户端导入凭据（小浣熊 / Loomy / MonkeyCode）。
@@ -1075,15 +1108,29 @@ function cancelOfficeAceLogin() {
   api("/api/login/officeace_auto_cancel", {}).catch(() => {});
 }
 
-async function startLogin(channel) {
+// loginLabelValue 读取登录弹窗里的「账号标识」：只对需要它的渠道（CodeArts）有意义，
+// 其余渠道那一行是隐藏的，恒返回空串。
+function loginLabelValue() {
+  const row = $("lcLabelRow");
+  if (!row || row.classList.contains("hidden")) return "";
+  const inp = $("lcAccountLabel");
+  return inp ? inp.value.trim() : "";
+}
+
+async function startLogin(channel, accountLabel) {
   try {
-    const r = await api("/api/login/start", { channel });
+    const r = await api("/api/login/start", { channel, account_label: accountLabel || "" });
     const url = r.auth_url;
     if (!url) { toast("无法获取登录链接"); return; }
     $("loginTitle").textContent = `添加 ${chLabel(channel)} 账号`;
     // 网页版登录：浏览器已由后端拉起（独立 profile），这里只需提示，不能再 window.open
     // （否则会在用户日常浏览器里再开一个标签页，且那个标签页没有调试端口、捕获不到）。
-    if (hasWebLogin(channel)) {
+    // 后端已用**无痕窗口**拉起授权页（CodeArts）：绝不能再 window.open —— 那会在日常浏览器里
+    // 再开一个带登录态的标签页，用户又会被授权成老账号，无痕那一步就白做了。
+    if (r.backend_opened) {
+      $("loginMsg").textContent = `已为你打开一个独立的无痕浏览器窗口，请在其中完成${chLabel(channel)}登录；`
+        + `登录完成后无需任何操作，本工具会自动捕获凭据并添加账号。`;
+    } else if (hasWebLogin(channel)) {
       $("loginMsg").textContent = `已为你打开一个独立的浏览器窗口，请在其中完成${chLabel(channel)}登录；`
         + `登录完成后无需任何操作，本工具会自动捕获凭据并添加账号。`;
     } else {
@@ -1624,6 +1671,11 @@ function bind() {
   $("btnClineSubmit").onclick = submitClineKey;
   $("btnClineCancel").onclick = () => $("clineOverlay").classList.add("hidden");
   $("btnAddOfficeAce").onclick = () => promptLogin("officeace");
+  $("btnAddMiniMax").onclick = () => promptLogin("minimax");
+  $("btnAddLobsterAI").onclick = () => promptLogin("lobsterai");
+  $("btnAddZCode").onclick = () => promptLogin("zcode");
+  $("btnAddGemini").onclick = () => promptLogin("gemini");
+  $("btnAddCodeArts").onclick = () => promptLogin("codearts");
   $("btnAddGLM").onclick = () => startGLMLogin();
   $("btnGLMSubmit").onclick = submitGLMToken;
   $("btnGLMCancel").onclick = cancelGLMLogin;
