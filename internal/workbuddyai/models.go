@@ -468,6 +468,16 @@ func Classify(status int, body string) provider.ErrKind {
 	}
 	// 429 优先于 hardRule：限流 body 高频带 "quota exceeded"。
 	if status == http.StatusTooManyRequests {
+		// 例外：积分耗尽（14018，msg 是复数 "Credits exhausted"——与 hardMarkers 的
+		// "credit exhausted" 差一个 s，429 分支在 hardMarkers 之前直接 return 时永远漏匹配）
+		// 是账号级余额问题而非限流：归软限流只冷却「账号×该模型」60s，到期容量"恢复"，
+		// 降级链永不触发，客户端死循环吃 429。归 ErrHardCredit：账号级硬冷却（充值后
+		// ReenableIfCredits 自动解冻），下一请求入口降级链正常顶替（R75）。
+		// 匹配防前缀误伤："code":140180 含子串 "code":14018"——命中后下一字符须非
+		// 数字，防未来 14xxxx 新码误归账号硬冷却（S2）。
+		if provider.CodeMarker(lower, "14018") || strings.Contains(lower, "credits exhausted") {
+			return provider.ErrHardCredit
+		}
 		// 上游按**模型**限流（6004 / "switch to the other models"）时仍返回 ErrSoftRate，
 		// 由 handler 按 provider.IsModelScopedSoftRate(body) 分流成 (账号, 模型) 粒度冷却：
 		// 只让该账号在这个模型上不可选，账号上其它模型照常路由，且下一次请求能自动换号

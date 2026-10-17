@@ -414,13 +414,6 @@ func modelOf(body []byte) string {
 	return ""
 }
 
-func uidOf(a *auth.Auth) string {
-	if a == nil {
-		return "-"
-	}
-	return a.UID
-}
-
 func toInt(v any) int {
 	switch n := v.(type) {
 	case float64:

@@ -361,7 +361,8 @@ func (c *Client) RefreshToken(a *auth.Auth) error {
 //
 // 对网关类 5xx（502/503/504）与瞬态传输错误做有限重试（见 retry.go）；
 // 4xx 不重试（风控/余额/参数语义，重试无益）——**唯一例外是上游显式声明
-// `retry_policy.retry=true` 的 429**（14003 瞬时拥塞）：上游自己说可重试，
+// `retry_policy.retry=true` 或 `actions` 含 `RETRY` 的 429**（14003 瞬时拥塞；
+// 2026-10-17 上游形态漂移后只下发 actions）：上游自己说可重试，
 // 此时直接抛错并让上层罚号，会把一次可自愈的抖动放大成渠道级 503。
 func (c *Client) ChatStream(a *auth.Auth, body []byte) (rc io.ReadCloser, status int, respBody []byte, err error) {
 	prepared := PrepareBody(body)

@@ -17,15 +17,20 @@ import (
 // freeIDs 已知免费模型元数据（models.dev 目录 + 2026-09 实测上下文/能力）。
 // 用途有二：① 给动态拉取到的模型补上下文与能力（/v1/models 不返回这些字段）；
 // ② 上游列表拉取失败时的静态兜底，保证面板与客户端至少能看到可用清单。
+// 2026-09-24 与 models.dev opencode 渠道对齐：补 deepseek-v4-flash-free/space-bunny-free
+// （此前缺项致 live enrichment 落空、面板显示「未知」）；
+// mimo/muse-spark/space-bunny 按 models.dev 补 SupportsImages 多模态声明。
 var freeIDs = []provider.ModelInfo{
 	{ID: "big-pickle", Name: "Big Pickle", ContextWindow: 200000, MaxTokens: 32000, SupportsReasoning: true},
+	{ID: "deepseek-v4-flash-free", Name: "DeepSeek V4 Flash Free", ContextWindow: 200000, MaxTokens: 128000, SupportsReasoning: true},
 	{ID: "ling-3.0-flash-fin-free", Name: "Ling 3.0 Flash Fin Free", ContextWindow: 262144, MaxTokens: 32768, SupportsReasoning: true},
-	{ID: "mimo-v2.5-free", Name: "MiMo V2.5 Free", ContextWindow: 200000, MaxTokens: 32000, SupportsReasoning: true},
-	{ID: "mimo-v2.6-flash-free", Name: "MiMo-V2.6-Flash Free", ContextWindow: 200000, MaxTokens: 32000, SupportsReasoning: true},
-	{ID: "muse-spark-1.2-contributor-free", Name: "Muse Spark 1.2 Free", ContextWindow: 1048576, MaxTokens: 131072, SupportsReasoning: true},
-	{ID: "muse-spark-1.3-contributor-free", Name: "Muse Spark 1.3 Free", ContextWindow: 1048576, MaxTokens: 131072, SupportsReasoning: true},
+	{ID: "mimo-v2.5-free", Name: "MiMo V2.5 Free", ContextWindow: 200000, MaxTokens: 32000, SupportsReasoning: true, SupportsImages: true},
+	{ID: "mimo-v2.6-flash-free", Name: "MiMo-V2.6-Flash Free", ContextWindow: 200000, MaxTokens: 32000, SupportsReasoning: true, SupportsImages: true},
+	{ID: "muse-spark-1.2-contributor-free", Name: "Muse Spark 1.2 Free", ContextWindow: 1048576, MaxTokens: 131072, SupportsReasoning: true, SupportsImages: true},
+	{ID: "muse-spark-1.3-contributor-free", Name: "Muse Spark 1.3 Free", ContextWindow: 1048576, MaxTokens: 131072, SupportsReasoning: true, SupportsImages: true},
 	{ID: "nemotron-3-ultra-free", Name: "Nemotron 3 Ultra Free", ContextWindow: 1000000, MaxTokens: 128000, SupportsReasoning: true},
 	{ID: "nemotron-3.5-lightning-free", Name: "Nemotron 3.5 Lightning Free", ContextWindow: 262144, MaxTokens: 262144, SupportsReasoning: true},
+	{ID: "space-bunny-free", Name: "Space Bunny Free", ContextWindow: 1048576, MaxTokens: 524288, SupportsReasoning: true, SupportsImages: true},
 }
 
 // staticFree 返回静态目录副本（StaticModels 用，避免调用方改到包级变量）。

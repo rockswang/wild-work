@@ -7,9 +7,6 @@ import (
 	"os/exec"
 )
 
-// WorkArea 其他平台：返回 0,0,0,0（未实现）。
-func WorkArea() (int32, int32, int32, int32) { return 0, 0, 0, 0 }
-
 // InfoBox 其他平台：输出到 stderr。
 func InfoBox(title, msg string) { Notify(title, msg) }
 
@@ -21,6 +18,9 @@ func Notify(title, msg string) {
 // AskYesNo 其他平台：默认否。
 func AskYesNo(title, msg string) bool { return false }
 
+// 本 fork 说明：CodeArts 授权走「无痕窗口 + 用户点授权」（internal/app/app.go 调
+// DefaultBrowserIncognito/LaunchIncognito），故上游 1e25be4 的死代码清理在本分支不适用，
+// 这组函数必须保留；否则 internal/app 编译失败。
 // DefaultBrowserIncognito 其他平台：不探测，走系统默认。
 func DefaultBrowserIncognito() (exePath, flag string, ok bool) { return "", "", false }
 

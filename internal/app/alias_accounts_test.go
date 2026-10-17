@@ -59,9 +59,6 @@ func TestAliasAccountsNotDuplicated(t *testing.T) {
 			t.Errorf("uid=%s 出现 %d 次，应仅 1 次", uid, n)
 		}
 	}
-	if n := a.totalAccounts(); n != 3 {
-		t.Errorf("totalAccounts 应为 3，实际 %d", n)
-	}
 }
 
 // TestFindRuntimeAuthPrefersMainChannel 按 uid 反查必须命中主渠道（TraeWork），

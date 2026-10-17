@@ -20,17 +20,17 @@ import (
 func TestNextFire(t *testing.T) {
 	loc := time.Local
 	now := time.Date(2026, 7, 27, 10, 0, 0, 0, loc)
-	next := nextFire(now, []int{9, 21})
+	next := nextFireMinutes(now, hoursToMinutes([]int{9, 21}))
 	if next.Hour() != 21 || next.Day() != 27 {
 		t.Errorf("next=%v want 21:00 same day", next)
 	}
 	now = time.Date(2026, 7, 27, 22, 0, 0, 0, loc)
-	next = nextFire(now, []int{9, 21})
+	next = nextFireMinutes(now, hoursToMinutes([]int{9, 21}))
 	if next.Hour() != 9 || next.Day() != 28 {
 		t.Errorf("next=%v want 09:00 next day", next)
 	}
 	now = time.Date(2026, 7, 27, 9, 0, 0, 0, loc)
-	next = nextFire(now, []int{9})
+	next = nextFireMinutes(now, hoursToMinutes([]int{9}))
 	if next.Day() != 28 {
 		t.Errorf("exact match should roll to next day: %v", next)
 	}
@@ -38,7 +38,7 @@ func TestNextFire(t *testing.T) {
 
 func TestNextFireMergesSchedules(t *testing.T) {
 	now := time.Date(2026, 7, 27, 20, 0, 0, 0, time.Local)
-	next := nextFire(now, []int{9, 21, 22})
+	next := nextFireMinutes(now, hoursToMinutes([]int{9, 21, 22}))
 	if next.Hour() != 21 {
 		t.Errorf("next=%v want 21 (earliest of 21/22)", next)
 	}
@@ -62,14 +62,6 @@ type fakeUpstream struct {
 	checkinCalls   atomic.Int32
 	refreshCalls   atomic.Int32
 	resourceRemain int64
-}
-
-func (f *fakeUpstream) FetchModelPricing(a *auth.Auth) ([]provider.ModelPricing, error) {
-	return nil, nil
-}
-
-func (f *fakeUpstream) UserResourceDetail(a *auth.Auth) (int64, []provider.ResourceItem, error) {
-	return f.resourceRemain, []provider.ResourceItem{{Name: "套餐", Remain: f.resourceRemain, Usable: true}}, nil
 }
 
 func (f *fakeUpstream) server() *httptest.Server {

@@ -21,8 +21,8 @@ func TestSaveBackupProxyTakesEffectImmediately(t *testing.T) {
 		t.Fatalf("保存应 200：%d %s", w.Code, w.Body.String())
 	}
 	// 即时生效：不重启、不重建任何渠道 Transport
-	if !backuplink.Enabled() || backuplink.Raw() != "socks5://127.0.0.1:1080" {
-		t.Errorf("保存后应立即生效：enabled=%v raw=%q", backuplink.Enabled(), backuplink.Raw())
+	if !backuplink.Enabled() || a.cfg.BackupProxy != "socks5://127.0.0.1:1080" {
+		t.Errorf("保存后应立即生效：enabled=%v cfg=%q", backuplink.Enabled(), a.cfg.BackupProxy)
 	}
 	if a.cfg.BackupProxy != "socks5://127.0.0.1:1080" {
 		t.Errorf("配置未落字段：%q", a.cfg.BackupProxy)
@@ -76,7 +76,7 @@ func TestBackupProxyRejectsBadAddress(t *testing.T) {
 	if w.Code != 400 {
 		t.Fatalf("非法协议应 400，实得 %d %s", w.Code, w.Body.String())
 	}
-	if !backuplink.Enabled() || backuplink.Raw() != "socks5://127.0.0.1:1080" {
+	if !backuplink.Enabled() || a.cfg.BackupProxy != "socks5://127.0.0.1:1080" {
 		t.Error("被拒的保存不得改动现生效配置")
 	}
 }

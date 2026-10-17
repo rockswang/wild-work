@@ -39,9 +39,13 @@ const (
 	// v2 面只给 `balance` + `dailyBalance`（聊天聚合形状、无 availableBalance），
 	// 用它就得自己相加 —— 多一个口径推导就多一处出错面。
 	EpPointsV1 = "/api/v1/points/records"
-	EpPointsV2 = "/api/v2/points/records"
 	EpBalance  = "/api/v1/team-points/balance"
-	EpPetWork  = "/api/v1/pet-work"
+
+	// 宠物每日打工（见 checkin.go 的机制说明）：**这才是 Loomy 唯一"能领"的每日积分**。
+	// 每天 0~1000 分，按该账号的**有效对话轮次**算档位，由服务端判定是否达标。
+	// 证据：客户端 points-service.js:416-418 / :434-450。
+	EpPetWork        = "/api/v1/pet-work"
+	EpPetWorkRewards = "/api/v1/pet-work/rewards"
 )
 
 // ChannelName 费率面板与日志中的渠道标识。

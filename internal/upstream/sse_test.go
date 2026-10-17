@@ -290,7 +290,7 @@ data: [DONE]
 
 func TestStreamPassthrough(t *testing.T) {
 	rec := httptest.NewRecorder()
-	err := Stream(rec, strings.NewReader(sseFixture))
+	err := StreamCapture(rec, strings.NewReader(sseFixture), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -334,7 +334,7 @@ const liveUpstreamSSEFixture = "" +
 // 归一为 null 后中间帧不再命中「存在 finish_reason」分支，去重标志位留给末帧。
 func TestStreamNormalizesEmptyFinishReason(t *testing.T) {
 	rec := httptest.NewRecorder()
-	if err := Stream(rec, strings.NewReader(liveUpstreamSSEFixture)); err != nil {
+	if err := StreamCapture(rec, strings.NewReader(liveUpstreamSSEFixture), nil); err != nil {
 		t.Fatalf("Stream: %v", err)
 	}
 	body := rec.Body.String()
@@ -362,7 +362,7 @@ func TestStreamNormalizesEmptyFinishReason(t *testing.T) {
 // 私有 extra_fields、logprobs 等一律剔除；usage 缺失补 null。
 func TestStreamStripsUpstreamNoise(t *testing.T) {
 	rec := httptest.NewRecorder()
-	if err := Stream(rec, strings.NewReader(liveUpstreamSSEFixture)); err != nil {
+	if err := StreamCapture(rec, strings.NewReader(liveUpstreamSSEFixture), nil); err != nil {
 		t.Fatalf("Stream: %v", err)
 	}
 	for _, noise := range []string{
@@ -408,12 +408,12 @@ func TestStreamEmptyUpstreamErrors(t *testing.T) {
 		"",
 	} {
 		rec := httptest.NewRecorder()
-		err := Stream(rec, strings.NewReader(raw))
+		err := StreamCapture(rec, strings.NewReader(raw), nil)
 		if err == nil {
 			t.Errorf("raw=%q: want errEmptyStream, got nil", raw)
 			continue
 		}
-		if !IsEmptyStreamError(err) {
+		if !errors.Is(err, errEmptyStream) {
 			t.Errorf("raw=%q: want IsEmptyStreamError, got %v", raw, err)
 		}
 		if !strings.Contains(rec.Body.String(), "data: [DONE]") {
@@ -433,7 +433,7 @@ func TestStreamTruncationNotDisguisedAsDone(t *testing.T) {
 
 	mkStream := func(rd io.Reader) (string, error) {
 		rec := httptest.NewRecorder()
-		err := Stream(rec, rd)
+		err := StreamCapture(rec, rd, nil)
 		return rec.Body.String(), err
 	}
 

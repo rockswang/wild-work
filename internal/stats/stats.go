@@ -66,6 +66,10 @@ type Account struct {
 	ErrCount int `json:"err_count"`
 	// CreditsNA 匿名渠道无积分概念（面板显示「不适用」，不参与余额合计）。
 	CreditsNA bool `json:"credits_na"`
+	// CreditsUnit 该账号额度的计量单位：空 = 积分，`"token"` = Token 计数。
+	// token 渠道的数字**不并入积分口径**（TotalCredits / 平台行 Credits / 差值消耗都按 0 处理），
+	// 前端另用「Token 计数」面板展示它的真实用量（2026-10-17 用户要求）。
+	CreditsUnit string `json:"credits_unit,omitempty"`
 }
 
 // Toast 里程碑通知事件（带稳定 ID，前端按 id 去重）。
@@ -201,7 +205,8 @@ type acct struct {
 	coolReason string
 	coolUntil  string
 	errCount   int
-	creditsNA  bool
+	creditsNA   bool
+	creditsUnit string // 空 = 积分；"token" = Token 计数（不进任何积分口径）
 	hasLast    bool      // 是否已确立差值基线（首轮只建基线不记差值）
 	creditOut  int64     // 今日差值花费（仅下降记，上涨不计）
 	expireAt   string    // 最早到期本地日（ApplyExpiry 喂入，纯内存）
@@ -216,10 +221,11 @@ type stickyInfo struct {
 	max   int
 }
 
-// creditVal 账号的积分口径值：匿名渠道（无积分概念）恒 0，不参与任何余额/差值口径。
-// Snapshot.TotalCredits 与平台行 Credits 共用此口径，防两处各自维护漂移。
+// creditVal 账号的积分口径值：匿名渠道（无积分概念）与 token 计量渠道（credits_unit="token"）
+// 恒 0，不参与任何余额/差值口径。Snapshot.TotalCredits 与平台行 Credits 共用此口径，
+// 防两处各自维护漂移。
 func (a *acct) creditVal() int64 {
-	if a.creditsNA {
+	if a.creditsNA || a.creditsUnit != "" {
 		return 0
 	}
 	return a.credits
@@ -370,7 +376,9 @@ func (s *Stats) ApplyPoll(list []Account, now time.Time) {
 		a.expiring, a.cooling, a.disabled = u.Expiring, u.Cooling, u.Disabled
 		a.coolReason, a.coolUntil, a.errCount = u.Reason, u.Until, u.ErrCount
 		a.creditsNA = u.CreditsNA
-		if a.hasLast && !a.creditsNA && u.Credits < a.credits {
+		a.creditsUnit = u.CreditsUnit
+		// 差值口径同样要门禁：token 数下降不是「积分消耗」，记进 creditOut 会污染消耗统计。
+		if a.hasLast && !a.creditsNA && a.creditsUnit == "" && u.Credits < a.credits {
 			a.creditOut += a.credits - u.Credits // 仅记消耗；余额上涨不是收入事件
 		}
 		if a.burnSince.IsZero() {
@@ -570,6 +578,12 @@ var (
 		string(provider.QwenWork): true, string(provider.MonkeyCode): true,
 		string(provider.Raccoon): true, string(provider.Loomy): true,
 		string(provider.Oczen): true, string(provider.GLM): true,
+		string(provider.Kilo):      true, // 漏了它 ⇒ kilo 的 token 与请求都不进平台概览表
+		string(provider.Minimax):   true,
+		string(provider.LobsterAI): true,
+		string(provider.ZCode):     true,
+		string(provider.Gemini):    true,
+		string(provider.CodeArts):  true,
 		string(provider.Cline):     true, // R59：cline 的模型名是 cline-free/*，漏了它则该渠道 token 不进平台表
 		string(provider.OfficeAce): true,
 	}
@@ -609,9 +623,12 @@ func normalizePlatform(g string) string {
 	return g
 }
 
-// noExpiryChannel 判定渠道是否无临期/到期概念（oczen 匿名免费：上游对其
-// resource_detail 恒返拒绝，临期数据喂入方须跳过，否则每轮恒报失败噪音）。
-func noExpiryChannel(g string) bool { return g == string(provider.Oczen) }
+// noExpiryChannel 判定渠道是否无临期/到期概念（oczen 匿名通道与 kilo 免费池：
+// 两者都不存在账号/余额概念，resource_detail 无数据可返，临期数据喂入方须跳过，
+// 否则每轮恒报失败噪音）。
+func noExpiryChannel(g string) bool {
+	return g == string(provider.Oczen) || g == string(provider.Kilo)
+}
 
 // platformRowsLocked 生成平台表行（调用方须持锁）：按 group 聚合账号数/余额/今日
 // 收入/今日花费/作废与净值/今日 Token，并按各账号 expireAt 归入 7 日内/今日/明日
@@ -709,15 +726,25 @@ func (s *Stats) platformRowsLocked(now time.Time) []PlatformRow {
 // null（上游下一请求会重建粘性记录，下一轮喂入自然纠正）。
 // 只下发有使用记录（Current 非 null）的平台——无粘性记录=今日未用过，
 // 展示「暂无使用记录」行没有信息量。
+// 单账号组整组跳过（组内账号总数 < 2）：无接棒候选，展示恒为「当前=自己、
+// Next 恒空」纯噪音（R75）。自然覆盖自定义渠道伪账号（custom-<名>）与 oczen
+// 匿名号等单账号渠道；glm 虽置 SingleAccount 但是真多账号池（可加多个
+// refresh_token），有轮换语义，按账号数判断不会误伤。
+// 注意：platformRows 等聚合视图不受此过滤影响，单账号渠道余额/花费照常入表。
 func (s *Stats) rotationLocked() []RotationView {
-	groups := map[string]bool{}
+	// 先按组聚合账号数：单账号组（无接棒候选）整组不进轮换视图。
+	groupCount := map[string]int{}
 	for _, a := range s.accts {
-		if a.group != "" {
-			groups[normalizePlatform(a.group)] = true
+		if a.group == "" {
+			continue
 		}
+		groupCount[normalizePlatform(a.group)]++
 	}
-	out := make([]RotationView, 0, len(groups))
-	for g := range groups {
+	out := make([]RotationView, 0, len(groupCount))
+	for g, n := range groupCount {
+		if n < 2 {
+			continue
+		}
 		view := RotationView{Group: g, Next: []RotationRow{}}
 
 		st, hasSticky := s.sticky[g]

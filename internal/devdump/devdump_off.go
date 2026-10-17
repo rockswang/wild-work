@@ -3,7 +3,7 @@
 // devdump_off.go 无标签构建实现：零开销桩。
 //
 // 无 `-tags devdump` 时**整个包退化为这几个常量函数**——Wrap 原样返回入参
-// （内联后调用点等于不存在），Enable/Enabled 恒为 false。不含任何 io/net/文件
+// （内联后调用点等于不存在），Enabled 恒为 false。不含任何 io/net/文件
 // 逻辑，编译产物中不会出现 dump 代码，也不会因环境变量被意外开启。
 //
 // 这与「运行期开关」是互补的两层：构建标签保证不带标签的构建**没有能力**，
@@ -11,12 +11,6 @@
 package devdump
 
 import "net/http"
-
-// Enable 发布版为空操作。
-func Enable(string) {}
-
-// Disable 发布版为空操作。
-func Disable() {}
 
 // Refresh 发布版为空操作。
 func Refresh() {}

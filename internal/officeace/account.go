@@ -26,7 +26,11 @@ type Account struct {
 	AccountID       string
 	UserID          string
 	Label           string
-	BaseURL         string // 网关基址（形如 https://modelgw-0004.<region>.huaweicloud-agentarts.com/v2）
+	BaseURL         string // 网关**裸 host**（形如 https://modelgw-0004.officeace.<region>.huaweicloud-agentarts.com）
+	// ⚠️ 必须存裸 host、不带 `/v2`：同一字段被两类端点复用，而它们的前缀要求相反
+	// （issue #152）：模型/对话要 `{host}/v2/...`，额度/签到要 `{host}/v1/subscription`。
+	// 存带 /v2 的值会让额度请求变成 `{host}/v2/v1/subscription` → APIG.0303 app not found。
+	// 归一化在 bareGateway() 与 chatURL()/modelsURL() 两处收口（剥 `/v2` / 按需拼）。
 	Authorization   string // 网关 Basic 凭据头值
 	ModelNames      []string
 	AccessKeyID     string // 临时 AK
@@ -75,7 +79,7 @@ func accountFromAuth(a *auth.Auth) *Account {
 		AccountID:       ex[keyAccountID],
 		UserID:          ex[keyUserID],
 		Label:           ex[keyLabel],
-		BaseURL:         firstNonEmpty(ex[keyBaseURL], a.ApiHost),
+		BaseURL:         bareGateway(firstNonEmpty(ex[keyBaseURL], a.ApiHost)),
 		Authorization:   a.AccessToken,
 		AccessKeyID:     ex[keyAccessKey],
 		SecretAccessKey: ex[keySecretKey],
@@ -215,11 +219,34 @@ func urlPathUnescape(s string) (string, error) { return url.PathUnescape(s) }
 // trimSlash 去掉 URL 尾部所有 '/'。
 func trimSlash(u string) string { return strings.TrimRight(strings.TrimSpace(u), "/") }
 
-// chatURL 返回对话端点（网关 OpenAI 兼容：{base}/chat/completions，不带 /v1）。
-func (ac *Account) chatURL() string { return trimSlash(ac.BaseURL) + "/chat/completions" }
+// bareGateway 把网关基址归一化为**裸 host**：剥掉结尾的 `/v2`（可带尾斜杠）。
+//
+// 为什么需要（issue #152）：`model_api_url_base` 在不同账号/不同网关版本下**可能带也可能
+// 不带** `/v2`，而它被两类端点复用且前缀要求相反：
+//
+//	{host}/v2/chat/completions     ← 模型/对话（带 /v2）
+//	{host}/v1/subscription         ← 额度/签到（不带 /v2）
+//
+// 故存盘一律存裸 host，各端点按需自行拼前缀。旧凭据里已带 /v2 的也在这里剥掉，
+// 无需用户重新登录（向后兼容）。
+func bareGateway(u string) string {
+	u = trimSlash(u)
+	// 只剥最后一段 `/v2`；更深的路径（理论上不存在）保持原样，不猜。
+	if strings.HasSuffix(u, "/v2") {
+		return strings.TrimSuffix(u, "/v2")
+	}
+	return u
+}
 
-// modelsURL 返回模型目录端点（{base}/models）。
-func (ac *Account) modelsURL() string { return trimSlash(ac.BaseURL) + "/models" }
+// chatURL 返回对话端点（网关 OpenAI 兼容：{base}/v2/chat/completions）。
+//
+// 必须带 `/v2`（issue #152 实测）：上游下发的是裸 host，而 OpenAI 兼容面挂在 `/v2`
+// 之下——不带则 `GET {host}/models` 与 `POST {host}/chat/completions` 均返回
+// APIG.0101「The API does not exist or has not been published」。
+func (ac *Account) chatURL() string { return trimSlash(ac.BaseURL) + "/v2/chat/completions" }
+
+// modelsURL 返回模型目录端点（{base}/v2/models）。理由同 chatURL。
+func (ac *Account) modelsURL() string { return trimSlash(ac.BaseURL) + "/v2/models" }
 
 // regionFromBaseURL 从网关 host 里猜 region（华为主机形如
 // modelgw-0004.officeace.cn-southwest-2.huaweicloud-agentarts.com ⇒ cn-southwest-2）。

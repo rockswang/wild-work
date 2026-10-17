@@ -6,9 +6,11 @@ package pool
 
 import (
 	"encoding/json"
+	"log"
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -77,6 +79,11 @@ type Status struct {
 	LastCheckinOK  bool              `json:"last_checkin_ok,omitempty"`
 	LastCheckinAt  time.Time         `json:"last_checkin_at,omitempty"`
 	LastCheckinMsg string            `json:"last_checkin_msg,omitempty"`
+	// SessionDead 登录态失效（401/登录已失效）：挑号跳过 + 面板「需重新登录」徽标（#134）。
+	// 与 Disabled（用户手动停用）分离，避免机器状态混入用户控制项。
+	SessionDead       bool      `json:"session_dead,omitempty"`
+	SessionDeadReason string    `json:"session_dead_reason,omitempty"`
+	SessionDeadAt     time.Time `json:"session_dead_at,omitempty"`
 }
 
 // modelCool 模型级冷却记录：该账号在单个模型上的限流/不可用。
@@ -105,12 +112,16 @@ type entry struct {
 	lastCheckinOK  bool
 	lastCheckinAt  time.Time
 	lastCheckinMsg string
+	// sessionDead 登录态失效（401/登录已失效），与 disabled 分离（#134）。
+	sessionDead       bool
+	sessionDeadReason string
+	sessionDeadAt     time.Time
 }
 
 // healthy 判定账号在给定模型下当前是否可用。
 // model == "" 表示只判账号级状态（拉模型目录、查余额等与具体模型无关的调用）。
 func (e *entry) healthy(now time.Time, model string) bool {
-	if e.disabled {
+	if e.disabled || e.sessionDead {
 		return false
 	}
 	if !e.until.IsZero() && now.Before(e.until) {
@@ -135,8 +146,9 @@ type stateFile struct {
 }
 
 // stateVersion 当前状态文件格式版本。
-// v2: unusable（可用/不可用拆分）；v3: expiring（临期额度）；v4: model_until（模型级冷却）。
-const stateVersion = 4
+// v2: unusable（可用/不可用拆分）；v3: expiring（临期额度）；v4: model_until（模型级冷却）；
+// v5: session_dead（登录态失效标记，纯新增可选字段，不改变余额口径）。
+const stateVersion = 5
 
 // creditsLayoutVersion 余额口径版本：v3 起含 expiring（临期）字段，口径与更早版本不同。
 // 只有低于此版本的文件才置 creditsStale —— v4 仅新增 model_until（模型级冷却），
@@ -144,16 +156,19 @@ const stateVersion = 4
 const creditsLayoutVersion = 3
 
 type accountState struct {
-	Credits        int64                `json:"credits"`
-	Expiring       int64                `json:"expiring,omitempty"`
-	Unusable       int64                `json:"unusable,omitempty"`
-	ModelUntil     map[string]modelCool `json:"model_until,omitempty"`
-	Disabled       bool                 `json:"disabled"`
-	Reason         string               `json:"reason,omitempty"`
-	Until          time.Time            `json:"until,omitempty"`
-	LastCheckinOK  bool                 `json:"last_checkin_ok,omitempty"`
-	LastCheckinAt  time.Time            `json:"last_checkin_at,omitempty"`
-	LastCheckinMsg string               `json:"last_checkin_msg,omitempty"`
+	Credits           int64                `json:"credits"`
+	Expiring          int64                `json:"expiring,omitempty"`
+	Unusable          int64                `json:"unusable,omitempty"`
+	ModelUntil        map[string]modelCool `json:"model_until,omitempty"`
+	Disabled          bool                 `json:"disabled"`
+	Reason            string               `json:"reason,omitempty"`
+	Until             time.Time            `json:"until,omitempty"`
+	LastCheckinOK     bool                 `json:"last_checkin_ok,omitempty"`
+	LastCheckinAt     time.Time            `json:"last_checkin_at,omitempty"`
+	LastCheckinMsg    string               `json:"last_checkin_msg,omitempty"`
+	SessionDead       bool                 `json:"session_dead,omitempty"`
+	SessionDeadReason string               `json:"session_dead_reason,omitempty"`
+	SessionDeadAt     time.Time            `json:"session_dead_at,omitempty"`
 }
 
 // Pool 账号池。
@@ -199,6 +214,34 @@ func (p *Pool) SyncToDir(auths []*auth.Auth) {
 	for uid := range p.byUID {
 		if !seen[uid] {
 			delete(p.byUID, uid)
+		}
+	}
+	p.clearReloggedLocked(auths)
+}
+
+// clearReloggedLocked 重新登录后（auth 文件被登录流程重写）清除 SessionDead 标记。
+// 必要性（#134）：旧版对 session dead 走 Disable，标记被持久化到 state 文件；
+// 用户重新登录、RefreshToken 也刷成功了，但池里只换 e.a，标记仍在 ⇒ 账号永不被挑中。
+// 判据：auth 文件修改时间晚于「标记建立时间」。调用方须持有 p.mu。
+func (p *Pool) clearReloggedLocked(auths []*auth.Auth) {
+	for _, a := range auths {
+		e, ok := p.byUID[a.UID]
+		if !ok || !e.sessionDead {
+			continue
+		}
+		// FilePath 为空（内存构造的凭证）无从判断，保守保留标记。
+		if a.FilePath == "" {
+			continue
+		}
+		st, err := os.Stat(a.FilePath)
+		if err != nil {
+			continue
+		}
+		if st.ModTime().After(e.sessionDeadAt) {
+			e.sessionDead = false
+			e.sessionDeadReason = ""
+			e.sessionDeadAt = time.Time{}
+			log.Printf("session dead cleared by relogin uid=%s", a.UID)
 		}
 	}
 }
@@ -379,8 +422,58 @@ func (p *Pool) RecordCheckin(uid string, ok bool, msg string) {
 		e.lastCheckinOK = ok
 		e.lastCheckinAt = time.Now()
 		e.lastCheckinMsg = msg
+		if ok {
+			// 签到成功 = 登录态有效：清除失效标记（#134）
+			e.sessionDead = false
+			e.sessionDeadReason = ""
+			e.sessionDeadAt = time.Time{}
+		} else if sessionDeadLike(msg) {
+			// 401/登录失效形态：标记待重登（面板徽标 + 重新登录入口）
+			e.sessionDead = true
+			e.sessionDeadReason = msg
+			e.sessionDeadAt = time.Now()
+		}
 	}
 	p.saveLocked()
+}
+
+// sessionDeadLike 判断签到失败信息是否为登录态失效形态（401/登录已失效/网关 401 页）。
+func sessionDeadLike(msg string) bool {
+	lower := strings.ToLower(msg)
+	return strings.Contains(lower, "401") ||
+		strings.Contains(lower, "unauthorized") ||
+		strings.Contains(msg, "登录已失效") ||
+		strings.Contains(msg, "登录已过期")
+}
+
+// MarkSessionDead 标记账号登录态失效（401/登录已失效）：挑号阶段跳过、面板显示
+// 「需重新登录」徽标与一键重新登录入口（#134）。与 Disable（用户手动停用）分离，
+// 避免机器状态混入用户控制项后用户看不出该做什么。
+func (p *Pool) MarkSessionDead(uid, reason string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	e, ok := p.byUID[uid]
+	if !ok || e.sessionDead {
+		return
+	}
+	e.sessionDead = true
+	e.sessionDeadReason = reason
+	e.sessionDeadAt = time.Now()
+	p.saveLocked()
+	log.Printf("session dead marked uid=%s reason=%s", uid, reason)
+}
+
+// ClearSessionDead 清除登录态失效标记（重新登录成功/签到或请求成功后回到可用态）。
+func (p *Pool) ClearSessionDead(uid string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if e, ok := p.byUID[uid]; ok && e.sessionDead {
+		e.sessionDead = false
+		e.sessionDeadReason = ""
+		e.sessionDeadAt = time.Time{}
+		p.saveLocked()
+		log.Printf("session dead cleared uid=%s", uid)
+	}
 }
 
 // Remove 从池中移除账号（内存 + 状态文件）；auth 文件删除由调用方负责。
@@ -455,21 +548,24 @@ func (p *Pool) List() []Status {
 func (p *Pool) statusOf(uid string, e *entry) Status {
 	now := time.Now()
 	return Status{
-		UID:             uid,
-		Nickname:        e.a.Nickname,
-		Credits:         e.credits,
-		ExpiringCredits: e.expiring,
-		UnusableCredits: e.unusable,
-		CreditsStale:    e.creditsStale,
-		Cooling:         !e.until.IsZero() && now.Before(e.until),
-		Until:           e.until,
-		Reason:          e.reason,
-		ModelCooling:    modelCoolingOf(e, now),
-		Disabled:        e.disabled,
-		ErrCount:        e.errCount,
-		LastCheckinOK:   e.lastCheckinOK,
-		LastCheckinAt:   e.lastCheckinAt,
-		LastCheckinMsg:  e.lastCheckinMsg,
+		UID:               uid,
+		Nickname:          e.a.Nickname,
+		Credits:           e.credits,
+		ExpiringCredits:   e.expiring,
+		UnusableCredits:   e.unusable,
+		CreditsStale:      e.creditsStale,
+		Cooling:           !e.until.IsZero() && now.Before(e.until),
+		Until:             e.until,
+		Reason:            e.reason,
+		ModelCooling:      modelCoolingOf(e, now),
+		Disabled:          e.disabled,
+		ErrCount:          e.errCount,
+		LastCheckinOK:     e.lastCheckinOK,
+		LastCheckinAt:     e.lastCheckinAt,
+		LastCheckinMsg:    e.lastCheckinMsg,
+		SessionDead:       e.sessionDead,
+		SessionDeadReason: e.sessionDeadReason,
+		SessionDeadAt:     e.sessionDeadAt,
 	}
 }
 
@@ -507,18 +603,21 @@ func (p *Pool) load() {
 	stale := sf.Version < creditsLayoutVersion
 	for uid, s := range sf.Accounts {
 		p.byUID[uid] = &entry{
-			a:              &auth.Auth{UID: uid}, // placeholder，Add 时会换成完整凭证
-			credits:        s.Credits,
-			expiring:       s.Expiring,
-			unusable:       s.Unusable,
-			creditsStale:   stale,
-			disabled:       s.Disabled,
-			reason:         s.Reason,
-			until:          s.Until,
-			modelUntil:     s.ModelUntil,
-			lastCheckinOK:  s.LastCheckinOK,
-			lastCheckinAt:  s.LastCheckinAt,
-			lastCheckinMsg: s.LastCheckinMsg,
+			a:                 &auth.Auth{UID: uid}, // placeholder，Add 时会换成完整凭证
+			credits:           s.Credits,
+			expiring:          s.Expiring,
+			unusable:          s.Unusable,
+			creditsStale:      stale,
+			disabled:          s.Disabled,
+			reason:            s.Reason,
+			until:             s.Until,
+			modelUntil:        s.ModelUntil,
+			lastCheckinOK:     s.LastCheckinOK,
+			lastCheckinAt:     s.LastCheckinAt,
+			lastCheckinMsg:    s.LastCheckinMsg,
+			sessionDead:       s.SessionDead,
+			sessionDeadReason: s.SessionDeadReason,
+			sessionDeadAt:     s.SessionDeadAt,
 		}
 	}
 }
@@ -530,16 +629,19 @@ func (p *Pool) saveLocked() {
 	sf := stateFile{Version: stateVersion, Accounts: map[string]accountState{}}
 	for uid, e := range p.byUID {
 		sf.Accounts[uid] = accountState{
-			Credits:        e.credits,
-			Expiring:       e.expiring,
-			Unusable:       e.unusable,
-			ModelUntil:     e.modelUntil,
-			Disabled:       e.disabled,
-			Reason:         e.reason,
-			Until:          e.until,
-			LastCheckinOK:  e.lastCheckinOK,
-			LastCheckinAt:  e.lastCheckinAt,
-			LastCheckinMsg: e.lastCheckinMsg,
+			Credits:           e.credits,
+			Expiring:          e.expiring,
+			Unusable:          e.unusable,
+			ModelUntil:        e.modelUntil,
+			Disabled:          e.disabled,
+			Reason:            e.reason,
+			Until:             e.until,
+			LastCheckinOK:     e.lastCheckinOK,
+			LastCheckinAt:     e.lastCheckinAt,
+			LastCheckinMsg:    e.lastCheckinMsg,
+			SessionDead:       e.sessionDead,
+			SessionDeadReason: e.sessionDeadReason,
+			SessionDeadAt:     e.sessionDeadAt,
 		}
 	}
 	raw, err := json.MarshalIndent(sf, "", "  ")

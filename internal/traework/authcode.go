@@ -155,14 +155,6 @@ func (e *AuthCodeRejectedError) Error() string {
 // IsDeviceLimitReached 判断是否设备数上限（20401 / Device limit reached）。
 // 官方客户端定义：tc[tc.Handle_Login_DeviceLimitError=20401]。达到上限需到其它设备
 // 登出或设备列表「下线」释放名额（同一账号最多同时登录 10 台设备）。
-type DeviceLimitError struct {
-	*AuthCodeRejectedError
-}
-
-func (e *DeviceLimitError) Error() string {
-	return "设备数量已达上限：请到其它设备登出该账号或登录设备列表「下线」释放名额（同一账号最多 10 台设备）"
-}
-
 // IsDeviceLimitReached 非 nil 且属设备数上限错误时返回 true。
 func IsDeviceLimitReached(err error) bool {
 	if err == nil {

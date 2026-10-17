@@ -94,31 +94,40 @@ func tryCampaigns(dt string) (provider.CheckinReport, error) {
 	}
 	var list struct {
 		Campaigns []struct {
-			CampaignID  string `json:"campaignId"`
-			CampaignKey string `json:"campaignKey"`
-			ActionType  string `json:"actionType"`
-			ClaimStatus string `json:"claimStatus"`
+			CampaignID  string           `json:"campaignId"`
+			CampaignKey string           `json:"campaignKey"`
+			ActionType  string           `json:"actionType"`
+			ClaimStatus claimStatusNode  `json:"claimStatus"`
+			Benefit     *campaignBenefit `json:"benefit"`
 		} `json:"campaigns"`
 	}
 	if err := json.Unmarshal(raw, &list); err != nil {
 		return provider.CheckinReport{Status: provider.CheckinError, Msg: fmt.Sprintf("campaigns parse: %v", err)}, nil
 	}
 	var targetID string
+	var alreadyAmount int64
 	already := false
 	for _, cp := range list.Campaigns {
+		// 只有 CLAIM_BENEFIT 是签到领积分；VIEW_DETAILS 等其它动作的 CLAIMED 与「今日已领」无关，
+		// 不能用来把 no_campaign 掩成已领取（否则当天漏领）。
 		if cp.ActionType != "CLAIM_BENEFIT" {
 			continue
 		}
-		switch cp.ClaimStatus {
+		switch cp.ClaimStatus.mode() {
 		case "CLAIMABLE":
 			targetID = cp.CampaignID
 		case "CLAIMED":
 			already = true
+			if cp.Benefit != nil {
+				alreadyAmount = cp.Benefit.Amount
+			}
 		}
 	}
 	if targetID == "" {
 		if already {
-			return provider.CheckinReport{Status: provider.CheckinAlready, Msg: "今日已领取"}, nil
+			// 已领取时活动里只有 CLAIMED 记录，本次不会再拿到 claim 回执，
+			// 金额只能取活动自身的 benefit.amount（桌面端已领后仍会保留该字段）。
+			return provider.CheckinReport{Status: provider.CheckinAlready, Amount: alreadyAmount, Msg: alreadyMsg(alreadyAmount)}, nil
 		}
 		// 活动尚未创建（10:00 整点延迟）→ 可重试状态，不可当作完成。
 		return provider.CheckinReport{Status: provider.CheckinNoCampaign, Msg: "无可用签到活动"}, nil
@@ -130,7 +139,7 @@ func tryCampaigns(dt string) (provider.CheckinReport, error) {
 		return provider.CheckinReport{Status: provider.CheckinError, Msg: err.Error()}, err
 	}
 	if status == http.StatusConflict { // 409 幂等：今日已领
-		return provider.CheckinReport{Status: provider.CheckinAlready, Msg: "今日已领取"}, nil
+		return provider.CheckinReport{Status: provider.CheckinAlready, Msg: alreadyMsg(0)}, nil
 	}
 	if status == http.StatusUnauthorized {
 		return provider.CheckinReport{Status: provider.CheckinError}, sessionDead(status, raw)
@@ -139,11 +148,9 @@ func tryCampaigns(dt string) (provider.CheckinReport, error) {
 		return provider.CheckinReport{Status: provider.CheckinError, Msg: fmt.Sprintf("领取失败 http %d: %s", status, truncate(string(raw), 150))}, nil
 	}
 	var claim struct {
-		Status   string `json:"status"`
-		Replayed bool   `json:"replayed"`
-		Benefit  *struct {
-			Amount int64 `json:"amount"`
-		} `json:"benefit"`
+		Status   string           `json:"status"`
+		Replayed bool             `json:"replayed"`
+		Benefit  *campaignBenefit `json:"benefit"`
 	}
 	if err := json.Unmarshal(raw, &claim); err != nil {
 		return provider.CheckinReport{Status: provider.CheckinError, Msg: fmt.Sprintf("claim parse: %v", err)}, nil
@@ -152,13 +159,66 @@ func tryCampaigns(dt string) (provider.CheckinReport, error) {
 		return provider.CheckinReport{Status: provider.CheckinError, Msg: fmt.Sprintf("未知状态 %s", claim.Status)}, nil
 	}
 	if claim.Replayed {
-		return provider.CheckinReport{Status: provider.CheckinAlready, Msg: "今日已领取"}, nil
+		return provider.CheckinReport{Status: provider.CheckinAlready, Msg: alreadyMsg(claim.Benefit.amount())}, nil
 	}
-	amount := int64(0)
-	if claim.Benefit != nil {
-		amount = claim.Benefit.Amount
-	}
+	amount := claim.Benefit.amount()
 	return provider.CheckinReport{Status: provider.CheckinClaimed, Amount: amount, Msg: fmt.Sprintf("签到成功 +%d", amount)}, nil
+}
+
+// campaignBenefit 活动/回执里的权益描述（签到只有 CREDITS 一种，故只关心金额）。
+type campaignBenefit struct {
+	Kind   string `json:"kind"`
+	Amount int64  `json:"amount"`
+}
+
+// amount 空指针安全地取金额：活动未配置 benefit 或上游未回填时为 0。
+func (b *campaignBenefit) amount() int64 {
+	if b == nil {
+		return 0
+	}
+	return b.Amount
+}
+
+// claimStatusNode 兼容 claimStatus 的两种线上形态：
+//
+//	"CLAIMABLE"              扁平字符串（早期抓包/本地 qoder2api 采样）
+//	{"status":"CLAIMABLE"}   嵌套对象（2026-10-17 桌面端 0.4.8 实测）
+//
+// 之前按 string 反序列化：对象形态会让**整个列表**解析失败（campaigns parse: …），
+// 而 wild-work 的日志只看到 no_campaign，桌面端却显示「可领取」——两者从此对不上。
+// 这里自行解码，两种形态都接受，未知形态降级为空串（= 不可领取，不误领）。
+type claimStatusNode struct {
+	state string // 归一化后的状态串
+	raw   string // 原始取值（日志排查用）
+}
+
+func (n *claimStatusNode) UnmarshalJSON(b []byte) error {
+	n.raw = string(b)
+	var s string
+	if err := json.Unmarshal(b, &s); err == nil {
+		n.state = s
+		return nil
+	}
+	var obj struct {
+		Status string `json:"status"`
+	}
+	if err := json.Unmarshal(b, &obj); err == nil {
+		n.state = obj.Status
+		return nil
+	}
+	n.state = "" // 未知形态：当作不可领取，让上层按 no_campaign/已领判定
+	return nil
+}
+
+// mode 返回归一化状态（大写、去空白）；未知形态返回空串，调用方按「不可领取」处理。
+func (n claimStatusNode) mode() string { return strings.ToUpper(strings.TrimSpace(n.state)) }
+
+// alreadyMsg 已领取的展示文案：有金额时带上，避免面板显示「今日已领取」却不知领了多少。
+func alreadyMsg(amount int64) string {
+	if amount > 0 {
+		return fmt.Sprintf("今日已领取 +%d", amount)
+	}
+	return "今日已领取"
 }
 
 // sessionDead 构造类型化的 401 错误：调度器用 errors.As(*provider.Error) 判定自愈，

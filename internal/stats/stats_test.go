@@ -297,6 +297,7 @@ func TestRotationView(t *testing.T) {
 		{UID: "a4", Group: "workbuddy", Nickname: "A4", Credits: 900, Cooling: true}, // 冷却排除
 		{UID: "a5", Group: "workbuddy", Nickname: "A5", Credits: 900, Disabled: true},
 		{UID: "t1", Group: "traework", Nickname: "T1", Credits: 50},
+		{UID: "t2", Group: "traework", Nickname: "T2", Credits: 30}, // 第二账号：单账号组不进轮换视图
 	}, now)
 	s.ApplySticky("workbuddy", "a2", 30, 50) // 当前粘性 = a2
 
@@ -323,19 +324,73 @@ func TestRotationView(t *testing.T) {
 	}
 }
 
-// 粘性账号被删/冷却后 Current 自动为 null（平台视图随之隐藏）。
+// 单账号组（组内账号总数 < 2）不出现在轮换视图——无接棒候选（Current 恒为自己、
+// Next 恒空），纯噪音。自然覆盖：自定义渠道伪账号（R66：UID "custom-<名>"）、
+// oczen 匿名号（唯一且不可增删）；platformRows 等聚合视图不受影响。
+func TestRotationSkipsSingleAccountGroups(t *testing.T) {
+	s := newTestStats(t)
+	now := time.Now()
+	s.ApplyPoll([]Account{
+		{UID: "custom-sgproxy", Group: "sgproxy", Nickname: "sgproxy (自定义)", Credits: 500},
+		{UID: "custom-cliproxy", Group: "cliproxy", Nickname: "cliproxy (自定义)", Credits: 300},
+		{UID: "oczen-anonymous", Group: "oczen", Nickname: "匿名", Credits: 800},
+		{UID: "a1", Group: "workbuddy", Nickname: "A1", Credits: 100},
+		{UID: "a2", Group: "workbuddy", Nickname: "A2", Credits: 200},
+	}, now)
+	s.ApplySticky("sgproxy", "custom-sgproxy", 1, 50)
+	s.ApplySticky("oczen", "oczen-anonymous", 2, 50)
+	s.ApplySticky("workbuddy", "a1", 5, 50)
+
+	snap := s.Snapshot(now)
+	for _, v := range snap.Rotation {
+		if v.Group == "sgproxy" || v.Group == "cliproxy" || v.Group == "oczen" {
+			t.Fatalf("单账号组不应出现在轮换视图: %+v", v)
+		}
+	}
+	// 多账号渠道不受影响
+	if len(snap.Rotation) != 1 || snap.Rotation[0].Group != "workbuddy" {
+		t.Fatalf("workbuddy 应正常显示: %+v", snap.Rotation)
+	}
+	// platformRows 不受影响：单账号渠道（自定义/oczen 匿名）照常入平台表
+	foundSgproxy, foundOczen := false, false
+	for _, r := range snap.Platforms {
+		if r.Group == "sgproxy" && r.Accounts == 1 {
+			foundSgproxy = true
+		}
+		if r.Group == "oczen" && r.Accounts == 1 {
+			foundOczen = true
+		}
+	}
+	if !foundSgproxy || !foundOczen {
+		t.Fatalf("单账号渠道应仍在平台表: %+v", snap.Platforms)
+	}
+}
+
+// 粘性账号被删后整视图退场（Current 无法定位即 continue）；下一轮上游重建
+// 粘性记录后自然恢复。另覆盖：组内只剩单账号时同样不生成视图。
 func TestRotationCurrentEvaporates(t *testing.T) {
 	s := newTestStats(t)
 	now := time.Now()
-	s.ApplyPoll([]Account{{UID: "a1", Group: "workbuddy", Credits: 100}}, now)
+	s.ApplyPoll([]Account{
+		{UID: "a1", Group: "workbuddy", Credits: 100},
+		{UID: "a2", Group: "workbuddy", Credits: 80},
+	}, now)
 	s.ApplySticky("workbuddy", "a1", 10, 50)
 	if len(s.Snapshot(now).Rotation) != 1 {
 		t.Fatalf("前置失败：应有 1 个平台视图")
 	}
-	// a1 被删（下一轮快照不含它）→ Current 为 null，整视图退场
-	s.ApplyPoll([]Account{{UID: "b2", Group: "workbuddy", Credits: 100}}, now.Add(time.Minute))
-	snap := s.Snapshot(now.Add(time.Minute))
-	if len(snap.Rotation) != 0 {
+	// a1 被删（粘性 uid 无法定位）→ 即使组内仍有 a2，整视图退场
+	s.ApplyPoll([]Account{{UID: "a2", Group: "workbuddy", Credits: 80}}, now.Add(time.Minute))
+	if snap := s.Snapshot(now.Add(time.Minute)); len(snap.Rotation) != 0 {
 		t.Fatalf("粘性账号消失后平台视图应退场: %+v", snap.Rotation)
+	}
+	// 恢复多账号 + 新粘性记录 → 视图回来
+	s.ApplyPoll([]Account{
+		{UID: "a2", Group: "workbuddy", Credits: 80},
+		{UID: "a3", Group: "workbuddy", Credits: 60},
+	}, now.Add(2*time.Minute))
+	s.ApplySticky("workbuddy", "a2", 1, 50)
+	if snap := s.Snapshot(now.Add(2 * time.Minute)); len(snap.Rotation) != 1 || snap.Rotation[0].Current.UID != "a2" {
+		t.Fatalf("重建粘性后视图应恢复: %+v", snap.Rotation)
 	}
 }

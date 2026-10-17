@@ -340,9 +340,8 @@ type poolEntry struct {
 	ContextWindow json.RawMessage `json:"context_window_tokens"` // 形状 {"dev":n,"max":n}
 	DisplayConfig struct {
 		DisplayName   string `json:"display_name"`
-		IsCustomModel bool   `json:"is_custom_model"`  // 自定义模型（第三方代理）需额外授权
-		Multimodal    bool   `json:"multimodal"`       // 图像输入能力（上游声明）
-		Capability    string `json:"model_capability"` // reasoning_model / chat_model（暂未消费，只记录上游形态）
+		IsCustomModel bool   `json:"is_custom_model"` // 自定义模型（第三方代理）需额外授权
+		Multimodal    bool   `json:"multimodal"`      // 图像输入能力（上游声明）
 	} `json:"display_config"`
 	ModelDetailList json.RawMessage `json:"model_detail_list"` // 形状 [{"max_tokens":n},...]
 }

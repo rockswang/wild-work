@@ -302,8 +302,7 @@ func streamAsOpenAI(w io.Writer, r io.Reader, model string, flush func()) (map[s
 	return usage, nil
 }
 
-// Stream 实现 provider.Upstream：嵌套 SSE → 标准 OpenAI SSE 透传。
-// 返回值为末帧捕获的 usage（供记账，上游未返回时为 nil）。
+// Stream 实现 provider.Upstream（无 usage 回调的轻量入口，测试与通用路径共用）。
 func Stream(w http.ResponseWriter, r io.Reader, model string) (map[string]any, error) {
 	return StreamCapture(w, r, model, nil)
 }

@@ -30,18 +30,12 @@ func TestWrapIsNoopWithoutTag(t *testing.T) {
 	}
 }
 
-// TestSwitchesAreInertWithoutTag 发布版开关恒关：即使设了环境变量、调了 Enable，
+// TestSwitchesAreInertWithoutTag 发布版开关恒关：即使设了环境变量，
 // 也不得开启（发布版没有落盘能力）。
 func TestSwitchesAreInertWithoutTag(t *testing.T) {
 	t.Setenv("WILDWORK_DUMP_DIR", t.TempDir())
 	Refresh()
-	Enable(t.TempDir())
 	if Enabled() {
 		t.Fatal("发布版 Enabled 必须恒为 false")
-	}
-	Disable()
-	Refresh()
-	if Enabled() {
-		t.Fatal("Refresh 后仍应为 false")
 	}
 }

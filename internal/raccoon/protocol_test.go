@@ -1,6 +1,7 @@
 package raccoon
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -63,17 +64,21 @@ func TestParseCallbackURLErrorNotLeakingCode(t *testing.T) {
 func TestCallbackFileRoundTrip(t *testing.T) {
 	dir := t.TempDir()
 
-	// 未落盘时 ok=false 且不报错（= 用户还没在浏览器里走完授权）
-	if _, ok, err := LoadCallback(dir); err != nil || ok {
-		t.Fatalf("空目录期望 ok=false err=nil，实际 ok=%v err=%v", ok, err)
+	// 未落盘时文件不存在
+	if _, err := os.Stat(filepath.Join(dir, CallbackFileName)); !os.IsNotExist(err) {
+		t.Fatalf("空目录期望无回调文件，实际 err=%v", err)
 	}
 
 	if err := SaveCallback(dir, "office-raccoon://auth/callback?code=c1&state=s1"); err != nil {
 		t.Fatalf("SaveCallback: %v", err)
 	}
-	p, ok, err := LoadCallback(dir)
-	if err != nil || !ok {
-		t.Fatalf("LoadCallback 期望 ok=true err=nil，实际 ok=%v err=%v", ok, err)
+	var p CallbackPayload
+	raw, rerr := os.ReadFile(filepath.Join(dir, CallbackFileName))
+	if rerr != nil {
+		t.Fatalf("读回调文件：%v", rerr)
+	}
+	if err := json.Unmarshal(raw, &p); err != nil {
+		t.Fatalf("回调文件应为合法 JSON：%v", err)
 	}
 	if p.Code != "c1" || p.State != "s1" {
 		t.Fatalf("载荷不符：code=%q state=%q", p.Code, p.State)
@@ -93,8 +98,8 @@ func TestCallbackFileRoundTrip(t *testing.T) {
 	if err := ClearCallback(dir); err != nil {
 		t.Fatalf("ClearCallback: %v", err)
 	}
-	if _, ok, _ := LoadCallback(dir); ok {
-		t.Fatal("清理后仍读到回调")
+	if _, err := os.Stat(filepath.Join(dir, CallbackFileName)); !os.IsNotExist(err) {
+		t.Fatal("清理后回调文件仍在")
 	}
 	if err := ClearCallback(dir); err != nil {
 		t.Fatalf("重复 ClearCallback 应无错：%v", err)
@@ -108,9 +113,13 @@ func TestSaveCallbackKeepsParseError(t *testing.T) {
 	if err := SaveCallback(dir, "office-raccoon://auth/callback"); err != nil {
 		t.Fatalf("SaveCallback: %v", err)
 	}
-	p, ok, err := LoadCallback(dir)
-	if err != nil || !ok {
-		t.Fatalf("期望落盘成功：ok=%v err=%v", ok, err)
+	raw, rerr := os.ReadFile(filepath.Join(dir, CallbackFileName))
+	if rerr != nil {
+		t.Fatalf("期望落盘成功：%v", rerr)
+	}
+	var p CallbackPayload
+	if err := json.Unmarshal(raw, &p); err != nil {
+		t.Fatalf("回调文件应为合法 JSON：%v", err)
 	}
 	if !strings.Contains(p.Err, "缺少 code") {
 		t.Fatalf("期望 Err 记录解析失败原因，实际 %q", p.Err)

@@ -174,6 +174,18 @@ func TestClassify(t *testing.T) {
 		// 账号上其它模型照常路由（见 R47）。
 		{429, "usage exceeds frequency limit ... switch to the other models to continue", "soft_rate"},
 		{429, "our gateway is closed currently", "soft_rate"},
+		// 14018 积分耗尽（2026-09-23 生产实录原文 body）：账号级余额问题归 hard_credit
+		// ——误判软限流只冷 60s，降级链永不触发，客户端死循环吃 429。
+		{429, `{"error":{"data":{"code":14018,"msg":"Credits exhausted. Please visit the link below to purchase add-on packs and get more credits: https://www.codebuddy.ai/profile/usage ","requestId":"9044201e"}}`, "hard_credit"},
+		// 匹配防前缀误伤（S2）：code 140180 含子串 "code":14018，须保持软限流；
+		// 尾形（code 后紧跟 }，无 msg）是真 14018，须命中。
+		{429, `{"error":{"data":{"code":140180,"msg":"future code"}}}`, "soft_rate"},
+		{429, `{"error":{"data":{"code":14018}}}`, "hard_credit"},
+		// 14003 过频（构造 body，未实证）：保持软限流，不回归。
+		{429, `{"code":14003,"msg":"too many requests"}`, "soft_rate"},
+		// 429 + quota exceeded（非 14018）：429 优先于 hardRule 的既有语义保持——
+		// 先判 hard 会把 6004 类模型级限流误归 12h 账号冷却。
+		{429, `{"error":{"msg":"quota exceeded"}}`, "soft_rate"},
 		{404, "", "not_found"},
 		{500, "", "server"},
 		{400, "code=11102", "client"},

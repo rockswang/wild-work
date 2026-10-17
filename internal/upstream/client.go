@@ -84,6 +84,11 @@ func Classify(status int, body string) ErrKind {
 	if status == http.StatusPaymentRequired {
 		return ErrHardCredit
 	}
+	// 401：登录态失效（令牌过期/被吊销）。放在文案标记之前：HTML 形态的 401
+	// Authorization Required（无业务信封）没有可匹配文案，也要归入 SessionDead（#134）。
+	if status == http.StatusUnauthorized {
+		return ErrSessionDead
+	}
 	lower := strings.ToLower(body)
 	for _, m := range sessionDeadMarkers {
 		if strings.Contains(body, m) {
@@ -98,6 +103,21 @@ func Classify(status int, body string) ErrKind {
 		return ErrHardCredit
 	}
 	if status == http.StatusTooManyRequests {
+		// 例外：积分耗尽（14018 "Credits exhausted"，复数 s 漏配 hardMarkers）是账号级
+		// 余额问题而非限流——误判软限流只冷 60s 且降级链永不触发，客户端死循环吃 429。
+		// 与 workbuddyai/models.go Classify 同构特判（预防性：国内 workbuddy 渠道暂无
+		// 14018 实录，但两份 Classify 语义须同步演进）。归 hard_credit：账号级 12h
+		// 硬冷却（充值后 ReenableIfCredits 自动解冻），下一请求入口降级链正常顶替。
+		// 匹配防前缀误伤："code":140180 含子串 "code":14018——命中后下一字符须非
+		// 数字，防未来 14xxxx 新码误归 12h 账号硬冷却。
+		if idx := strings.Index(body, `"code":14018`); idx >= 0 {
+			if end := idx + len(`"code":14018`); end >= len(body) || body[end] < '0' || body[end] > '9' {
+				return ErrHardCredit
+			}
+		}
+		if strings.Contains(lower, "credits exhausted") {
+			return ErrHardCredit
+		}
 		return ErrSoftRate
 	}
 	for _, m := range hardMarkers {
@@ -667,20 +687,46 @@ func (c *Client) getUserResource(a *auth.Auth) (*userResourceResp, error) {
 
 // DailyCheckin 执行每日签到。已签到（业务 code 非 0）也返回错误，调用方按 msg 区分。
 func (c *Client) DailyCheckin(a *auth.Auth) error {
+	_, err := c.DailyCheckinGrant(a)
+	return err
+}
+
+// DailyCheckinGrant 执行签到并解析上游回执的发放额：credit/today_credit 字段
+// （权威值，见 ref/Buddy2api 同款实现）。供 provider.CheckinGranter 能力接口
+// （issue #67：签到包落在明日到期 key 上且提前 r=0 建档，差分在「发放即消耗」
+// 场景会把当日 earn 抵消为 0；回执值不依赖差分）。解析失败/未回填返回 0，
+// 调用方降级回快照差分口径，不影响签到主流程。
+func (c *Client) DailyCheckinGrant(a *auth.Auth) (granted int64, err error) {
 	log.Printf("workbuddy checkin start uid=%s", a.UID)
 	url := c.billingBase(a) + "/v2/billing/meter/daily-checkin"
 	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader([]byte("{}")))
 	if err != nil {
-		return err
+		return 0, err
 	}
 	BillingHeaders(req, a)
-	_, err = c.doJSONBilling(req)
+	data, err := c.doJSONBilling(req)
 	if err != nil {
 		log.Printf("workbuddy checkin failed uid=%s err=%v", a.UID, err)
-		return err
+		return 0, err
 	}
-	log.Printf("workbuddy checkin success uid=%s", a.UID)
-	return nil
+	// 容忍响应形状差异：credit 字段可能在 data 层或带 today_credit 别名；
+	// JSON 数字可能带小数（Buddy2api 实测 float）。失败吞掉——记账是锦上添花。
+	var env struct {
+		Credit         json.Number `json:"credit"`
+		TodayCredit    json.Number `json:"today_credit"`
+		TodayCheckedIn bool        `json:"today_checked_in"`
+	}
+	if json.Unmarshal(data, &env) == nil {
+		v := env.Credit
+		if v == "" {
+			v = env.TodayCredit
+		}
+		if f, perr := v.Float64(); perr == nil && f > 0 {
+			granted = int64(f) // 积分是整数口径，小数部分是上游表示误差
+		}
+	}
+	log.Printf("workbuddy checkin success uid=%s granted=%d", a.UID, granted)
+	return granted, nil
 }
 
 // Classify 实现 provider.Upstream。

@@ -526,32 +526,11 @@ func normalizeFrame(obj map[string]any) map[string]any {
 	return out
 }
 
-// Stream 透传上游 SSE 到 w（逐帧规范化后 flush），保证至少写一个 [DONE]。
-// 调用方必须先设置过 status 200；本函数自设 SSE headers。
-// 流式策略：逐帧透传（规范化已剥空 content 噪声），恢复与上游一致的平滑流式。
-//
-// StreamHint 变体（gateway_hint 任务）：上游 error 帧透传时附加
-// error.gateway_hint 字段——message 原文不动，hint 并列补充；hintFn 返回空串
-// 或 nil 时与 Stream 行为逐字节一致。
-func Stream(w http.ResponseWriter, r io.Reader) error {
-	return StreamCapture(w, r, nil)
-}
-
 // StreamCapture 同 Stream，额外把末帧捕获的 usage（OpenAI 形状）回调给 onUsage
 // （非 nil 时；上游未返回 usage 则不回调）。供 handler 记 token 流水。
 // usage 帧同时仍透传给客户端，客户端行为零变化。
 func StreamCapture(w http.ResponseWriter, r io.Reader, onUsage func(map[string]any)) error {
 	return streamCore(w, r, nil, onUsage)
-}
-
-// streamCore 流式透传核心：hintFn 注入 gateway_hint，onUsage 捕获末帧 usage。
-//
-// StreamHint 同 Stream，但上游 error 帧透出前把 hintFn(payload) 的返回值写入
-// error.gateway_hint。hintFn 为 nil 或返回空串 → 原样透传（零改写）。
-// 空流兜底 error 帧（"empty upstream stream"）不带 hint（网关本地故障形态
-// 未覆盖，不编造）。
-func StreamHint(w http.ResponseWriter, r io.Reader, hintFn func(string) string) error {
-	return streamCore(w, r, hintFn, nil)
 }
 
 // StreamWith 同时需要两个钩子时的最小导出（既捕获上游 error 帧、又记末帧 usage）。

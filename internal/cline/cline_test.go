@@ -223,9 +223,6 @@ func TestStreamMalformedErrorFrame(t *testing.T) {
 	if err == nil {
 		t.Fatal("非法帧不得伪装成正常收尾")
 	}
-	if !upstream.IsEmptyStreamError(err) {
-		t.Logf("形态：%v（非空流错误也可接受，只要不伪装成功）", err)
-	}
 }
 
 // TestStreamNormalCompletionUnchanged 对照：正常流必须零改动、且能拿到 usage。

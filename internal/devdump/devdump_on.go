@@ -38,7 +38,28 @@ var state atomic.Pointer[string]
 func init() { Refresh() }
 
 // Refresh 重读环境变量（启动期由 main 调一次）。
-func Refresh() { set(os.Getenv(envVar)) }
+//
+// 2026-10-17 增强：环境变量为空时**默认落盘到 exe 同目录的 `dump/`**。
+// 理由：本包只存在于 `-tags devdump` 构建里，而那种构建的唯一目的就是抓包；
+// 再要求使用者去设环境变量（Windows 上要么开命令行、要么写 .bat，而 .bat 又会被代码页
+// 折腾得中文报错）只会把简单事做复杂。发布版不含本包，故不存在「忘了关开关」的风险。
+// 需要换目录时仍可用 WILDWORK_DUMP_DIR 覆盖。
+func Refresh() {
+	if d := strings.TrimSpace(os.Getenv(envVar)); d != "" {
+		set(d)
+		return
+	}
+	set(defaultDir())
+}
+
+// defaultDir 抓包默认落盘目录：exe 同目录下的 `dump/`（取不到 exe 路径时退回工作目录）。
+func defaultDir() string {
+	exe, err := os.Executable()
+	if err != nil {
+		return "dump"
+	}
+	return filepath.Join(filepath.Dir(exe), "dump")
+}
 
 // Enable 以 dir 为落盘根目录开启（空串等价 Disable）。
 func Enable(dir string) { set(dir) }
@@ -192,6 +213,7 @@ var dumpSubstr = []string{
 	"llm_utils_chat",        // traework / traecode（SOLO）
 	"/messages",             // monkeycode（Anthropic 形状）
 	"/responses",            // monkeycode（Responses 形状）
+	"/snap-manager/",        // codearts 控制面（statistics/plugin 额度统计，含身份字段线索）
 }
 
 // noDumpSubstr 命中即跳过的路径片段（目录/费率/凭据/状态探测，噪音高）。
@@ -202,9 +224,13 @@ var noDumpSubstr = []string{
 	"/v1/messages/count_tokens", // Anthropic 兼容层的 token 计数（非推理）
 }
 
-// shouldDump 判定该请求是否值得落盘（只 dump 对话类 POST）。
+// shouldDump 判定该请求是否值得落盘：**白名单驱动**（含 GET 的额度/统计端点）。
+//
+// 2026-10-17 调整：原先要求「必须是 POST」，于是像 codearts 的
+// `/snap-manager/v1/statistics/plugin`（**GET**）这类端点永远抓不到——而它正是核查
+// 「上游是否下发 domain_id/user_id 等身份字段」的关键。现改为：命中白名单即落盘，方法不限。
 func shouldDump(req *http.Request) bool {
-	if req == nil || req.URL == nil || req.Method != http.MethodPost {
+	if req == nil || req.URL == nil {
 		return false
 	}
 	switch req.URL.Hostname() {

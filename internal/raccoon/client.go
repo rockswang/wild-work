@@ -435,11 +435,8 @@ type catalogModel struct {
 	ModelName         string   `json:"model_name"`
 	Description       string   `json:"description"`
 	DisplayDesc       string   `json:"display_description"`
-	Visible           bool     `json:"visible"`
-	BillingCategory   string   `json:"billing_category"`
 	BillingMultiplier float64  `json:"billing_multiplier"`
 	Tags              []string `json:"tags"`
-	AbilityLevel      int      `json:"ability_level"`
 	Params            struct {
 		ContextWindow int64 `json:"context_window"`
 		MaxTokens     int64 `json:"max_tokens"`

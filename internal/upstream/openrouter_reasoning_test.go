@@ -72,7 +72,7 @@ func reasoningFramesOf(t *testing.T, body string) []string {
 // 且不重复（两者同内容时只发一次）。
 func TestStreamNormalizesOpenRouterReasoning(t *testing.T) {
 	rec := httptest.NewRecorder()
-	if err := Stream(rec, strings.NewReader(openRouterReasoningFixture)); err != nil {
+	if err := StreamCapture(rec, strings.NewReader(openRouterReasoningFixture), nil); err != nil {
 		t.Fatalf("Stream: %v", err)
 	}
 	body := rec.Body.String()
@@ -108,7 +108,7 @@ func TestStreamReasoningOnlyFallbackToSummary(t *testing.T) {
 	fixture := `data: {"id":"g","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","reasoning_details":[{"type":"reasoning.summary","summary":"第一步：读题。","format":"meta-responses-v1","index":0}]}}]}` + "\n\n" +
 		"data: [DONE]\n\n"
 	rec := httptest.NewRecorder()
-	if err := Stream(rec, strings.NewReader(fixture)); err != nil {
+	if err := StreamCapture(rec, strings.NewReader(fixture), nil); err != nil {
 		t.Fatalf("Stream: %v", err)
 	}
 	got := reasoningFramesOf(t, rec.Body.String())
@@ -123,7 +123,7 @@ func TestStreamReasoningTextBeatsSummary(t *testing.T) {
 	fixture := `data: {"id":"g","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","reasoning_details":[{"type":"reasoning.text","text":"原始全文推理","format":"anthropic-claude-v1","index":0},{"type":"reasoning.summary","summary":"摘要","format":"anthropic-claude-v1","index":1}]}}]}` + "\n\n" +
 		"data: [DONE]\n\n"
 	rec := httptest.NewRecorder()
-	if err := Stream(rec, strings.NewReader(fixture)); err != nil {
+	if err := StreamCapture(rec, strings.NewReader(fixture), nil); err != nil {
 		t.Fatalf("Stream: %v", err)
 	}
 	got := reasoningFramesOf(t, rec.Body.String())
@@ -138,7 +138,7 @@ func TestStreamReasoningContentWinsOverOpenRouter(t *testing.T) {
 	fixture := `data: {"id":"g","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","reasoning_content":"首选","reasoning":"备选","reasoning_details":[{"type":"reasoning.summary","summary":"备选"}]}}]}` + "\n\n" +
 		"data: [DONE]\n\n"
 	rec := httptest.NewRecorder()
-	if err := Stream(rec, strings.NewReader(fixture)); err != nil {
+	if err := StreamCapture(rec, strings.NewReader(fixture), nil); err != nil {
 		t.Fatalf("Stream: %v", err)
 	}
 	got := reasoningFramesOf(t, rec.Body.String())

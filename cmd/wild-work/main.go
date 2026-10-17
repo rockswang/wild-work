@@ -42,7 +42,13 @@ import (
 	"wild-work/internal/loomy"
 	"wild-work/internal/loopguard"
 	"wild-work/internal/monkeycode"
+	"wild-work/internal/codearts"
+	"wild-work/internal/gemini"
+	"wild-work/internal/kilo"
+	"wild-work/internal/lobsterai"
+	"wild-work/internal/minimax"
 	"wild-work/internal/oczen"
+	"wild-work/internal/zcode"
 	"wild-work/internal/officeace"
 	"wild-work/internal/platform"
 	"wild-work/internal/pool"
@@ -218,8 +224,36 @@ func main() {
 	// OpenCodeZen 匿名通道无凭证文件：全程只有一个虚拟账号，
 	// 不经目录扫描、不参与 reload（见 app.reloadAccounts 的说明）。
 	ocAuths := []*auth.Auth{oczen.AnonymousAuth()}
-	log.Printf("loaded accounts: workbuddy=%d %s, traework=%d, qoder=%d, qodercn=%d, qodercom=%d, workbuddyai=%d, qwenwork=%d, glm=%d, monkeycode=%d, raccoon=%d, loomy=%d, cline=%d, officeace=%d, oczen=%d(匿名) from %s",
-		len(wbAuths), cfg.Region, len(trAuths), len(qdAuths), len(qcnAuths), len(qcmAuths), len(wbaAuths), len(qwAuths), len(glmAuths), len(mcAuths), len(rcAuths), len(lmAuths), len(clAuths), len(oaAuths), len(ocAuths), cfg.AuthDir)
+	// Kilo 免费池同样是免密渠道：没有凭证文件、没有登录流程，只有一个虚拟账号。
+	kiAuths := []*auth.Auth{kilo.AnonymousAuth()}
+	// MiniMax Code：正常多账号渠道，凭据由设备码登录写入 auths/minimax-*.json。
+	mimAuths, err := auth.LoadMinimaxDir(cfg.AuthDir)
+	if err != nil {
+		fatal("读取 MiniMax 账号目录失败：%v", err)
+	}
+	// LobsterAI：正常多账号渠道，凭据由本机回调登录写入 auths/lobsterai-*.json。
+	lobAuths, err := auth.LoadLobsterAIDir(cfg.AuthDir)
+	if err != nil {
+		fatal("读取 LobsterAI 账号目录失败：%v", err)
+	}
+	// ZCode：正常多账号渠道，凭据由服务端中介设备授权流登录写入 auths/zcode-*.json。
+	zcdAuths, err := auth.LoadZCodeDir(cfg.AuthDir)
+	if err != nil {
+		fatal("读取 ZCode 账号目录失败：%v", err)
+	}
+	// Gemini（Google Code Assist）：正常多账号渠道，凭据由 loopback OAuth 登录写入 auths/gemini-*.json。
+	gemAuths, err := auth.LoadGeminiDir(cfg.AuthDir)
+	if err != nil {
+		fatal("读取 Gemini 账号目录失败：%v", err)
+	}
+	// CodeArts（华为云 CodeArts Agent）：正常多账号渠道，凭据为 AK/SK + SecurityToken
+	// （由 PKCE OAuth 登录写入 auths/codearts-*.json）。
+	caAuths, err := auth.LoadCodeArtsDir(cfg.AuthDir)
+	if err != nil {
+		fatal("读取 CodeArts 账号目录失败：%v", err)
+	}
+	log.Printf("loaded accounts: workbuddy=%d %s, traework=%d, qoder=%d, qodercn=%d, qodercom=%d, workbuddyai=%d, qwenwork=%d, glm=%d, monkeycode=%d, raccoon=%d, loomy=%d, cline=%d, officeace=%d, oczen=%d(匿名), kilo=%d(匿名), minimax=%d, lobsterai=%d, zcode=%d, gemini=%d, codearts=%d from %s",
+		len(wbAuths), cfg.Region, len(trAuths), len(qdAuths), len(qcnAuths), len(qcmAuths), len(wbaAuths), len(qwAuths), len(glmAuths), len(mcAuths), len(rcAuths), len(lmAuths), len(clAuths), len(oaAuths), len(ocAuths), len(kiAuths), len(mimAuths), len(lobAuths), len(zcdAuths), len(gemAuths), len(caAuths), cfg.AuthDir)
 
 	wbPool := pool.New(filepath.Join(stateDir, "state-workbuddy.json"))
 	for _, a := range wbAuths {
@@ -291,6 +325,39 @@ func main() {
 	// 冷却也要清：该渠道只有这一个账号且无号可轮换，冷却即等于整条渠道下线。
 	ocPool.SetDisabled(oczen.AnonymousUID, false)
 	ocPool.ClearPenalty(oczen.AnonymousUID)
+	// kilo：与 oczen 同款——整池只有一个虚拟账号，state 仅用于记冷却（无积分、无签到）。
+	// 同样要在启动时自愈：任何历史脏数据（冷却/禁用）都会让这条没有第二个账号的渠道直接下线。
+	kiPool := pool.New(filepath.Join(stateDir, "state-kilo.json"))
+	for _, a := range kiAuths {
+		kiPool.Add(a)
+	}
+	kiPool.SetDisabled(kilo.AnonymousUID, false)
+	kiPool.ClearPenalty(kilo.AnonymousUID)
+	// MiniMax：真多账号池（每个 MiniMax 账号一份 OAuth 凭据），不置 SingleAccount。
+	mimPool := pool.New(filepath.Join(stateDir, "state-minimax.json"))
+	for _, a := range mimAuths {
+		mimPool.Add(a)
+	}
+	// LobsterAI：真多账号池（每个有道账号一份凭据，含 keyfrom 四元组），不置 SingleAccount。
+	lobPool := pool.New(filepath.Join(stateDir, "state-lobsterai.json"))
+	for _, a := range lobAuths {
+		lobPool.Add(a)
+	}
+	// ZCode：真多账号池（每个智谱账号一份凭据 + device_mid），不置 SingleAccount。
+	zcdPool := pool.New(filepath.Join(stateDir, "state-zcode.json"))
+	for _, a := range zcdAuths {
+		zcdPool.Add(a)
+	}
+	// Gemini：真多账号池（每个 Google 账号一份 OAuth 凭据 + project），不置 SingleAccount。
+	gemPool := pool.New(filepath.Join(stateDir, "state-gemini.json"))
+	for _, a := range gemAuths {
+		gemPool.Add(a)
+	}
+	// CodeArts：真多账号池（每个华为账号一份 AK/SK + SecurityToken），不置 SingleAccount。
+	caPool := pool.New(filepath.Join(stateDir, "state-codearts.json"))
+	for _, a := range caAuths {
+		caPool.Add(a)
+	}
 
 	// 所有流式渠道（对话）：走独立 client（StreamHTTP 无总超时），TimeoutSeconds 只作用于
 	// 非流式调用；流式兜底改由 IdleTimeout（空闲看门狗）承担。理由见 config.StreamIdleSeconds。
@@ -340,6 +407,35 @@ func main() {
 	oaUp.HTTP.Timeout = time.Duration(cfg.Upstream.TimeoutSeconds) * time.Second
 	oaUp.StreamHTTP.Transport = oaUp.HTTP.Transport
 	ocUp := oczen.New()
+	// kilo：免密免费池。非流式 client 保留总超时兜底；StreamHTTP 不设 Timeout（R35）。
+	// New() 内两个 client 已共用同一 Transport，这里无需再赋 Transport。
+	kiUp := kilo.New()
+	kiUp.HTTP.Timeout = time.Duration(cfg.Upstream.TimeoutSeconds) * time.Second
+	// MiniMax：推理是 Anthropic Messages 形状且恒流式，长思考常见 ⇒ 非流式 client 留总超时兜底，
+	// StreamHTTP 不设 Timeout（R35），两者共用 Transport。
+	mimUp := minimax.New()
+	mimUp.HTTP.Timeout = time.Duration(cfg.Upstream.TimeoutSeconds) * time.Second
+	mimUp.StreamHTTP.Transport = mimUp.HTTP.Transport
+	// LobsterAI：对话是 OpenAI 兼容面且恒流式；非流式 client 留总超时兜底，
+	// StreamHTTP 不设 Timeout（R35），两者共用 Transport。
+	lobUp := lobsterai.New()
+	lobUp.HTTP.Timeout = time.Duration(cfg.Upstream.TimeoutSeconds) * time.Second
+	lobUp.StreamHTTP.Transport = lobUp.HTTP.Transport
+	// ZCode：Anthropic Messages 形态且恒流式；非流式 client 留总超时兜底，
+	// StreamHTTP 不设 Timeout（R35），两者共用 Transport。
+	zcdUp := zcode.New()
+	zcdUp.HTTP.Timeout = time.Duration(cfg.Upstream.TimeoutSeconds) * time.Second
+	zcdUp.StreamHTTP.Transport = zcdUp.HTTP.Transport
+	// Gemini：自有 v1internal 信封、恒流式；非流式 client 留总超时兜底，
+	// StreamHTTP 不设 Timeout（R35），两者共用 Transport。
+	gemUp := gemini.New()
+	gemUp.HTTP.Timeout = time.Duration(cfg.Upstream.TimeoutSeconds) * time.Second
+	gemUp.StreamHTTP.Transport = gemUp.HTTP.Transport
+	// CodeArts：对话走华为 snap-access（HMAC 签名）且长思考常见；非流式 client 留总超时兜底，
+	// StreamHTTP 不设 Timeout（R35），两者共用 Transport。
+	caUp := codearts.New()
+	caUp.HTTP.Timeout = time.Duration(cfg.Upstream.TimeoutSeconds) * time.Second
+	caUp.StreamHTTP.Transport = caUp.HTTP.Transport
 	glmUp := glm.New()
 	// ⚠️ 只改 HTTP（非流式）的 Timeout。
 	// **不要**给 glmUp.StreamHTTP 设 Timeout —— 流式请求一旦有整体超时，
@@ -376,6 +472,12 @@ func main() {
 		provider.Cline.String():       {clUp.HTTP, clUp.StreamHTTP},
 		provider.OfficeAce.String():   {oaUp.HTTP, oaUp.StreamHTTP},
 		provider.Oczen.String():       {ocUp.HTTP, ocUp.StreamHTTP},
+		provider.Kilo.String():        {kiUp.HTTP, kiUp.StreamHTTP},
+		provider.Minimax.String():     {mimUp.HTTP, mimUp.StreamHTTP},
+		provider.LobsterAI.String():   {lobUp.HTTP, lobUp.StreamHTTP},
+		provider.ZCode.String():       {zcdUp.HTTP, zcdUp.StreamHTTP},
+		provider.Gemini.String():      {gemUp.HTTP, gemUp.StreamHTTP},
+		provider.CodeArts.String():    {caUp.HTTP, caUp.StreamHTTP},
 		provider.GLM.String():         {glmUp.HTTP, glmUp.StreamHTTP},
 	})
 	checkinMinutes, err := config.ParseClockTimes(cfg.Schedule.CheckinTimes)
@@ -425,11 +527,13 @@ func main() {
 	qcnSch := scheduler.New(scheduler.Config{Pool: qcnPool, Upstream: qcnUp, Name: "qodercn", CheckinMinutes: []int{qoderCheckinMinute}, CheckinRetryUntil: qoderCheckinRetryUntil, KeepaliveHours: cfg.Schedule.KeepaliveHours, ExpiringThreshold: expiringThreshold, Ledger: lg})
 	// QoderCOM：仅 campaigns 活动路径（无 daily-check-in）；其余同 QoderCN。
 	qcmSch := scheduler.New(scheduler.Config{Pool: qcmPool, Upstream: qcmUp, Name: "qodercom", CheckinMinutes: []int{qoderCheckinMinute}, CheckinRetryUntil: qoderCheckinRetryUntil, KeepaliveHours: cfg.Schedule.KeepaliveHours, ExpiringThreshold: expiringThreshold, Ledger: lg})
-	// MonkeyCode：无签到、无 refresh 端点，定时任务全关。
-	// 必须传**显式空切片**：传 nil 会被 scheduler.New 当作「未配置」补成默认
-	// 9:00/21:00 签到与 22:00 保活，每天产生两次必然失败的调用与失败日志。
+	// MonkeyCode：已实现签到（控制台 Cookie 走 POST {console}/api/v1/users/wallet/checkin，
+	// 见 internal/monkeycode/checkin.go）。签到时刻用全局配置；**不设 CheckinRetryUntil**
+	// ——它是「直接领一次」的接口，没有 Qoder 那种「活动整点后才创建」的延迟，
+	// 每个签到时刻单次尝试即可（失败状态会在下一个时刻重试），避免窗口内每分钟空跑。
+	// KeepaliveHours 仍为显式空切片：上游无 refresh 端点，保活没有可刷的东西。
 	mcSch := scheduler.New(scheduler.Config{Pool: mcPool, Upstream: mcUp, Name: "monkeycode",
-		CheckinMinutes: []int{}, KeepaliveHours: []int{}, ExpiringThreshold: expiringThreshold, Ledger: lg})
+		CheckinMinutes: checkinMinutes, KeepaliveHours: []int{}, ExpiringThreshold: expiringThreshold, Ledger: lg})
 	// 小浣熊：签到走 setting_info（每日积分惰性落账的触发点，见 internal/raccoon/checkin.go）。
 	// access_token 实测仅 ≈2h，而 refresh_token ≈30 天，
 	// 故保活比其它渠道更密（每 4 小时一次）以减少「请求先 401 再刷新」的额外往返；
@@ -439,11 +543,15 @@ func main() {
 	// 故**不设 CheckinRetryUntil**（窗口重试是为「活动尚未创建」设计的，本渠道无此语义）。
 	rcSch := scheduler.New(scheduler.Config{Pool: rcPool, Upstream: rcUp, Name: "raccoon",
 		CheckinMinutes: checkinMinutes, KeepaliveHours: []int{1, 5, 9, 13, 17, 21}, ExpiringThreshold: expiringThreshold, Ledger: lg})
-	// Loomy：无签到，且**上游无 refresh 端点**（session 14 天，到期需重新导入）；
-	// 定时任务全部关闭（显式空切片）：refreshToken 为空，保活虽会按「无 refresh token」
-	// 跳过、不会误禁用账号，但每天仍空跑一次并记录失败，故直接关掉。
+	// Loomy：已实现签到（宠物每日打工奖励，POST /api/v1/pet-work/rewards，
+	// 见 internal/loomy/checkin.go）——判据是该账号当日**有效对话轮次**（上游算），
+	// 故未在官方客户端用过该账号时结果是「未达档位」（如实可重试状态）。
+	// 签到时刻用全局配置、**不设 CheckinRetryUntil**：档位在一天里是渐进的，
+	// 窗口内每分钟重试既无意义又违反 §0.1；每个签到时刻单次尝试即可。
+	// KeepaliveHours 仍为显式空切片：**上游无 refresh 端点**（session 14 天，到期需重新登录/导入），
+	// 保活没有可刷的东西（refreshToken 为空，调度器会跳过并只记一条日志）。
 	lmSch := scheduler.New(scheduler.Config{Pool: lmPool, Upstream: lmUp, Name: "loomy",
-		CheckinMinutes: []int{}, KeepaliveHours: []int{}, ExpiringThreshold: expiringThreshold, Ledger: lg})
+		CheckinMinutes: checkinMinutes, KeepaliveHours: []int{}, ExpiringThreshold: expiringThreshold, Ledger: lg})
 	// Cline：官方 API Key **不过期**、无签到活动、无 refresh token ⇒ 定时任务全部关闭。
 	// 必须传显式空切片 []int{}（R39）：传 nil 会被 scheduler.New 的零值兜底补上默认时间，
 	// 于是每天空跑一次必然失败的签到，并在面板渲染红色「签到失败」。
@@ -458,6 +566,38 @@ func main() {
 	// CheckinMinutes/KeepaliveHours 均为显式空切片 → 调度器不发生任何上游调用。
 	ocSch := scheduler.New(scheduler.Config{Pool: ocPool, Upstream: ocUp, Name: "oczen",
 		CheckinMinutes: []int{}, KeepaliveHours: []int{}})
+	// Kilo 免费池：无账号、无签到、无 token 可保活 ⇒ 定时任务全关。
+	// 必须传**显式空切片**（R39）：传 nil 会被 scheduler.New 当作「未配置」补成
+	// 默认 9:00/21:00 签到与 22:00 保活，每天空跑两次必然失败的调用。
+	kiSch := scheduler.New(scheduler.Config{Pool: kiPool, Upstream: kiUp, Name: "kilo",
+		CheckinMinutes: []int{}, KeepaliveHours: []int{}})
+	// MiniMax：有每日签到（7 天面板，claim 幂等判据是响应里的 claim_result），
+	// 也需要 token 保活（refresh_token 会轮换，刷新后必须落盘）。
+	mimSch := scheduler.New(scheduler.Config{Pool: mimPool, Upstream: mimUp, Name: "minimax",
+		CheckinMinutes: checkinMinutes, KeepaliveHours: cfg.Schedule.KeepaliveHours,
+		ExpiringThreshold: expiringThreshold, Ledger: lg})
+	// LobsterAI：有每日签到（三步：slot → context → check_in，客户端幂等键），
+	// 也需要 token 保活（refresh 会轮换，刷新后必须落盘）。
+	lobSch := scheduler.New(scheduler.Config{Pool: lobPool, Upstream: lobUp, Name: "lobsterai",
+		CheckinMinutes: checkinMinutes, KeepaliveHours: cfg.Schedule.KeepaliveHours,
+		ExpiringThreshold: expiringThreshold, Ledger: lg})
+	// ZCode：**无签到**（积分领取依赖阿里云验证码 + headful 浏览器，本仓不实现；
+	// DailyCheckin 返回明确的「不支持」错误而不是伪造成功），且凭据**不可续期**
+	// （JWT 无 exp）⇒ 定时任务全关。必须传显式空切片（R39）：传 nil 会被补成默认
+	// 9:00/21:00 签到与 22:00 保活，每天空跑两次必然失败的调用并污染面板。
+	zcdSch := scheduler.New(scheduler.Config{Pool: zcdPool, Upstream: zcdUp, Name: "zcode",
+		CheckinMinutes: []int{}, KeepaliveHours: []int{}})
+	// Gemini：**无签到**（DailyCheckin 返回明确的「不支持」错误），但有 refresh_token 可续期
+	// ⇒ 只开保活；CheckinMinutes 用显式空切片关闭（R39：传 nil 会被补成默认 9:00/21:00，
+	// 每天空跑两次必然失败的签到并污染面板）。
+	gemSch := scheduler.New(scheduler.Config{Pool: gemPool, Upstream: gemUp, Name: "gemini",
+		CheckinMinutes: []int{}, KeepaliveHours: cfg.Schedule.KeepaliveHours,
+		ExpiringThreshold: expiringThreshold, Ledger: lg})
+	// CodeArts：有每日签到（三步，走 HMAC 签名；本包实现了 CheckinReporter/CheckinGranter，
+	// 签到结果按结构化状态上报），也需要 token 保活（续期后必须落盘，不变量 20）。
+	caSch := scheduler.New(scheduler.Config{Pool: caPool, Upstream: caUp, Name: "codearts",
+		CheckinMinutes: checkinMinutes, KeepaliveHours: cfg.Schedule.KeepaliveHours,
+		ExpiringThreshold: expiringThreshold, Ledger: lg})
 	// 智谱清言：签到与对话联动（当日需先对话才能领打卡进度），故保活与签到
 	// 合成一个流程（glm.Client.Keepalive 先发最小对话再签到）。
 	// 用 DailyCheckin 通道驱动：CheckinMinutes 用全局签到时间，
@@ -498,6 +638,21 @@ func main() {
 		// NoCooldownOnServerError 保留（语义已被 SingleAccount 涵盖，留着不依赖顺序）。
 		provider.Oczen: {Kind: provider.Oczen, Pool: ocPool, Upstream: ocUp, StaticModels: oczen.StaticModels(),
 			SingleAccount: true, NoCooldownOnServerError: true},
+		// kilo：同为无账号渠道（免密免费池，虚拟账号不可重登），语义与 oczen 一致——
+		// 任何账号级惩罚（冷却/计数/禁用）都等于整条渠道下线，故声明 SingleAccount，
+		// 由 handler 对所有错误一律原文透传。
+		provider.Kilo: {Kind: provider.Kilo, Pool: kiPool, Upstream: kiUp, StaticModels: kilo.StaticModels(),
+			SingleAccount: true, NoCooldownOnServerError: true},
+		// MiniMax：真多账号渠道 ⇒ 不置 SingleAccount（普通错误分类 + 池内轮换都适用）。
+		provider.Minimax: {Kind: provider.Minimax, Pool: mimPool, Upstream: mimUp, StaticModels: minimax.StaticModels()},
+		// LobsterAI：真多账号渠道 ⇒ 不置 SingleAccount（错误分类 + 池内轮换都适用）。
+		provider.LobsterAI: {Kind: provider.LobsterAI, Pool: lobPool, Upstream: lobUp, StaticModels: lobsterai.StaticModels()},
+		// ZCode：真多账号渠道 ⇒ 不置 SingleAccount（错误分类 + 池内轮换都适用）。
+		provider.ZCode: {Kind: provider.ZCode, Pool: zcdPool, Upstream: zcdUp, StaticModels: zcode.StaticModels()},
+		// Gemini：真多账号渠道 ⇒ 不置 SingleAccount。
+		provider.Gemini: {Kind: provider.Gemini, Pool: gemPool, Upstream: gemUp, StaticModels: gemini.StaticModels()},
+		// CodeArts：真多账号渠道 ⇒ 不置 SingleAccount。
+		provider.CodeArts: {Kind: provider.CodeArts, Pool: caPool, Upstream: caUp, StaticModels: codearts.StaticModels()},
 	}
 	appRuntimes := map[provider.Kind]*app.Runtime{
 		provider.WorkBuddy:   {Kind: provider.WorkBuddy, Pool: wbPool, Upstream: wbUp, Scheduler: wbSch},
@@ -515,6 +670,12 @@ func main() {
 		provider.Cline:       {Kind: provider.Cline, Pool: clPool, Upstream: clUp, Scheduler: clSch},
 		provider.OfficeAce:   {Kind: provider.OfficeAce, Pool: oaPool, Upstream: oaUp, Scheduler: oaSch},
 		provider.Oczen:       {Kind: provider.Oczen, Pool: ocPool, Upstream: ocUp, Scheduler: ocSch},
+		provider.Kilo:        {Kind: provider.Kilo, Pool: kiPool, Upstream: kiUp, Scheduler: kiSch},
+		provider.Minimax:     {Kind: provider.Minimax, Pool: mimPool, Upstream: mimUp, Scheduler: mimSch},
+		provider.LobsterAI:   {Kind: provider.LobsterAI, Pool: lobPool, Upstream: lobUp, Scheduler: lobSch},
+		provider.ZCode:       {Kind: provider.ZCode, Pool: zcdPool, Upstream: zcdUp, Scheduler: zcdSch},
+		provider.Gemini:      {Kind: provider.Gemini, Pool: gemPool, Upstream: gemUp, Scheduler: gemSch},
+		provider.CodeArts:    {Kind: provider.CodeArts, Pool: caPool, Upstream: caUp, Scheduler: caSch},
 	}
 
 	initCustomServerRts, initCustomAppRts, customNames := buildCustomRuntimes(cfg.CustomChannels, stateDir)
@@ -558,11 +719,15 @@ func main() {
 		fatal("embed web: %v", err)
 	}
 	inner := server.NewHandler(server.Config{
-		Runtimes:         runtimes,
-		APIKey:           cfg.APIKey,
-		Ledger:           appInst.Ledger(),
-		Stats:            appInst.Stats(), // 转发路径插桩 AddUsage/AddRequestRow（运行统计）
-		HardCooldown:     cfg.HardCreditDur,
+		Runtimes:     runtimes,
+		APIKey:       cfg.APIKey,
+		Ledger:       appInst.Ledger(),
+		Stats:        appInst.Stats(), // 转发路径插桩 AddUsage/AddRequestRow（运行统计）
+		HardCooldown: cfg.HardCreditDur,
+		// 硬冷却截到每日发奖窗口（方案 B）：qwenwork 每日 00:00 UTC+8 发额度，
+		// 账本实测 00:01~00:20 到账。固定 12h 会把 19:07 的 402 锁到次日 07:07，
+		// 白锁 7 小时；按窗口截断后 00:30 即解冻，额度一到账就能用。
+		HardCooldownFor:  cfg.HardCooldownFor,
 		SoftCooldown:     cfg.SoftRateDur,
 		ErrThreshold:     cfg.Cooldown.ErrThresh,
 		ErrCooldown:      cfg.ErrCooldownDur,
@@ -697,13 +862,26 @@ func main() {
 	go clSch.Run(sctx)
 	// OfficeAce 的 Run 不可漏（R34）：本渠道有签到与保活。
 	go oaSch.Run(sctx)
+	// kilo 的 Run 同样不可漏（R34）：本渠道当前无任何定时任务，Run 只会阻塞等
+	// ctx/配置变更；但漏了它，将来给它加任务就会静默不跑。
+	go kiSch.Run(sctx)
+	// MiniMax 的 Run 不可漏（R34）：本渠道有签到与保活两条定时任务。
+	go mimSch.Run(sctx)
+	// LobsterAI 的 Run 不可漏（R34）：本渠道有签到与保活两条定时任务。
+	go lobSch.Run(sctx)
+	// ZCode 的 Run 同样不可漏（R34）：本渠道当前无定时任务，但漏了将来加任务即静默失效。
+	go zcdSch.Run(sctx)
+	// Gemini 的 Run 不可漏（R34）：本渠道有 token 保活任务。
+	go gemSch.Run(sctx)
+	// CodeArts 的 Run 不可漏（R34）：本渠道有签到与保活两条定时任务。
+	go caSch.Run(sctx)
 
 	// 积分自动刷新覆盖全部渠道：
 	// - workbuddyai / qoder 无签到活动，不自动刷就会一直显示旧值或 0；
 	// - traework / workbuddy(CN) 虽有签到顺带拉余额，但一天只有两次，
 	//   其间 token 若在别处被轮换（401）也无法自愈；统一纳入循环才能
 	//   启动即出真实拆分数字，并靠 401 自愈（refreshIfSessionDead）及时恢复。
-	// oczen 不在其中：匿名通道无积分可刷（面板显示「不适用」），
+	// oczen 与 kilo 不在其中：两条都是免密渠道（无账号、无积分可刷，面板显示「不适用」），
 	// 其 FetchModelPricing 已在费率刷新路径单独覆盖。
 	// glm 纳入：其凭据本体是 refresh_token（accessToken 可为空），
 	// 积分靠 member_info 拉取，不刷就永远是 0。
@@ -711,6 +889,18 @@ func main() {
 		// 旧 Qoder 渠道已下线：不自动刷积分/token（避免周期性 token refresh failed 噪音）
 		provider.WorkBuddy, provider.WorkBuddyAI, provider.TraeWork, provider.QoderCN, provider.QoderCOM, provider.QwenWork, provider.GLM,
 		provider.Raccoon, provider.Loomy, provider.MonkeyCode,
+		// MiniMax 有 credit/details 额度端点：不纳入就永远显示 0（面板看不到真实余额）。
+		provider.Minimax,
+		// LobsterAI 有 profile-summary 额度端点，同理必须纳入。
+		provider.LobsterAI,
+		// ZCode 的额度是 **token 口径**（credits_unit="token"）：纳入刷新是为了让面板能显示
+		// Token 用量（用户 2026-10-17 的明确要求）；它的数字不进积分小计与积分流水
+		// —— 由 app.creditsUnit 分流保证（积分流水跳过 token 渠道，条目一律 InfoOnly）。
+		provider.ZCode,
+		// Gemini **不**纳入：它的 UserResource 恒 0——真实信息是「配额窗口剩余百分比」，
+		// 已按 InfoOnly 呈现在明细里、不参与积分算术，纳入只会刷出一个无意义的 0。
+		// CodeArts 有 benefit 额度（按 UTC+8 自然日重置）与积分账户形态，必须纳入。
+		provider.CodeArts,
 	}, app.CreditRefreshInterval)
 
 	// 启动即刷新「模型列表 + 费率」，之后每 30 分钟。
@@ -728,7 +918,7 @@ func main() {
 		if appInst.PanelAuthEnabled() {
 			fmt.Printf("  Panel auth:    admin_password enabled (cookie session, 7d)\n")
 		}
-		fmt.Printf("  Accounts:      workbuddy=%d traework=%d qoder=%d oczen=%d(匿名)\n", len(wbAuths), len(trAuths), len(qdAuths), len(ocAuths))
+		fmt.Printf("  Accounts:      workbuddy=%d traework=%d qoder=%d oczen=%d(匿名) kilo=%d(匿名) minimax=%d lobsterai=%d zcode=%d gemini=%d codearts=%d\n", len(wbAuths), len(trAuths), len(qdAuths), len(ocAuths), len(kiAuths), len(mimAuths), len(lobAuths), len(zcdAuths), len(gemAuths), len(caAuths))
 		fmt.Printf("\nPress Ctrl+C to exit\n")
 		sig := make(chan os.Signal, 1)
 		signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)

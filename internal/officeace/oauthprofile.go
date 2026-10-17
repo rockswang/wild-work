@@ -73,7 +73,7 @@ func loadOAuthProfile(uid string, installDirs []string) *oauthProfileState {
 		return nil
 	}
 	for _, root := range installRoots(installDirs) {
-		dir := filepath.Join(root, "packages", "api", ".config", "secure-config-nodejs")
+		dir := filepath.Join(root, filepath.FromSlash(secureDirRel))
 		keyPath := filepath.Join(dir, ".oauth-profile-encryption-key")
 		profPath := filepath.Join(dir, "oauth-"+uid+".json")
 		if !fileExistsS(profPath) {

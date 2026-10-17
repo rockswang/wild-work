@@ -177,7 +177,7 @@ func parseModelsJSON(path, uid string) *Account {
 	}
 	acc := &Account{
 		ID:            uid,
-		BaseURL:       trimSlash(baseURL),
+		BaseURL:       bareGateway(baseURL),
 		Authorization: authorization,
 		ModelNames:    dedupe(models),
 		Source:        "disk",

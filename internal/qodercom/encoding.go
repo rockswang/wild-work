@@ -4,7 +4,6 @@ package qodercom
 
 import (
 	"encoding/base64"
-	"fmt"
 	"strings"
 )
 
@@ -15,20 +14,14 @@ const (
 )
 
 var stdToCustom [128]byte
-var customToStd [256]byte
 
 func init() {
 	for i := range stdToCustom {
 		stdToCustom[i] = 0xFF
 	}
-	for i := range customToStd {
-		customToStd[i] = 0xFF
-	}
 	for i := 0; i < len(stdAlphabet); i++ {
 		stdToCustom[stdAlphabet[i]] = customAlphabet[i]
-		customToStd[customAlphabet[i]] = stdAlphabet[i]
 	}
-	customToStd[customPad] = '='
 }
 
 // qoderEncode 编码：base64 → 三段重排 → 字符映射（'=' → '$'）。
@@ -51,24 +44,4 @@ func qoderEncode(plain []byte) string {
 		}
 	}
 	return sb.String()
-}
-
-// qoderDecode 逆编码：字符映射（'$' → '='）→ 三段逆重排 → base64 解码。
-func qoderDecode(enc string) ([]byte, error) {
-	n := len(enc)
-	if n == 0 {
-		return nil, nil
-	}
-	mapped := make([]byte, n)
-	for i := 0; i < n; i++ {
-		c := enc[i]
-		s := customToStd[c]
-		if s == 0xFF {
-			return nil, fmt.Errorf("invalid char %q at %d", c, i)
-		}
-		mapped[i] = s
-	}
-	a := n / 3
-	std := string(mapped[n-a:]) + string(mapped[a:n-a]) + string(mapped[:a])
-	return base64.StdEncoding.DecodeString(std)
 }

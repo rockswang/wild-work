@@ -9,10 +9,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"net/http/cookiejar"
-	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -59,47 +57,6 @@ func Start(_ *http.Client, statePath string) (string, error) {
 		return "", fmt.Errorf("write state: %w", err)
 	}
 	return authURL, nil
-}
-
-// ResolveAuthURL 手动跟随登录页重定向链，返回最终 URL。
-// 国际版 authUrl 通常已是 www.workbuddy.ai/login?platform=CLI&state=...，
-// 多数情况无需跳转；此处保留跟随逻辑以兼容中间跳转。
-func ResolveAuthURL(_ *http.Client, rawURL string) (string, error) {
-	noFollow := &http.Client{
-		Timeout: 30 * time.Second,
-		CheckRedirect: func(*http.Request, []*http.Request) error {
-			return http.ErrUseLastResponse
-		},
-	}
-	current := rawURL
-	for hop := 0; hop < 5; hop++ {
-		req, err := http.NewRequest(http.MethodGet, current, nil)
-		if err != nil {
-			return "", err
-		}
-		req.Header.Set("Accept", "text/html,application/xhtml+xml,*/*")
-		req.Header.Set("User-Agent", "CLI/2.63.2 CodeBuddy/2.63.2")
-		resp, err := noFollow.Do(req)
-		if err != nil {
-			return "", err
-		}
-		loc := resp.Header.Get("Location")
-		_, _ = io.Copy(io.Discard, resp.Body)
-		_ = resp.Body.Close()
-		if loc == "" {
-			return current, nil
-		}
-		ref, err := url.Parse(loc)
-		if err != nil {
-			return "", err
-		}
-		base, err := url.Parse(current)
-		if err != nil {
-			return "", err
-		}
-		current = base.ResolveReference(ref).String()
-	}
-	return current, nil
 }
 
 // Poll 单次轮询登录状态；未完成返回 ErrPending；成功返回凭证并删除 state 文件。

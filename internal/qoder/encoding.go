@@ -15,7 +15,9 @@ const (
 )
 
 var stdToCustom [128]byte
-var customToStd [256]byte
+
+// customToStd 逆映射表（自定义字母表 → 标准 base64 字母表；$ → =）。
+var customToStd [128]byte
 
 func init() {
 	for i := range stdToCustom {
@@ -55,20 +57,23 @@ func qoderEncode(plain []byte) string {
 
 // qoderDecode 逆编码：字符映射（'$' → '='）→ 三段逆重排 → base64 解码。
 func qoderDecode(enc string) ([]byte, error) {
-	n := len(enc)
-	if n == 0 {
+	ny := len(enc)
+	if ny == 0 {
 		return nil, nil
 	}
-	mapped := make([]byte, n)
-	for i := 0; i < n; i++ {
+	mapped := make([]byte, ny)
+	for i := 0; i < ny; i++ {
 		c := enc[i]
+		if int(c) >= len(customToStd) {
+			return nil, fmt.Errorf("invalid char %q at %d", c, i)
+		}
 		s := customToStd[c]
 		if s == 0xFF {
 			return nil, fmt.Errorf("invalid char %q at %d", c, i)
 		}
 		mapped[i] = s
 	}
-	a := n / 3
-	std := string(mapped[n-a:]) + string(mapped[a:n-a]) + string(mapped[:a])
+	a := ny / 3
+	std := string(mapped[ny-a:]) + string(mapped[a:ny-a]) + string(mapped[:a])
 	return base64.StdEncoding.DecodeString(std)
 }

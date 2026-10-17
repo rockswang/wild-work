@@ -86,6 +86,13 @@ type Config struct {
 	// （标准档位 none/minimal/low/medium/high/xhigh/max/ultra；空串 = 不注入）。
 	// 来源 config.Compat.ReasoningEffort，面板保存后经 SetReasoningEffort 热更新。
 	ReasoningEffort string
+
+	// HardCooldownFor 硬冷却（402 余额/权益不足）时长的计算钩子：nil 时恒用
+	// HardCooldown。非 nil 时由装配层注入「截到每日发奖窗口」策略（见
+	// config.HardCooldownFor）——放在钩子里而不是 server 直接依赖 config，
+	// 是因为 server 包只依赖 provider/pool/ledger，不引入配置层。
+	HardCooldownFor func(now time.Time) time.Duration
+
 	// ModelFallbacks 模型降级链初始值（面板保存后经 SetModelFallbacks 热更新）。
 	ModelFallbacks []config.ModelFallbackRule
 
@@ -665,14 +672,18 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 	clientModel := peek.Model // 客户端请求的原始模型名（含 channel/ 前缀），回填进响应
 	// 上游报「参数被拒」时，客户端原始参数是唯一能定位「谁发的、发了什么」的依据
-	// （改写后的出站参数由渠道层打印），首次 4xx 时一并落日志。
-	clientParams := provider.LogParams(body)
+	// （改写后的出站参数由渠道层打印）——在 serveRotation 内按 body 现算。
 	clientUA := r.UserAgent()
 	// 档位能力表预热（首次请求才触发目录拉取，见 ensureEffortCaps）
 	h.ensureEffortCaps(rt)
 	// WILDWORK_DUMP_DIR 开启时落盘原始 body（可直接重放），默认 no-op；
 	// 返回的序号把本次请求的入站/出站/错误响应三份 dump 关联起来。
 	dumpSeqNo := dumpChatBody(body, clientModel, "client")
+	// 诊断：记录上下文构成摘要（config.body_log 关闭时立即返回，无实际开销）。
+	// 必须放在 rewriteModel 之前——要记的是客户端发来的原始体，而非改写后的。
+	if h.ledger != nil {
+		h.ledger.TraceBody(rt.Kind.String(), clientModel, body)
+	}
 	// 统计/流水的归一 ID：新旧写法（cline-free/x 与 cline/cline-free/x）归一到同一串，
 	// 否则同一模型会在用量榜/请求日志里裂成两行（R59）；其余渠道为恒等变换。
 	canonModel := provider.CanonicalModelID(clientModel)
@@ -685,10 +696,13 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	// agent 读 chunk.model / resp.model 即可感知实际执行模型）。
 	var fbApplied string
 	fbID, primaryAvail := h.pickModelFallback(rt, model)
-	// 口径说明：降级期间 ledger/stats 的 token 流水仍按**客户端请求名**记账（statRow.Model、
-	// AddUsage(clientModel)），因为该面向的口径是「客户端这一发花了多少」；实际执行模型
-	// 由上面的日志行 + 面板「降级记录」区块承担。不改成 dispModel 的另一个理由：
-	// 同渠道备胎（如 glm-5.2 顶 deepseek）会把消耗搬到另一行，历史趋势会失真。
+	// 口径说明：降级期间 ledger/stats 的 token 流水按**实际执行模型**记账
+	// （statRow.Model、AddUsage(acctModel)、ledgerModelOf(acctModel)）——谁实际工作、
+	// 谁实际消耗 token/积分，就记在谁名下（2026-10-16 口径变更，推翻原「按客户端
+	// 请求名记账」设计）。acctModel=记账归属模型（无降级=canonModel；降级=备胎的
+	// 规范对外 ID，归一函数同构，新旧写法仍归同一行）；原请求名→备胎的对照由
+	// 日志行 + 面板「降级记录」区块 + X-Model-Fallback 头/响应 model 字段承担。
+	acctModel := canonModel
 	if fbID != "" {
 		if rt2, m2, err := h.runtimeForModel(fbID); err == nil {
 			log.Printf("model fallback platform=%s from=%s to=%s", rt.Kind, clientModel, fbID)
@@ -696,6 +710,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("X-Model-Fallback", clientModel+" -> "+fbID)
 			rt, model = rt2, m2
 			fbApplied = fbID
+			acctModel = provider.CanonicalModelID(fbID)
 		}
 	}
 	dispModel := clientModel
@@ -733,7 +748,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	// TTFB 由 statWriter 记首字节，耗时/吞吐在出口由 defer 收口；
 	// Status 未显式赋值 = 成功写回（200）。
 	var statRow statsEngine.ReqRow
-	statRow.Model = canonModel
+	statRow.Model = acctModel
 	if peek.Stream {
 		statRow.Mode = "流"
 	} else {
@@ -754,10 +769,85 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		}()
 	}
 
+	// 轮转选号 + 上游交互 + 耗尽出口整体平移至 serveRotation（方案 B：轮转耗尽且最后
+	// 错误是积分耗尽时，按降级链当场切备胎、以备胎重入同一轮转段——抽方法使重入=
+	// 再次调用；成功/错误出口与记账 defer 全留在本函数，「一个客户端请求一行」口径
+	// 不变）。serveRotation 保持纯轮转语义；降级状态同步（模型改写/档位注入/记账
+	// 归属/响应头）由本函数在重入前完成，与入口降级完全同构。
+	for fbAttempt := 0; ; fbAttempt++ {
+		res := h.serveRotation(w, sw, rt, model, body, clientModel, dispModel, acctModel, &statRow, clientUA, dumpSeqNo, peek.Stream)
+		if res.done {
+			return
+		}
+		// 候选耗尽待透传（res.lastStatus>0）：方案 B 判定——只对积分耗尽
+		// （ErrHardCredit：账号刚进 12h 硬冷却，本渠道容量已翻 false，此刻
+		// pickModelFallback 必然命中规则或返回空）；仅重入一次（防备胎再降备胎
+		// 死循环）；单账号渠道豁免（透传是惩罚豁免不变量的设计约束）；此刻未写过
+		// 任何字节（轮转失败路径天然成立——所有写出都发生在成功流式/非流式分支
+		// 内），降级头可安全补发；无规则/备胎无容量 → fb2 为空，维持原样透传，
+		// 与现状一致。
+		if fbAttempt == 0 && res.lastKind == provider.ErrHardCredit && !rt.SingleAccount {
+			if fb2, _ := h.pickModelFallback(rt, model); fb2 != "" {
+				if rt2, m2, err2 := h.runtimeForModel(fb2); err2 == nil {
+					nb, err3 := rewriteModel(body, m2)
+					if err3 == nil {
+						log.Printf("model fallback platform=%s from=%s to=%s", rt.Kind, clientModel, fb2)
+						// 响应头必须在任何 WriteHeader 之前（此刻未写过任何字节）；
+						// 改写成功才发——失败走透传时不得残留降级头（S1）。
+						w.Header().Set("X-Model-Fallback", clientModel+" -> "+fb2)
+						body = nb
+						body = h.applyEffort(body, clientModel) // 与入口同参数；键已存在不碰（双注入守卫）
+						rt, model = rt2, m2
+						dispModel = fb2
+						acctModel = provider.CanonicalModelID(fb2) // 记账归属=备胎（0021/PR #148 口径）
+						statRow.Model = acctModel
+						statRow.Status = 0 // 429 轮转已污染；出口 defer 靠 Status==0 记 200
+						if h.stats != nil {
+							h.stats.NoteFallback(clientModel, fb2, time.Now()) // 请求内降级也喂降级记录
+						}
+						continue
+					}
+					log.Printf("model fallback body rewrite failed platform=%s to=%s err=%v（维持原样透传）", rt.Kind, fb2, err3)
+				}
+			}
+		}
+		transparentError(w, res.lastStatus, res.lastBody)
+		return
+	}
+}
+
+// rotationResult：serveRotation 的判定结果。done=true=响应已完整写回（成功/请求级
+// 错误/耗尽诊断引导），调用方直接收尾；done=false 且 lastStatus>0=候选耗尽待透传，
+// 由调用方决定原样透传还是按降级链请求内重入（方案 B，只认 ErrHardCredit）。
+type rotationResult struct {
+	done       bool
+	lastKind   provider.ErrKind
+	lastStatus int
+	lastBody   []byte
+}
+
+// serveRotation：chatCompletions 的轮转选号 + 上游交互 + 耗尽出口段（原代码整体
+// 平移，零缩进变化；结果经命名返回值承载——done 默认 true，既有裸 return 语义
+// 原样保留：所有提前返回的出口都已把响应写完）。轮转中「账号级可轮换」错误
+// （kind.Rotatable()）换号续试并置位 lastKind；请求级/内容类错误在循环内提前
+// 透传返回。方案 B 重入时由调用方完成全部降级状态同步后再次调用本方法（tried
+// 随调用重建，备胎渠道天然全新）。
+func (h *Handler) serveRotation(
+	w http.ResponseWriter, sw *statWriter, rt *Runtime, model string, body []byte,
+	clientModel, dispModel, acctModel string, statRow *statsEngine.ReqRow,
+	clientUA string, dumpSeqNo int, stream bool,
+) (res rotationResult) {
+	res.done = true // 默认：既有 return 出口都已把响应写完（成功/请求级错误/诊断引导）
+	// 上游报「参数被拒」时，客户端原始参数是唯一能定位「谁发的、发了什么」的依据
+	// （改写后的出站参数由渠道层打印），首次 4xx 时一并落日志。
+	clientParams := provider.LogParams(body)
 	tried := map[string]bool{}
 	var lastErr error
 	var lastStatus int
 	var lastBody []byte
+	// lastKind：轮转中最后一个「账号级可轮换」错误的类别（Rotatable 分支置位）——
+	// 候选耗尽透传前交回调用方做方案 B 判定；成功/请求级错误不置位（零值 ErrNone）。
+	var lastKind provider.ErrKind
 	for i := 0; i < h.cfg.MaxRotate; i++ {
 		acct := h.pickWithSticky(rt, model)
 		if acct == nil {
@@ -794,7 +884,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				h.stickyClear(rt, model)
 				var ue *provider.Error
 				if errors.As(err, &ue) && ue.Kind == provider.ErrSessionDead {
-					rt.Pool.Disable(acct.UID, "refresh session dead")
+					rt.Pool.MarkSessionDead(acct.UID, "refresh: "+err.Error())
 				} else {
 					rt.Pool.Cooldown(acct.UID, pool.CoolErr, h.cfg.ErrCooldown, "refresh: "+err.Error())
 				}
@@ -834,9 +924,9 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				// 402（权益不足）例外：账号本身健康，同号其他模型照常可用，只冷却「账号×该模型」
 				// ——下一次请求挑号阶段即「模型全冷」，自动触发降级链顶替；本次仍原文透传。
 				if kind == provider.ErrHardCredit {
-					rt.Pool.CooldownModel(acct.UID, model, pool.CoolHard, h.cfg.HardCooldown, "402 权益不足")
+					rt.Pool.CooldownModel(acct.UID, model, pool.CoolHard, h.hardCooldown(), "402 权益不足")
 					log.Printf("model cooldown (single-account 402) platform=%s uid=%s model=%s cooldown=%s",
-						rt.Kind, acct.UID, model, h.cfg.HardCooldown)
+						rt.Kind, acct.UID, model, h.hardCooldown())
 				}
 				// 日志点明错误性质与上游原文：旧文案（「不罚账号」）会让用户看到 403 时
 				// 误以为「工具把这个错误当成了请求级问题」，掩盖了真实原因（issue #117）。
@@ -847,9 +937,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			}
 			switch kind {
 			case provider.ErrHardCredit:
-				// 积分耗尽（429+14018 / 402）必须账号级冷却：若误按模型级，
-				// 同一账号的 N 个模型会各撞一次长硬冷却，白扔号更久。
-				rt.Pool.Cooldown(acct.UID, pool.CoolHard, h.cfg.HardCooldown, "余额/权益不足")
+				rt.Pool.Cooldown(acct.UID, pool.CoolHard, h.hardCooldown(), "余额/权益不足")
 			case provider.ErrSoftRate:
 				// 429/6004：上游声明「按模型限额」（「您也可以切换其他模型继续使用」）时
 				// 只冷却该账号的该模型，同号其他模型继续参与选号；否则按账号级冷却
@@ -864,15 +952,22 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 					log.Printf("account cooldown platform=%s uid=%s model=%s", rt.Kind, acct.UID, model)
 				}
 			case provider.ErrSessionDead:
-				rt.Pool.Disable(acct.UID, "session dead")
+				// 登录态失效不再混入「停用」：标记 SessionDead（挑号跳过 + 面板徽标 +
+				// 重新登录入口），与用户手动停用（Disable）分离（#134）。
+				rt.Pool.MarkSessionDead(acct.UID, truncateBody(respBody))
+				log.Printf("session dead marked platform=%s uid=%s", rt.Kind, acct.UID)
 			case provider.ErrNotFound:
 				rt.Pool.Cooldown(acct.UID, pool.CoolSoft, h.cfg.SoftCooldown, "upstream 404")
-			case provider.ErrContentBlocked, provider.ErrPromptTooLong,
-				provider.ErrImageInvalid, provider.ErrBadParams, provider.ErrPassthrough:
-				// 请求级错误（内容拦截 / 上下文超限 / 图片格式无效 / 出站 body 畸形 / 请求级拒绝）：
+			case provider.ErrContentBlocked, provider.ErrPromptTooLong, provider.ErrImageInvalid,
+				provider.ErrBadParams, provider.ErrPassthrough:
+				// 内容拦截 / 上下文超限 / 图片无效 / 出站 body 不合格 / 请求级拒绝：
 				// 不冷却不熔断不计错，直接透传原文回客户端。
-				// 这些是请求内容或请求形态问题，与账号健康无关——同一 body 换任何账号结果都一样，
-				// 轮转白费时间，NoteError 还会把健康账号喂到冷却。
+				// 这些是请求内容或请求形态问题，与账号健康无关，轮转白费时间且浪费好号配额。
+				//
+				// ⚠️ ErrImageInvalid 与 ErrBadParams 是 2026-10-17 补入的：两者的 ErrKind 注释
+				// 早就写着「请求级错误，不罚号不轮转，透传原文」，但本 case 漏了它们 ⇒ 落到
+				// default 做 NoteError 计数，等于拿客户端的问题惩罚健康账号。本地拒绝型渠道
+				// （monkeycode / loomy / raccoon / minimax）最容易触发这条路径。
 				transparentError(w, status, respBody)
 				return
 			case provider.ErrModelBlocked:
@@ -884,8 +979,17 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			case provider.ErrWafBlock, provider.ErrAccountFault:
 				// 账号级风控/授权故障：软冷却，不累计错误计数。
 				rt.Pool.Cooldown(acct.UID, pool.CoolSoft, h.cfg.SoftCooldown, kind.String())
-				transparentError(w, status, respBody)
-				return
+				if kind != provider.ErrAccountFault {
+					transparentError(w, status, respBody)
+					return
+				}
+			case provider.ErrClient:
+				// 请求内容/形态类 4xx（如 workbuddy 11148 工具调用与结果不配对）：
+				// 错误跟着请求体走，换号必然同样拒收——不累计错误计数。否则一个
+				// 坏会话的客户端重试风暴会在几分钟内把全池账号记满冷却（阈值默认 3），
+				// 面板呈现「渠道自己挂了」假象，且诱发无意义的模型降级链触发。
+				// 仅轮转以兼容「同模型不同账号权益差异」场景；候选耗尽后透传最后
+				// 错误（与上游分类器注释「BadParams：不罚号但仍轮转」对齐）。
 			case provider.ErrServer:
 				if rt.NoCooldownOnServerError {
 					// 该渠道声明 5xx 为上游网关抖动（账号本身健康），
@@ -907,6 +1011,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				lastErr = fmt.Errorf("upstream %s (http %d): %s", kind, status, truncateBody(respBody))
 				lastStatus = status
 				lastBody = respBody
+				lastKind = kind
 				continue
 			}
 			transparentError(w, status, respBody)
@@ -915,7 +1020,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		defer rc.Close()
 		rt.Pool.NoteSuccess(acct.UID)
 		h.stickySuccess(rt, model)
-		if peek.Stream {
+		if stream {
 			usage, serr := rt.Upstream.Stream(w, rc, dispModel)
 			cu := cacheUsageOf(usage) // 缓存命中（上游未上报时 reported=false，面板显示「—」）
 			// 记 token 流水（成功请求口径；usage 缺失记 0 token 仅计请求数）。
@@ -923,7 +1028,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			if h.ledger != nil {
 				pt, ct, src := usageTokens(usage)
 				h.ledger.AppendUsage(ledger.UsageEntry{Ch: rt.Kind.String(), UID: acct.UID,
-					Model: ledgerModelOf(clientModel), PT: pt, CT: ct, CR: cu.cached, CRC: cu.reported, Src: src})
+					Model: ledgerModelOf(acctModel), PT: pt, CT: ct, CR: cu.cached, CRC: cu.reported, Src: src})
 			}
 			if serr != nil && upstream.IsEmptyStreamError(serr) {
 				// 上游 200 但无有效数据帧：HTTP 头已发出只能 200，客户端会收到我们补的
@@ -937,7 +1042,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				pt, ct, _ := usageTokens(usage)
 				if pt > 0 || ct > 0 {
 					gen := time.Since(sw.start).Seconds() - float64(sw.ttfbMs)/1000
-					h.stats.AddUsage(canonModel, pt, ct, usageCredit(usage), sw.ttfbMs, gen, cu.cached, cu.reported, time.Now())
+					h.stats.AddUsage(acctModel, pt, ct, usageCredit(usage), sw.ttfbMs, gen, cu.cached, cu.reported, time.Now())
 					statRow.Tok = ct
 					if gen > 0 {
 						statRow.TokPerSec = float64(ct) / gen
@@ -987,29 +1092,20 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 							// 单号渠道：余额/权益不足透传原文，客户端/用户直接看到真实原因（如充值），
 							// 而不是被 503 掩盖成「渠道不可用」。账号本身不动，仅冷却「账号×该模型」，
 							// 下一次请求挑号即「模型全冷」，自动走降级链顶替。
-							rt.Pool.CooldownModel(acct.UID, model, pool.CoolHard, h.cfg.HardCooldown, "stream 402 权益不足")
+							rt.Pool.CooldownModel(acct.UID, model, pool.CoolHard, h.hardCooldown(), "stream 402 权益不足")
 							log.Printf("stream error model-cooldown platform=%s uid=%s model=%s kind=%s（单号渠道仅冷却该模型，原文透传）",
 								rt.Kind, acct.UID, model, kind)
 							break
 						}
-						rt.Pool.Cooldown(acct.UID, pool.CoolHard, h.cfg.HardCooldown, "stream business error: "+serr.Error())
+						rt.Pool.Cooldown(acct.UID, pool.CoolHard, h.hardCooldown(), "stream business error: "+serr.Error())
 						log.Printf("stream error cooled platform=%s uid=%s kind=%s cooldown=%s",
-							rt.Kind, acct.UID, kind, h.cfg.HardCooldown)
+							rt.Kind, acct.UID, kind, h.hardCooldown())
 					case provider.ErrSessionDead:
-						// 单号渠道（loomy / 小浣熊 / MonkeyCode）流内登录态失效**不硬禁用**。
-						// 依据有二：① 单号渠道 Disable = 整条渠道下线（对齐 #92 对流内限流/
-						// 权益不足的处置）；② 实测上游会在 **HTTP 200** 上偶发报 100002
-						// （2026-10-16 抓包：同一 token 30s 后即可用、10/13 亦有同类孤立事件），
-						// 硬禁用会把一条健康渠道下线。客户端已通过 error 帧收到上游原文
-						// （如「登录已失效，请重新登录」），可操作性由客户端承担，是否重导
-						// 凭据留给用户判断。多号渠道仍按原逻辑禁用。
-						if len(rt.Pool.List()) <= 1 && !rt.SingleAccount {
-							log.Printf("stream session dead platform=%s uid=%s（单号渠道不硬禁用；已下发 error 帧，err=%v）",
-								rt.Kind, acct.UID, serr)
-							break
-						}
-						rt.Pool.Disable(acct.UID, "stream business error: session dead")
-						log.Printf("stream error disabled platform=%s uid=%s", rt.Kind, acct.UID)
+						// 登录态失效：标记 SessionDead（挑号跳过 + 面板徽标 + 一键重登），不再混入停用（#134）。
+						// 单号渠道也因此不会被「整条渠道下线」——重新登录成功后 clearReloggedLocked 自动解除；
+						// 客户端已通过 error 帧收到上游原文（如「登录已失效，请重新登录」），可操作性由客户端承担。
+						rt.Pool.MarkSessionDead(acct.UID, serr.Error())
+						log.Printf("stream session dead platform=%s uid=%s（已下发 error 帧，err=%v）", rt.Kind, acct.UID, serr)
 					default:
 						// 其余流内错误（如请求级拒绝）不罚账号，只记日志。
 						log.Printf("stream error ignored platform=%s uid=%s kind=%s",
@@ -1025,9 +1121,9 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			// 下一次请求挑号即「模型全冷」，自动走降级链顶替；本次仍返回错误。
 			var asec provider.StreamErrorClassifier
 			if errors.As(err, &asec) && asec.Kind() == provider.ErrHardCredit {
-				rt.Pool.CooldownModel(acct.UID, model, pool.CoolHard, h.cfg.HardCooldown, "402 权益不足")
+				rt.Pool.CooldownModel(acct.UID, model, pool.CoolHard, h.hardCooldown(), "402 权益不足")
 				log.Printf("model cooldown (aggregate 402) platform=%s uid=%s model=%s cooldown=%s",
-					rt.Kind, acct.UID, model, h.cfg.HardCooldown)
+					rt.Kind, acct.UID, model, h.hardCooldown())
 			}
 			statRow.Status = http.StatusBadGateway
 			writeOpenAIError(w, http.StatusBadGateway, "upstream_parse", err.Error())
@@ -1053,7 +1149,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			pt, ct, src := usageTokens(u)
 			cu := cacheUsageOf(u)
 			h.ledger.AppendUsage(ledger.UsageEntry{Ch: rt.Kind.String(), UID: acct.UID,
-				Model: ledgerModelOf(clientModel), PT: pt, CT: ct, CR: cu.cached, CRC: cu.reported, Src: src})
+				Model: ledgerModelOf(acctModel), PT: pt, CT: ct, CR: cu.cached, CRC: cu.reported, Src: src})
 		}
 		writeJSON(w, http.StatusOK, resp)
 		// 运行统计：必须在写回之后——此刻 statWriter 才记到首字节，TTFB 为真值；
@@ -1065,7 +1161,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			if pt > 0 || ct > 0 {
 				gen := time.Since(sw.start).Seconds() - float64(sw.ttfbMs)/1000
 				cu := cacheUsageOf(u)
-				h.stats.AddUsage(canonModel, pt, ct, usageCredit(u), sw.ttfbMs, gen, cu.cached, cu.reported, time.Now())
+				h.stats.AddUsage(acctModel, pt, ct, usageCredit(u), sw.ttfbMs, gen, cu.cached, cu.reported, time.Now())
 				statRow.Tok = ct
 			}
 			statRow.Credit = usageCredit(u)
@@ -1074,7 +1170,9 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 	// 候选全部耗尽：透传最后一个上游错误（而非包装成 503）。
 	if lastStatus > 0 && lastBody != nil {
-		transparentError(w, lastStatus, lastBody)
+		// 候选耗尽：不在此透传——交回调用方判定（方案 B 积分耗尽时按降级链重入一次，
+		// 否则原样透传；透传语义见上方注释）。
+		res = rotationResult{done: false, lastKind: lastKind, lastStatus: lastStatus, lastBody: lastBody}
 		return
 	}
 
@@ -1149,12 +1247,13 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			rt.Kind, len(sts), disabled, cooling)
 	}
 	writeOpenAIError(w, http.StatusServiceUnavailable, "no_healthy_account", msg)
+	return // 裸 return：携带命名结果 res（done=true——诊断引导已把响应写完）
 }
 
 // noLoginChannel 报告渠道是否「无登录概念」（不存在凭证文件、也无重登入口）。
 // 用于把「去面板重新登录」这类引导文案限定在真正适用的渠道上，
-// 避免匿名通道（oczen）被误导去找一个不存在的登录按钮。
-func noLoginChannel(k provider.Kind) bool { return k == provider.Oczen }
+// 避免免密渠道（oczen / kilo）被误导去找一个不存在的登录按钮。
+func noLoginChannel(k provider.Kind) bool { return k == provider.Oczen || k == provider.Kilo }
 
 // keyPasteChannel 报告渠道凭据是否「由用户从官方站点自行创建后粘贴进来」（而非登录编排取得）。
 // 这类渠道的引导文案必须指向「粘贴新 Key」而不能说「重新登录」：
@@ -1699,6 +1798,19 @@ const softRateResetMaxCap = 24 * time.Hour
 // 按重置点解封，60s 软冷却过期后账号会被反复选中反复 429。解析失败/时长为非正值时
 // 回退默认 SoftCooldown。时间戳按 UTC+8 墙钟解析，与到期字段口径一致（AGENTS §6.18）。
 // 已知形态「2026-09-23 14:47:19」可能带「UTC+8」后缀，解析前剥掉。
+// hardCooldown 本次硬冷却（402 余额/权益不足）应持续多久。
+// 默认恒为 HardCooldown；装配层注入 HardCooldownFor 时按其计算（当前策略：
+// 截到下一个每日发奖窗口，见 config.HardCooldownFor）——qwenwork 每日 00:00
+// UTC+8 自动发额度，固定 12h 会把 19:07 的 402 锁到次日 07:07，白锁 7 小时。
+func (h *Handler) hardCooldown() time.Duration {
+	if h.cfg.HardCooldownFor != nil {
+		if d := h.cfg.HardCooldownFor(time.Now()); d > 0 {
+			return d
+		}
+	}
+	return h.cfg.HardCooldown
+}
+
 func (h *Handler) softRateCooldown(body string) time.Duration {
 	ts, ok := softRateResetTs(body)
 	if !ok {

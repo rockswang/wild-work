@@ -5,6 +5,7 @@ package officeace
 import (
 	"errors"
 	"os"
+	"strings"
 )
 
 // DPAPI 是 Windows 专属能力（绑定 Windows 登录会话密钥），其它平台无法解密。
@@ -19,8 +20,8 @@ func readProtectedText(path string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	text := trimSpaceString(string(raw))
-	if hasDPAPIHeader(text) {
+	text := strings.TrimSpace(string(raw))
+	if strings.HasPrefix(text, dpapiHeader) {
 		return "", errors.New("officeace: 该平台不支持 DPAPI 解密（Windows 专属）")
 	}
 	return text, nil

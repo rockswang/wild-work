@@ -31,21 +31,6 @@ func TestNormalizeModelName(t *testing.T) {
 	}
 }
 
-func TestEncodeDecodeRoundtrip(t *testing.T) {
-	plain := []byte(`{"a":1,"b":"中文内容 😀","c":[true,null,3.14]}`)
-	enc := qoderEncode(plain)
-	if enc == "" {
-		t.Fatal("empty encode")
-	}
-	dec, err := qoderDecode(enc)
-	if err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	if string(dec) != string(plain) {
-		t.Fatalf("roundtrip mismatch")
-	}
-}
-
 // TestParseDynamicModelsScenesFallback 验证 assistant→developer→chat 三级回退。
 func TestParseDynamicModelsScenesFallback(t *testing.T) {
 	// chat 缺失 → developer 回退

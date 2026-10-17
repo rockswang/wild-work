@@ -325,15 +325,3 @@ func TestTraeAllocationDeductsExpire(t *testing.T) {
 		}
 	}
 }
-
-// noExpiryChannel：oczen 匿名渠道无临期概念（喂入方跳过判据）。
-func TestNoExpiryChannel(t *testing.T) {
-	if !noExpiryChannel("oczen") {
-		t.Fatal("oczen 应被判无到期概念")
-	}
-	for _, g := range []string{"workbuddy", "traework", ""} {
-		if noExpiryChannel(g) {
-			t.Fatalf("%s 不应被判无到期概念", g)
-		}
-	}
-}

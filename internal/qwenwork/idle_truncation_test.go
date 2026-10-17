@@ -49,7 +49,7 @@ func TestStreamAsOpenAIReportsIdleTimeoutCause(t *testing.T) {
 	defer body.Close()
 
 	rec := httptest.NewRecorder()
-	_, serr := Stream(rec, body, "m")
+	_, serr := StreamCapture(rec, body, "m", nil)
 	out := rec.Body.String()
 
 	if serr == nil {
@@ -85,7 +85,7 @@ func TestStreamAsOpenAIReportsUpstreamBreakAsTruncated(t *testing.T) {
 	rec := httptest.NewRecorder()
 	// 先吐一帧再返回读错误（模拟 connection reset）。
 	rd := &resetAfter{payload: `data: {"body":"{\"id\":\"x\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"}}]}"}` + "\n\n"}
-	_, serr := Stream(rec, rd, "m")
+	_, serr := StreamCapture(rec, rd, "m", nil)
 	out := rec.Body.String()
 
 	if serr == nil {

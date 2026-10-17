@@ -378,6 +378,68 @@ func TestTraceparentShape(t *testing.T) {
 	}
 }
 
+// TestStreamRecognizesBusinessEnvelope 守门 D1（2026-10-17 修复）：
+// 上游以 HTTP 200 + 单行业务信封（{"code":"100002"}）表达鉴权失效时，流式路径**不得**
+// 以「空回答 + [DONE]」静默成功 —— 必须写出错误帧并上抛语义化错误。
+func TestStreamRecognizesBusinessEnvelope(t *testing.T) {
+	rec := httptest.NewRecorder()
+	_, err := Stream(rec, strings.NewReader(`{"code":"100002","desc":"登录已失效，请重新登录"}`), "loomy/glm-5.2")
+	if err == nil {
+		t.Fatal("业务信封必须上抛错误，实际 nil（客户端会看到空回答）")
+	}
+	// 本仓形态：流式路径上抛 *StreamError（实现 provider.StreamErrorClassifier，R75）。
+	var sec provider.StreamErrorClassifier
+	if !errors.As(err, &sec) || sec.Kind() != provider.ErrSessionDead {
+		t.Fatalf("err = %v，want StreamErrorClassifier(ErrSessionDead)", err)
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, "session_dead") {
+		t.Errorf("应向客户端写出错误帧，实际 body=%q", body)
+	}
+	if strings.Contains(body, "[DONE]") {
+		t.Error("失败时不得补 [DONE]（R36：不伪装正常收尾）")
+	}
+}
+
+// TestAggregateRejectsBusinessEnvelope 非流式路径同理：不得把业务信封当 chat.completion 返回
+// （否则客户端收到一个**没有 choices 的假响应**，比空流更难查）。
+func TestAggregateRejectsBusinessEnvelope(t *testing.T) {
+	resp, err := aggregate(strings.NewReader(`{"code":"100002","desc":"登录已失效"}`), "loomy/glm-5.2")
+	if err == nil {
+		t.Fatalf("业务信封必须上抛错误，实际返回 %v", resp)
+	}
+}
+
+// TestPricingExplicitPerEntry 守门 D3（2026-10-17 修复）：Explicit 必须**逐条**取值。
+// 旧实现把变量声明在循环外、每轮 `&explicit` 后又在末尾复位 ⇒ 所有条目共享同一个 bool
+// 且末值恒 true，R5「解析不到倍率 → 显示未知而不是免费」静默失效。
+func TestPricingExplicitPerEntry(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"data":[
+			{"id":"priced-model","name":"Priced（x3.0）"},
+			{"id":"unknown-model","name":"NoMultiplier"}
+		]}`))
+	}))
+	defer srv.Close()
+	c := New()
+	c.Base = srv.URL
+
+	list, err := c.FetchModelPricing(&auth.Auth{AccessToken: "dummy"})
+	if err != nil {
+		t.Fatalf("FetchModelPricing: %v", err)
+	}
+	byID := map[string]provider.ModelPricing{}
+	for _, p := range list {
+		byID[p.Model] = p
+	}
+	if got, ok := byID["priced-model"]; !ok || !got.IsExplicit() {
+		t.Errorf("priced-model 解析到倍率，应 Explicit=true，实际 %+v", got)
+	}
+	if got, ok := byID["unknown-model"]; !ok || got.IsExplicit() {
+		t.Errorf("unknown-model 解析不到倍率，应 Explicit=false（面板显示「未知」而非「免费」），实际 %+v", got)
+	}
+}
+
 func TestStreamAndAggregate(t *testing.T) {
 	in := "data: " + `{"id":"1","object":"chat.completion.chunk","model":"up","choices":[{"index":0,"delta":{"reasoning_content":"t"}}]}` + "\n\n" +
 		"data: " + `{"choices":[{"index":0,"delta":{"content":"hi"}}]}` + "\n\n" +

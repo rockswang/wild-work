@@ -43,6 +43,31 @@ const (
 	// OfficeAce 桌面端文件（models.json 里的 Basic AK/SK）或自助 OAuth 登录；
 	// 积分/签到走 V11 签名，续期走 DPoP + refresh_token。
 	OfficeAce Kind = "officeace"
+	// Kilo Kilo AI 免费池（api.kilo.ai/api/gateway）：**免密**、无账号、无签到、
+	// 无积分；免费集合由上游清单的 isFree 字段声明（不按模型名猜）。
+	// 与 oczen 同属「无账号渠道」形态（R16）：不建 auth 加载器、不进 reloadAccounts，
+	// 虚拟账号由 main 装配时注入（kilo.AnonymousAuth）。
+	Kilo Kind = "kilo"
+	// Minimax MiniMax Code 中国版（account.minimax.cn + agent.minimax.cn）：
+	// 登录走 OAuth 设备码 + PKCE；凭据是 access/refresh token（**非 JWT**，
+	// 过期时间必须由 expires_in 自算，不能解 exp）；推理是 Anthropic Messages 形状，
+	// 签到与积分走 minimax-cloud 端点。多账号渠道 ⇒ **不**置 SingleAccount。
+	Minimax Kind = "minimax"
+	// LobsterAI LobsterAI（有道龙虾）：API 在 lobsterai-server.youdao.com，对话是
+	// **OpenAI 兼容**面（不是 Anthropic 形态）；登录走本机 127.0.0.1 随机端口回调 + state
+	// （无 PKCE）；凭据必须持久化 keyfrom 四元组（uuid/first_keyfrom/latest_keyfrom/user_id）
+	// —— 它们是 refresh 与模型列表的必需载荷。多账号渠道 ⇒ **不**置 SingleAccount。
+	LobsterAI Kind = "lobsterai"
+	// Gemini Google Code Assist（cloudcode-pa.googleapis.com）：推理走自有 `v1internal` 信封，
+	// 鉴权是 Bearer + **逐字身份五头**，请求体必须**逐层字母序序列化**；配额是窗口百分比、无签到。
+	Gemini Kind = "gemini"
+	// CodeArts 华为云 CodeArts Agent：对话走华为 snap-access（**SDK-HMAC-SHA256 签名**），
+	// 登录是 PKCE OAuth；头名是否参与签名必须逐字节对齐（`maas_type` 要参与、`Agent-Type` 不参与）。
+	CodeArts Kind = "codearts"
+	// ZCode 智谱 ZCode：Anthropic Messages 形态；请求体 `system` 必须内嵌官方身份块（否则 405/3012）；
+	// 登录是服务端中介设备授权流。⚠️ **积分领取依赖阿里云验证码 + headful 浏览器**，
+	// 本仓不实现领取路径（渠道包注释里注明）。
+	ZCode Kind = "zcode"
 )
 
 func (k Kind) String() string { return string(k) }
@@ -56,7 +81,8 @@ func (k Kind) String() string { return string(k) }
 func BuiltinKinds() map[string]bool {
 	m := map[string]bool{}
 	for _, k := range []Kind{WorkBuddy, WorkBuddyAI, TraeWork, Qoder, QoderCN, QoderCOM,
-		QwenWork, MonkeyCode, Raccoon, Loomy, TraeCode, Oczen, GLM, Cline, OfficeAce} {
+		QwenWork, MonkeyCode, Raccoon, Loomy, TraeCode, Oczen, GLM, Cline, OfficeAce, Kilo, Minimax, LobsterAI,
+		Gemini, CodeArts, ZCode} {
 		m[k.String()] = true
 	}
 	for ns := range ModelNamespaces {
@@ -528,6 +554,14 @@ type ResourceItem struct {
 	// 两者都该显示，但相加无意义。
 	// 注意：InfoOnly 条目应同时置 Usable=true（它在界面上既非「不可用」，也不该被小计）。
 	InfoOnly bool `json:"info_only,omitempty"`
+	// Unit 该条目的计量单位：空串 = 积分（credits，默认），`"token"` = Token 计数。
+	//
+	// 为什么需要它：有些渠道的额度**不以积分计量**（ZCode 的 billing/balance 是 token 桶，
+	// MonkeyCode 的每日额度也是 token）。这类数字按「积分」展示会严重误导（上亿 token 看起来
+	// 像巨额积分），但完全隐藏又让用户看不到用量。故用 Unit 明确标注计量单位：前端据此把
+	// 该渠道渲染成「Token 计数」面板，并与积分**分开统计**（不并入积分合计）。
+	// 零值（空串）保持既有语义 = 积分，向后兼容。
+	Unit string `json:"unit,omitempty"`
 }
 
 // Summarize 按 Usable 标记汇总条目：返回 (可消耗剩余, 不可消耗剩余)。

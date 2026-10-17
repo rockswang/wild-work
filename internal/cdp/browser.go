@@ -27,15 +27,11 @@ import (
 	"time"
 )
 
-// Cookie 一个浏览器 Cookie。
+// Cookie 一个浏览器 Cookie（只保留渠道登录实际消费的字段）。
 type Cookie struct {
-	Name     string  `json:"name"`
-	Value    string  `json:"value"`
-	Domain   string  `json:"domain"`
-	Path     string  `json:"path"`
-	Expires  float64 `json:"expires"`
-	HTTPOnly bool    `json:"httpOnly"`
-	Secure   bool    `json:"secure"`
+	Name   string `json:"name"`
+	Value  string `json:"value"`
+	Domain string `json:"domain"`
 }
 
 // Browser 一个受控的浏览器实例。

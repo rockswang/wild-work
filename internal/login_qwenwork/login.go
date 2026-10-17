@@ -281,16 +281,11 @@ func SaveAuth(authDir string, r Result) (string, error) {
 // ---------------------------------------------------------------------------
 
 // pendingCode 操作
-func (p *pendingCode) reset() {
-	p.mu.Lock()
-	p.code, p.errMsg, p.received = "", "", false
-	p.mu.Unlock()
-}
-func (p *pendingCode) set(code string) { p.mu.Lock(); p.code, p.received = code, true; p.mu.Unlock() }
-func (p *pendingCode) fail(msg string) { p.mu.Lock(); p.errMsg, p.received = msg, true; p.mu.Unlock() }
+func (p *pendingCode) reset()              { p.mu.Lock(); p.code, p.errMsg, p.received = "", "", false; p.mu.Unlock() }
+func (p *pendingCode) set(code string)     { p.mu.Lock(); p.code, p.received = code, true; p.mu.Unlock() }
+func (p *pendingCode) fail(msg string)     { p.mu.Lock(); p.errMsg, p.received = msg, true; p.mu.Unlock() }
 func (p *pendingCode) snapshot() (code, errMsg string, ok bool) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
+	p.mu.Lock(); defer p.mu.Unlock()
 	return p.code, p.errMsg, p.received
 }
 
@@ -362,11 +357,6 @@ func writeState(path string, st state) error {
 	}
 	raw, _ := json.MarshalIndent(st, "", "  ")
 	return os.WriteFile(path, raw, 0o600)
-}
-
-func htmlEscape(s string) string {
-	r := strings.NewReplacer("&", "&amp;", "<", "&lt;", ">", "&gt;", `"`, "&#34;")
-	return r.Replace(s)
 }
 
 func truncate(s string, n int) string {

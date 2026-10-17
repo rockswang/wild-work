@@ -10,11 +10,6 @@ import (
 	"strings"
 )
 
-// WorkArea macOS：主屏可见区域（不含菜单栏/Dock）近似取全屏，供面板定位参考。
-func WorkArea() (int32, int32, int32, int32) {
-	return 0, 0, 1440, 900
-}
-
 // InfoBox macOS：用 osascript 弹对话框。
 func InfoBox(title, msg string) {
 	_ = exec.Command("osascript", "-e",
@@ -35,10 +30,9 @@ func AskYesNo(title, msg string) bool {
 	return err == nil && strings.Contains(string(out), "button returned:是")
 }
 
-// ---------------------------------------------------------------------------
-// 浏览器
-// ---------------------------------------------------------------------------
-
+// 本 fork 说明：CodeArts 授权走「无痕窗口 + 用户点授权」（internal/app/app.go 调
+// DefaultBrowserIncognito/LaunchIncognito），故上游 1e25be4 的死代码清理在本分支不适用，
+// 这组函数必须保留；否则 internal/app 编译失败。
 var browserApps = []struct {
 	bundle string
 	name   string
@@ -103,7 +97,48 @@ func SetAutostart(on bool) error {
 	if err != nil {
 		return err
 	}
-	plist := fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
+	plist := autostartPlist(exe)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	// 日志重定向目标 data/ 必须先于 plist 加载存在，否则 launchd 打开重定向文件失败（新装场景）。
+	if err := os.MkdirAll(filepath.Join(workDirFor(exe), "data"), 0o755); err != nil {
+		return err
+	}
+	if err := os.WriteFile(path, []byte(plist), 0o644); err != nil {
+		return err
+	}
+	return exec.Command("launchctl", "load", path).Run()
+}
+
+// workDirFor 推导数据/工作目录，规则与 cmd/wild-work 的 workDir() 保持一致：
+// WILDWORK_HOME > .app bundle（~/Library/Application Support/WildWork）> 二进制所在目录。
+// 日志落点必须与 app 实际写入的 state 目录同源，否则 plist 重定向会指向错误路径。
+func workDirFor(prog string) string {
+	if v := os.Getenv("WILDWORK_HOME"); v != "" {
+		return v
+	}
+	dir := filepath.Dir(prog)
+	if strings.Contains(dir, ".app/Contents/MacOS") {
+		if home, err := os.UserHomeDir(); err == nil {
+			return filepath.Join(home, "Library", "Application Support", "WildWork")
+		}
+	}
+	return dir
+}
+
+// autostartPlist 生成开机自启 plist 内容。
+//
+// 本地补丁（2026-09-19，2026-09-24 重放到 v2.5.2 线）：对齐本机 launchd 实际运行态——
+// 无头模式 + KeepAlive + 日志重定向 + WorkingDirectory。上游原模板只写 ``--autostart``
+// 且无 KeepAlive/日志，与本机实际加载的定义不一致：一旦 bootout+bootstrap（或重启）
+// 按磁盘 plist 重载，服务会退化为「崩溃不自愈、无日志」形态。
+//
+// 注：prog 为二进制绝对路径；日志与工作目录都从 prog 所在目录推导（main.go 会 chdir 到该目录）。
+func autostartPlist(prog string) string {
+	dir := workDirFor(prog)
+	dataDir := filepath.Join(dir, "data")
+	return fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
@@ -111,19 +146,17 @@ func SetAutostart(on bool) error {
 	<key>ProgramArguments</key>
 	<array>
 		<string>%s</string>
-		<string>--autostart</string>
+		<string>--no-tray</string>
 	</array>
 	<key>RunAtLoad</key><true/>
+	<key>KeepAlive</key><true/>
+	<key>WorkingDirectory</key><string>%s</string>
+	<key>StandardOutPath</key><string>%s</string>
+	<key>StandardErrorPath</key><string>%s</string>
 </dict>
 </plist>
-`, launchAgentName, exe)
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return err
-	}
-	if err := os.WriteFile(path, []byte(plist), 0o644); err != nil {
-		return err
-	}
-	return exec.Command("launchctl", "load", path).Run()
+`, launchAgentName, prog, dir,
+		filepath.Join(dataDir, "app.log"), filepath.Join(dataDir, "error.log"))
 }
 
 // AutostartEnabled 检查 plist 是否存在且路径匹配。

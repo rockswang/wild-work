@@ -13,8 +13,6 @@ import (
 	"strings"
 	"sync"
 	"time"
-
-	"wild-work/internal/platform"
 )
 
 // 自助 OAuth 登录：不依赖本机 OfficeAce 桌面端，自己跑完华为云授权码 + PKCE + DPoP。
@@ -27,8 +25,8 @@ import (
 //	⑥ GET  {cloud}/v1/claw/client-permission-validate → 网关地址 + model_app_key/secret
 //	⑦ 落盘 auths/officeace-<uid>.json
 
+// authBase 定义见 quota.go（与 agentartsBase/stsTokenURL 放在一起，便于测试统一替换）。
 const (
-	authBase    = "https://auth.huaweicloud.com"
 	redirectURI = "https://agentarts.cn-southwest-2.myhuaweicloud.com/v1/claw/auth/callback"
 	bgImgURL    = "https://res.hc-cdn.com/AgentArts-Console/26.4.7/hws/assets/login/bg2.png"
 	adImgURL    = "https://res.hc-cdn.com/AgentArts-Console/26.4.7/hws/assets/login/ad2.png"
@@ -126,6 +124,18 @@ func (s *LoginSession) run(authDir, state, verifier string, dpop *DPoPKey, onDon
 	// ④ 轮询取码
 	var code string
 	fails := 0
+	// waitTick 是**每轮固定节拍**：必须覆盖「202 未就绪」与「瞬时错误」两条路径。
+	// 历史缺陷（本轮实测复现）：sleep select 曾被放在 `default:` 分支里 ⇒ 永远命中 default、
+	// 永不 sleep ⇒ 上游回 202 时 run() 以全速空转（CPU 打满 + 对上游无节制请求，违反 §0.1），
+	// 且 fails 只统计错误不统计成功的 202，maxPollErrors 形同虚设。
+	waitTick := func() bool {
+		select {
+		case <-s.cancel:
+			return false
+		case <-time.After(pollInterval):
+			return true
+		}
+	}
 	for {
 		select {
 		case <-s.cancel:
@@ -133,31 +143,32 @@ func (s *LoginSession) run(authDir, state, verifier string, dpop *DPoPKey, onDon
 		default:
 		}
 		if time.Now().After(deadline) {
-			s.setStatus("expired", errors.New("登录超时，请重试"))
+			s.setStatus("expired", errors.New("登录超时（10 分钟内未在浏览器完成授权），请重试"))
 			return
 		}
-		c, retry, err := pollCode(s.httpc, state)
+		c, terminal, err := pollCode(s.httpc, state)
 		if err != nil {
+			if terminal {
+				// state 失效（404）是终态：继续轮询只会让用户多等 10 分钟。
+				s.setStatus("expired", err)
+				return
+			}
 			fails++
 			if fails >= maxPollErrors {
-				s.setStatus("failed", err)
+				s.setStatus("failed", fmt.Errorf("登录失败：连续 %d 次无法获取授权码，最后一次错误：%w", fails, err))
 				return
 			}
 		} else if c != "" {
 			code = c
 			break
+		} else {
+			// 202 = 用户还没在浏览器里登完，属正常等待，不计入错误。
+			fails = 0
 		}
-		if !retry && err != nil && strings.Contains(err.Error(), "state") {
-			s.setStatus("expired", err)
+		if !waitTick() {
 			return
-		}
-		select {
-		case <-s.cancel:
-			return
-		case <-time.After(pollInterval):
 		}
 	}
-
 	// ⑤ 换令牌
 	s.setStatus("exchanging", nil)
 	tok, err := exchangeCode(s.httpc, code, verifier, dpop)
@@ -183,7 +194,7 @@ func (s *LoginSession) run(authDir, state, verifier string, dpop *DPoPKey, onDon
 		AccountID:       accountID,
 		UserID:          userID,
 		Label:           tok.UserName,
-		BaseURL:         trimSlash(base),
+		BaseURL:         bareGateway(base),
 		Authorization:   "Basic " + base64.StdEncoding.EncodeToString([]byte(appKey+":"+appSecret)),
 		AccessKeyID:     tok.AccessKeyID,
 		SecretAccessKey: tok.SecretAccessKey,
@@ -208,9 +219,6 @@ func (s *LoginSession) run(authDir, state, verifier string, dpop *DPoPKey, onDon
 		onDone(s.result)
 	}
 }
-
-// OpenInBrowser 用系统默认浏览器打开授权 URL。
-func (s *LoginSession) OpenInBrowser() error { return platform.OpenURL(s.url) }
 
 // ---------------------------------------------------------------------------
 // 各步骤实现
@@ -276,39 +284,61 @@ func buildAuthorizeURL(state, challenge string) string {
 	return outer.String()
 }
 
-// pollCode 轮询取授权码：返回 (code, retryable, err)。code 非空即拿到。
+// pollCode 轮询取授权码：返回 (code, terminal, err)。
+//   - code 非空 ⇒ 已拿到授权码；
+//   - terminal=true ⇒ 该错误是终态（state 已失效），调用方不应继续轮询；
+//   - err!=nil 且 terminal=false ⇒ 可重试的瞬时错误（网络 / 5xx）。
 func pollCode(c *http.Client, state string) (string, bool, error) {
 	u := agentartsBase + "/v1/claw/auth/code?state=" + url.QueryEscape(state)
 	req, err := http.NewRequest(http.MethodGet, u, nil)
 	if err != nil {
-		return "", true, err
+		return "", false, err
 	}
 	req.Header.Set("Accept", "application/json")
 	resp, err := c.Do(req)
 	if err != nil {
-		return "", true, err
+		return "", false, err
 	}
 	defer resp.Body.Close()
 	rb, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<16))
-	switch resp.StatusCode {
-	case http.StatusOK:
-		var out struct {
-			Code              string `json:"code"`
-			AuthorizationCode string `json:"authorization_code"`
-		}
+	switch {
+	case resp.StatusCode == http.StatusOK:
+		// 授权码字段名按**大小写不敏感**解析：上游契约未文档化，实测存在驼峰
+		// `authorizationCode`（与 DPoP 档案 oauth-<uid>.json 的命名同源），
+		// 本仓原只认 snake_case ⇒ 200 被解析成空 code ⇒ 用户明明授权成功，
+		// 面板却一直转圈到 10 分钟超时（「新增账号不成功」的典型表现）。
+		// Go 的 encoding/json 对结构体标签本就是 EqualFold 匹配，这里再显式兜底一层，
+		// 并对 code / authorization_code / authorizationCode 的任何拼写都认。
+		var out map[string]any
 		_ = json.Unmarshal(rb, &out)
-		c2 := out.Code
-		if c2 == "" {
-			c2 = out.AuthorizationCode
+		for _, k := range []string{"code", "authorization_code", "authorizationCode"} {
+			if s, ok := lookupFold(out, k); ok && s != "" {
+				return s, false, nil
+			}
 		}
-		return c2, false, nil
-	case http.StatusAccepted: // 202：还没登完
-		return "", true, nil
-	case http.StatusNotFound: // state 失效
-		return "", false, errors.New("state 已失效")
+		return "", false, nil
+	case resp.StatusCode == http.StatusAccepted: // 202：用户还没登完
+		return "", false, nil
+	case resp.StatusCode == http.StatusNotFound: // state 失效
+		return "", true, errors.New("授权已失效（state 过期），请重新点击「浏览器登录」")
 	default:
-		return "", true, fmt.Errorf("取码 HTTP %d", resp.StatusCode)
+		return "", false, fmt.Errorf("取授权码失败 HTTP %d: %s", resp.StatusCode, truncate(rb, 200))
 	}
+}
+
+// lookupFold 按键名大小写不敏感取值（并同时把 '-' 视作 '_'）。
+func lookupFold(m map[string]any, key string) (string, bool) {
+	norm := func(s string) string {
+		return strings.ToLower(strings.ReplaceAll(s, "-", "_"))
+	}
+	for k, v := range m {
+		if norm(k) == norm(key) {
+			if s, ok := v.(string); ok {
+				return s, true
+			}
+		}
+	}
+	return "", false
 }
 
 type tokenResult struct {

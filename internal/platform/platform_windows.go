@@ -14,19 +14,7 @@ import (
 	"golang.org/x/sys/windows/registry"
 )
 
-var (
-	user32                   = windows.NewLazySystemDLL("user32.dll")
-	procSystemParametersInfo = user32.NewProc("SystemParametersInfoW")
-)
-
-const spiGetWorkArea = 0x0030
-
-// WorkArea 返回主显示器工作区（不含任务栏）。
-func WorkArea() (int32, int32, int32, int32) {
-	var rect struct{ Left, Top, Right, Bottom int32 }
-	procSystemParametersInfo.Call(uintptr(spiGetWorkArea), 0, uintptr(unsafe.Pointer(&rect)), 0)
-	return rect.Left, rect.Top, rect.Right - rect.Left, rect.Bottom - rect.Top
-}
+var user32 = windows.NewLazySystemDLL("user32.dll")
 
 // InfoBox 弹信息提示框。
 func InfoBox(title, msg string) {
@@ -62,6 +50,9 @@ func msgBox(title, msg string, flags uintptr) uintptr {
 // 浏览器
 // ---------------------------------------------------------------------------
 
+// 本 fork 说明：CodeArts 授权走「无痕窗口 + 用户点授权」（internal/app/app.go 调
+// DefaultBrowserIncognito/LaunchIncognito），故上游 1e25be4 的死代码清理在本分支不适用，
+// 这组函数必须保留；否则 internal/app 编译失败。
 var browserSpecs = []struct {
 	progID string
 	exe    string
@@ -143,6 +134,11 @@ func LaunchIncognito(exe, flag, url string) error {
 	return cmd.Start()
 }
 
+func fileExists(p string) bool {
+	fi, err := os.Stat(p)
+	return err == nil && !fi.IsDir()
+}
+
 // OpenURL 用系统默认方式打开 URL。
 func OpenURL(url string) error {
 	cmd := exec.Command("rundll32", "url.dll,FileProtocolHandler", url)
@@ -198,9 +194,4 @@ func AutostartEnabled() bool {
 func OpenWithTextEditor(path string) error {
 	cmd := exec.Command("notepad.exe", path)
 	return cmd.Start()
-}
-
-func fileExists(p string) bool {
-	fi, err := os.Stat(p)
-	return err == nil && !fi.IsDir()
 }

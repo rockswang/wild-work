@@ -190,7 +190,7 @@ func TestAdoptJWTExpirySelfHeals(t *testing.T) {
 		t.Fatal("前置条件：expiresAt=0 时 NeedsRefresh 应为 true")
 	}
 
-	AdoptJWTExpiry(a)
+	a.AdoptJWTExpiry()
 
 	if a.NeedsRefresh(10 * time.Minute) {
 		t.Errorf("❌ 自愈失败：NeedsRefresh 仍为 true（ExpiresAt=%d）", a.ExpiresAt)

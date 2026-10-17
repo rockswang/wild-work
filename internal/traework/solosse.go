@@ -39,7 +39,7 @@ import (
 
 // SOLOEvent 单条 SOLO SSE 事件（归一化）。
 type SOLOEvent struct {
-	Event        string          // metadata | timing_cost | output | extra_info | token_usage | done | error
+	Event        string          // metadata | timing_cost | output | extra_info | token_usage | done | error | queue_begin | request_wait_in_queue
 	Response     string          // output: content 增量
 	Reasoning    string          // output: 思考链增量
 	ToolCalls    json.RawMessage // output: 工具调用（null 或对象/数组）
@@ -47,6 +47,7 @@ type SOLOEvent struct {
 	FinishReason string          // done
 	ErrorCode    int64           // error
 	ErrorMessage string          // error
+	QueuePos     int64           // request_wait_in_queue: 上游排队位置（拥塞观测用）
 }
 
 // SOLOStreamError 上游 SSE 流内的业务错误（event:error）。非流式聚合时返回，
@@ -118,6 +119,12 @@ func ParseSOLOLine(eventName, dataLine string) (*SOLOEvent, error) {
 		if v, ok := raw["message"].(string); ok {
 			ev.ErrorMessage = v
 		}
+	case "queue_begin", "request_wait_in_queue":
+		// 上游拥塞排队心跳：position 递减。透传给日志观测（限频由消费方控制）。
+		// queue_begin 帧无 position 字段（QueuePos=0），消费方应跳过或等首条心跳。
+		if v, ok := raw["position"].(float64); ok {
+			ev.QueuePos = int64(v)
+		}
 	}
 	return ev, nil
 }
@@ -158,10 +165,6 @@ func scanLine(st *sseState, line string) *SOLOEvent {
 	return nil
 }
 
-// Aggregate 读取完整 SOLO SSE，聚合 response + reasoning + tool_calls + usage，
-// 产出单个 OpenAI chat.completion（非流式）。model 为回填的客户端模型名。
-func Aggregate(r io.Reader) (map[string]any, error) { return AggregateWithModel(r, "") }
-
 // AggregateWithModel 同 Aggregate，额外把 model 回填到响应（上游 SOLO 事件不带模型名）。
 func AggregateWithModel(r io.Reader, model string) (map[string]any, error) {
 	br := bufio.NewReaderSize(r, 64*1024)
@@ -176,6 +179,20 @@ func AggregateWithModel(r io.Reader, model string) (map[string]any, error) {
 		upstreamErr  error
 	)
 	st := &sseState{}
+	// 排队心跳限频：首条 + 每 30s 一条（与 streamOpts 同策略）。
+	var lastQueueLog time.Time
+	queueFirst := true
+	logQueue := func(pos int64) {
+		if pos <= 0 {
+			return // queue_begin 无 position，跳过，等首条真实心跳
+		}
+		now := time.Now()
+		if queueFirst || now.Sub(lastQueueLog) >= 30*time.Second {
+			log.Printf("solo queue congested model=%s position=%d", model, pos)
+			queueFirst = false
+			lastQueueLog = now
+		}
+	}
 	for {
 		line, err := br.ReadString('\n')
 		if err != nil && err != io.EOF {
@@ -199,6 +216,8 @@ func AggregateWithModel(r io.Reader, model string) (map[string]any, error) {
 				}
 			case "error":
 				upstreamErr = &SOLOStreamError{Code: ev.ErrorCode, Msg: ev.ErrorMessage}
+			case "queue_begin", "request_wait_in_queue":
+				logQueue(ev.QueuePos)
 			}
 		}
 		if err == io.EOF {
@@ -330,23 +349,15 @@ func sortInts(a []int) {
 	}
 }
 
-// Stream 流式转换：SOLO SSE → OpenAI SSE chunk，每 chunk flush，保证至少一个 [DONE]。
-// 调用方必须先设置过 status 200；本函数自设 SSE headers。
+// StreamWithModel 同 Stream，额外把 model 回填到每个 chunk（上游 SOLO 事件不带模型名）。
+// Stream 实现 provider.Upstream（无 model/usage 的轻量入口，测试与通用路径共用）。
 func Stream(w http.ResponseWriter, r io.Reader) error {
-	_, err := streamOpts(w, r, nil, "", nil)
+	_, err := StreamWithModel(w, r, "")
 	return err
 }
 
-// StreamWithModel 同 Stream，额外把 model 回填到每个 chunk（上游 SOLO 事件不带模型名）。
 func StreamWithModel(w http.ResponseWriter, r io.Reader, model string) (map[string]any, error) {
 	return streamOpts(w, r, nil, model, nil)
-}
-
-// StreamWithError 同 Stream，额外在遇到上游 event:error 时回调 onErr（非 nil），
-// 供调用方冷却账号/记录日志；错误信息同时注入 SSE 事件流。
-func StreamWithError(w http.ResponseWriter, r io.Reader, onErr func(*SOLOStreamError)) error {
-	_, err := streamOpts(w, r, onErr, "", nil)
-	return err
 }
 
 // streamOpts Stream 的可选参数版本；onUsage 非 nil 时回调 token_usage 事件的 usage。
@@ -367,6 +378,20 @@ func streamOpts(w http.ResponseWriter, r io.Reader, onErr func(*SOLOStreamError)
 	var guard *loopguard.Guard
 	if loopguard.Enabled() {
 		guard = loopguard.NewDefault()
+	}
+	// 排队心跳限频：首条 + 每 30s 一条，避免长时间拥塞时刷屏。
+	var lastQueueLog time.Time
+	queueFirst := true
+	logQueue := func(pos int64) {
+		if pos <= 0 {
+			return // queue_begin 无 position，跳过，等首条真实心跳
+		}
+		now := time.Now()
+		if queueFirst || now.Sub(lastQueueLog) >= 30*time.Second {
+			log.Printf("solo queue congested model=%s position=%d", model, pos)
+			queueFirst = false
+			lastQueueLog = now
+		}
 	}
 	writeChunk := func(delta map[string]any, finish string) error {
 		chunk := map[string]any{
@@ -468,6 +493,7 @@ func streamOpts(w http.ResponseWriter, r io.Reader, onErr func(*SOLOStreamError)
 				// 缓存计量归一化（issue #104）放在**捕获点**而非写出点：这样
 				// onUsage 回调、返回给调用方的 usage、以及「不含 done 的异常收尾」
 				// 三条路径都拿到 OpenAI 形状（trae 上游给的是 Anthropic 字段名）。
+				// （本地旧 mirrorCacheReadToOpenAI 是其子集，合并时摘除。）
 				if ev.Usage != nil {
 					provider.NormalizeUsageShape(ev.Usage)
 				}
@@ -475,6 +501,8 @@ func streamOpts(w http.ResponseWriter, r io.Reader, onErr func(*SOLOStreamError)
 				if onUsage != nil && ev.Usage != nil {
 					onUsage(ev.Usage)
 				}
+			case "queue_begin", "request_wait_in_queue":
+				logQueue(ev.QueuePos)
 			case "done":
 				// 必须先取再写：writeChunk 会消费 pendingUsage（附加进 chunk 后置
 				// nil），SOLO 协议 token_usage 先于 done 到达，先 writeChunk 再

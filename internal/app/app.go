@@ -25,7 +25,12 @@ import (
 	"wild-work/internal/custom"
 	"wild-work/internal/ledger"
 	"wild-work/internal/login"
+	logincodearts "wild-work/internal/login_codearts"
+	logingemini "wild-work/internal/login_gemini"
 	"wild-work/internal/login_glm"
+	loginlobsterai "wild-work/internal/login_lobsterai"
+	loginloomy "wild-work/internal/login_loomy"
+	loginminimax "wild-work/internal/login_minimax"
 	loginqoder "wild-work/internal/login_qoder"
 	loginqodercn "wild-work/internal/login_qodercn"
 	loginqodercom "wild-work/internal/login_qodercom"
@@ -33,6 +38,7 @@ import (
 	loginraccoon "wild-work/internal/login_raccoon"
 	logintrae "wild-work/internal/login_trae"
 	"wild-work/internal/login_wbai"
+	loginzcode "wild-work/internal/login_zcode"
 	"wild-work/internal/loopguard"
 	"wild-work/internal/oczen"
 	"wild-work/internal/officeace"
@@ -53,7 +59,7 @@ import (
 )
 
 // Version 版本号。
-const Version = "2.8.1"
+const Version = "2.9.0"
 
 const (
 	loginTimeout   = 5 * time.Minute
@@ -112,9 +118,19 @@ type App struct {
 	loginCtx     context.Context
 	loginCancel  context.CancelFunc
 	loginClient  *http.Client
+	// loginLabel 用户在登录弹窗里填的「账号标识」（可选，2026-10-17 新增）。
+	// 上游不提供稳定身份字段的渠道（当前是 CodeArts）靠它区分「同一账号重新登录」与
+	// 「新增第二个账号」——否则方案 B 的复用逻辑会把第二个账号覆盖到第一条上（用户实测报告）。
+	loginLabel string
+	// loginBackendOpened 本次登录的授权页是否已由本工具（无痕窗口）拉起。
+	// 前端据此**不再** window.open —— 否则会在日常浏览器里再开一个带登录态的标签页，
+	// 无痕的努力就白费了（授权页照样会复用已登录的华为云账号）。
+	loginBackendOpened bool
 	loginStateFP string
 	loginKind    provider.Kind
-	pricingFP    string
+	// loginErr 上一次登录流程的终态错误（成功/取消/超时为空串），供面板提示失败。
+	loginErr  string
+	pricingFP string
 
 	// 智谱清言自动登录会话（独立于通用 OAuth 登录流程：
 	// 它不轮询 state 文件，而是经 CDP 从浏览器 Cookie 捕获凭据）。
@@ -186,6 +202,8 @@ func New(opts Options) (*App, error) {
 	if a.ledger != nil {
 		a.ledgerStop = make(chan struct{})
 		go a.ledger.AutoFlush(a.ledgerStop)
+		// 请求体摘要开关（诊断用，默认关）：进程级全局，启动时与 config.body_log 同步
+		ledger.SetBodyTrace(a.cfg.BodyLog)
 	}
 
 	// 运行统计引擎（data/stats.json）：初始化失败不致命——端点回 disabled、插桩/喂入全判 nil
@@ -284,7 +302,7 @@ func (a *App) runtimesSnapshot() []*Runtime {
 func (a *App) firstRuntime() *Runtime {
 	// oczen 排在末位：它无调度器活动，不应成为「签到时间/下次签到」的展示来源。
 	// 顺序即展示优先级：新渠道追加在 Oczen 之前（Oczen 恒末位）。
-	for _, k := range []provider.Kind{provider.WorkBuddy, provider.WorkBuddyAI, provider.TraeWork, provider.Qoder, provider.QoderCN, provider.QoderCOM, provider.QwenWork, provider.GLM, provider.Raccoon, provider.Loomy, provider.MonkeyCode, provider.Oczen} {
+	for _, k := range []provider.Kind{provider.WorkBuddy, provider.WorkBuddyAI, provider.TraeWork, provider.Qoder, provider.QoderCN, provider.QoderCOM, provider.QwenWork, provider.GLM, provider.Raccoon, provider.Loomy, provider.MonkeyCode, provider.Minimax, provider.LobsterAI, provider.ZCode, provider.Gemini, provider.CodeArts, provider.Kilo, provider.Oczen} {
 		if rt := a.runtime(k); rt != nil {
 			return rt
 		}
@@ -350,18 +368,29 @@ var channelOrder = map[provider.Kind]int{
 	provider.QoderCN: 3, provider.QoderCOM: 4, provider.TraeWork: 5, provider.QwenWork: 6,
 	provider.GLM:       7,
 	provider.OfficeAce: 8,
+	provider.Kilo:      9, // 免密免费池：排序上紧随 oczen 之后（同属无账号渠道）
+	provider.Minimax:   10,
+	provider.LobsterAI: 11,
+	provider.ZCode:     12,
+	provider.Gemini:    13,
+	provider.CodeArts:  14,
 }
 
 // feeChannelOrder 「模型列表和费率」面板的渠道分组顺序。
 // 与 channelOrder 分开维护：本表把 Oczen 放首位（其免费模型最常被查），
-// 且含 TraeCode（与 TraeWork 共账号但模型集不同，需独立成组）。
+// kilo 紧随其后（同为免密免费池），且含 TraeCode（与 TraeWork 共账号但模型集不同，需独立成组）。
 var feeChannelOrder = []provider.Kind{
-	provider.Oczen, provider.WorkBuddy, provider.WorkBuddyAI, provider.QoderCN,
+	provider.Oczen, provider.Kilo, provider.WorkBuddy, provider.WorkBuddyAI, provider.QoderCN,
 	provider.QoderCOM, provider.TraeWork, provider.TraeCode, provider.QwenWork, provider.GLM,
 	provider.Cline, // 漏在此表 = 面板永远不出该渠道 tab（buildFeesChannels 只遍历本表）
 	provider.MonkeyCode,
 	provider.Raccoon,
 	provider.Loomy,
+	provider.Minimax,
+	provider.LobsterAI,
+	provider.ZCode,
+	provider.Gemini,
+	provider.CodeArts,
 	provider.OfficeAce,
 }
 
@@ -381,15 +410,34 @@ func sortChannelsByOrder[T any](items []T, kindOf func(T) provider.Kind) {
 // creditsNAKind 判定该渠道的「积分」概念是否不适用（面板显示「不适用」而不是 0）。
 //
 // 两种成因不同，但 UI 处理一致：
-//   - oczen：匆名通道，根本没有账号/余额概念；
+//   - oczen / kilo：免密免费池，根本没有账号/余额概念；
 //   - cline：上游**确无余额端点**（/credits /usage /billing /quota /me 等 12 个候选实测全 404），
 //     属于「查不到」。把这种情况显示成 0 会被误读成「额度已用光」，故同样走 NA。
 //   - 自定义渠道（R66）：无积分与额度接口，同样走 NA。
+//
+// 注意：**ZCode 不走这里**（尽管它的额度也不是积分）——它有真实的 token 桶要展示，
+// 走 creditsUnit="token" 的「Token 计数」面板，而不是「不适用」（见 creditsUnit）。
 func (a *App) creditsNAKind(group string) bool {
-	if group == provider.Oczen.String() || group == provider.Cline.String() {
+	if group == provider.Oczen.String() || group == provider.Kilo.String() ||
+		group == provider.Cline.String() {
 		return true
 	}
 	return a.isCustomChannel(group)
+}
+
+// creditsUnit 该渠道「额度」的计量单位：空串 = 积分（credits，默认），`"token"` = Token 计数。
+//
+// 为什么做成渠道级：面板的**卡片与汇总条**按渠道渲染，它们只知道渠道名，需要先知道
+// 「这个渠道的数字是什么单位」才能选对文案与合计口径（token 绝不并入积分合计）；
+// 条目级的单位见 provider.ResourceItem.Unit（弹层逐条显示用）。
+//
+// ⚠️ 这是**单一来源**：前端不维护渠道名单，全靠本函数下发的 credits_unit 字段 ——
+// 以后新增以 token 计量的渠道，只在这里加一行即可（用户 2026-10-17 的明确要求）。
+func (a *App) creditsUnit(group string) string {
+	if group == provider.ZCode.String() {
+		return "token"
+	}
+	return "" // 积分（credits）
 }
 
 // isCustomChannel 报告该分组名是否是自定义渠道。先查运行时表（热更新后的权威态），
@@ -440,15 +488,20 @@ func (a *App) SetCustomChannelsSyncer(fn func(channels []custom.ChannelConfig)) 
 // QoderCN / QoderCOM 已实现签到（campaigns 主路径），支持手动按钮。
 // 智谱清言已实现 activity-api 每日签到，支持手动按钮。
 // 小浣熊已实现 setting_info 触发每日积分落账（见 internal/raccoon/checkin.go，R65），支持手动按钮。
-// MonkeyCode 一期也不提供手动签到：上游未提供额度或签到端点。
-// Loomy 一期也不提供手动签到：上游未提供额度或签到端点。
+// MonkeyCode 已实现签到（POST {console}/api/v1/users/wallet/checkin，见 internal/monkeycode/checkin.go），
+// 支持手动按钮并参与批量签到 —— 故**不在**本名单内（2026-10-17 起，此前误列为「无签到」）。
+// Loomy 已实现签到（宠物每日打工奖励，POST /api/v1/pet-work/rewards，0~1000 分），
+// 支持手动按钮并参与批量签到 —— 故**不在**本名单内（2026-10-17 接线完成）。
+// ⚠️ 它的判据是该账号当日**有效对话轮次**（由上游计算，见 internal/loomy/checkin.go 文件头）：
+// 本工具是 API 网关、不产生轮次归属，故未在官方客户端用过该账号时，领取结果是
+// 「未达档位」（可重试 error），**不是**「无活动」——这是如实状态，不是缺陷。
 // Cline 走官方 API Key：无签到活动、Key 不过期 ⇒ 既不需手动签到也不需保活。
 // OpenCodeZen 匿名通道无账号概念，既无签到也无积分。
-// noExplicitCheckin 不支持显式签到（手动按钮）的渠道。
+// Kilo 免费池同为免密渠道：无账号、无签到、无积分。
 // 自定义渠道无签到活动（R66）；内建名单固定，故抽成无状态的包级函数（可脱离 App 断言），
 // 方法体仅补上「是否自定义渠道」这一动态判定。
 func noExplicitCheckin(k provider.Kind) bool {
-	return k == provider.WorkBuddyAI || k == provider.QwenWork || k == provider.MonkeyCode || k == provider.Loomy || k == provider.Oczen || k == provider.Cline
+	return k == provider.WorkBuddyAI || k == provider.QwenWork || k == provider.Oczen || k == provider.Kilo || k == provider.ZCode || k == provider.Gemini || k == provider.Cline
 }
 
 func (a *App) noExplicitCheckinKind(k provider.Kind) bool {
@@ -517,13 +570,15 @@ func (a *App) SetRootHandler(h http.Handler) { a.httpRoot = h }
 
 // serveHandler 返回实际对外服务的 handler（优先外层组合，其次内层）。
 func (a *App) serveHandler() http.Handler {
+	// 最外层统一加 Host 校验（未启用管理密码时只接受环回 Host，防 DNS rebinding 读写面板）；
+	// 挂在最外层而非只挂 /api/：面板静态页面与 /v1/* 同样不该被跨站域名访问。
 	if a.httpRoot != nil {
-		return a.httpRoot
+		return a.hostGuard(a.httpRoot)
 	}
 	if a.handler == nil { // 避免 typed-nil 接口导致 http.Server 请求时 panic
 		return nil
 	}
-	return a.handler
+	return a.hostGuard(a.handler)
 }
 
 // StartServer 按当前配置启动 HTTP 服务。
@@ -603,18 +658,24 @@ func (a *App) StartLoginFor(kind string) (string, error) {
 		k = provider.WorkBuddy
 	}
 	switch k {
-	case provider.WorkBuddy, provider.WorkBuddyAI, provider.TraeWork, provider.Qoder, provider.QoderCN, provider.QoderCOM, provider.QwenWork:
+	case provider.WorkBuddy, provider.WorkBuddyAI, provider.TraeWork, provider.Qoder, provider.QoderCN, provider.QoderCOM, provider.QwenWork, provider.Minimax, provider.LobsterAI, provider.ZCode, provider.Gemini, provider.CodeArts:
 		// 这些渠道已有登录编排
 	case provider.Raccoon:
 		// 小浣熊：网页版自动登录 —— 拉起独立 profile 的浏览器，用户在网页登录后
 		// 经 CDP 捕获 Cookie 里的 refresh_token 并换取凭据（见 internal/login_raccoon/web.go）。
 		// 面板同时保留「从本机客户端导入」作为替代路径。
 	case provider.Loomy:
-		// 导入型渠道：凭据来自本机已登录的官方客户端，上游没有可复现的 OAuth 流程。
-		return "", fmt.Errorf("%s 渠道无需登录：请在面板点「从本机客户端导入」（复用本机已登录的官方客户端凭据）", k)
+		// Loomy：浏览器登录 —— 起一个 127.0.0.1 的本机登录引导页（手机号 + 短信验证码换 session，
+		// 见 internal/login_loomy）。上游没有 OAuth 授权页，登录入口是讯飞账号服务的短信验证码
+		// 接口（HMAC-SHA1 签名），故由本工具代发短信、代换 session。
+		// 面板同时保留「从本机客户端导入」作为替代路径（internal/app/import_local.go）。
 	case provider.Oczen:
 		// 匿名通道无账号可登（凭证固定为 public，启动时已注入虚拟账号）
 		return "", errors.New("OpenCodeZen 为匿名通道，无需也无法添加账号")
+	case provider.Kilo:
+		// 免密免费池：没有登录流程可走，虚拟账号在启动时注入。
+		// 这里必须显式拒绝——**不能**依赖 default 分支，见本函数末尾第二张 switch 的注释。
+		return "", errors.New("Kilo 免费池无需登录，也没有可添加的账号")
 	case provider.GLM:
 		// 智谱清言无编程式登录：凭据只能由用户从浏览器 Cookie 里取出后粘贴。
 		// 故这里不发起轮询流程，只返回登录页地址；用户粘贴后走 SubmitGLMToken。
@@ -643,8 +704,20 @@ func (a *App) StartLoginFor(kind string) (string, error) {
 		a.loginClient = loginwbai.NewClient()
 	case provider.QwenWork:
 		a.loginClient = loginqwenwork.NewClient()
+	case provider.Minimax:
+		a.loginClient = loginminimax.NewClient()
+	case provider.LobsterAI:
+		a.loginClient = loginlobsterai.NewClient()
+	case provider.ZCode:
+		a.loginClient = loginzcode.NewClient()
+	case provider.Gemini:
+		a.loginClient = logingemini.NewClient()
+	case provider.CodeArts:
+		a.loginClient = logincodearts.NewClient()
 	case provider.Raccoon:
 		// 网页版登录靠 CDP，不用 HTTP client；置 nil 即可（pollLogin 里也不再用它）。
+	case provider.Loomy:
+		a.loginClient = loginloomy.NewClient()
 	default:
 		a.loginClient = login.NewClient()
 	}
@@ -668,7 +741,37 @@ func (a *App) StartLoginFor(kind string) (string, error) {
 		authURL, err = loginqwenwork.Start(a.loginClient, a.loginStateFP)
 	case provider.Raccoon:
 		// 网页版登录：拉起独立 profile 的浏览器并返回登录页地址（跨平台，无需注册表/客户端）。
+	case provider.Loomy:
+		// 浏览器登录：起本机登录引导页并**立即**返回其地址（前端 window.open 只在用户
+		// 点击后的短暂窗口内有效），用户在里面完成短信验证码登录后由 pollLogin 收尾。
+		authURL, err = loginloomy.Start(a.loginClient, a.loginStateFP)
 		authURL, err = loginraccoon.Start()
+	case provider.Minimax:
+		// 设备码 + PKCE：Start **立即**返回授权链接（前端 window.open 只在用户点击后的
+		// 短暂窗口内有效），随后由 pollLogin 轮询换 token。
+		authURL, err = loginminimax.Start(a.loginClient, a.loginStateFP)
+	case provider.LobsterAI:
+		// 本机回调授权：Start 起 127.0.0.1 随机端口的回调监听并**立即**返回登录页地址
+		// （前端 window.open 只在用户点击后的短暂窗口内有效），回调到达后由 pollLogin 收尾。
+		authURL, err = loginlobsterai.Start(a.loginClient, a.loginStateFP)
+	case provider.ZCode:
+		// 服务端中介设备授权流：Start 发起 init 并**立即**返回授权链接
+		// （前端 window.open 只在用户点击后的短暂窗口内有效），随后由 pollLogin 轮询。
+		authURL, err = loginzcode.Start(a.loginClient, a.loginStateFP)
+	case provider.Gemini:
+		// loopback OAuth：Start 先监听 127.0.0.1 的动态端口再拼授权 URL 并**立即**返回
+		// （前端 window.open 只在用户点击后的瞬态激活窗口内有效），回调到达后由 pollLogin 收尾。
+		authURL, err = logingemini.Start(a.loginClient, a.loginStateFP)
+	case provider.CodeArts:
+		// PKCE OAuth + 本机回调：Start 起 127.0.0.1 回调监听并**立即**返回授权链接，
+		// 用户授权后由 pollLogin 收尾（回调端口由 Shutdown 关闭）。
+		authURL, err = logincodearts.Start(a.loginClient, a.loginStateFP)
+	case provider.Oczen, provider.Kilo:
+		// 免密渠道没有登录流程。正常情况下上面第一张 switch 已拒绝并返回，走不到这里；
+		// 这条 case 是**防御**：若将来有人把第一张的拒绝删掉，default 会把用户导向
+		// WorkBuddy 的授权页——静默指向错误渠道，比直接报错难查得多。
+		a.finishLogin()
+		return "", fmt.Errorf("%s 为免密渠道，没有登录流程", k)
 	default:
 		ep := login.EndpointsForRegion(a.cfg.Region)
 		authURL, err = login.Start(a.loginClient, a.loginStateFP, ep)
@@ -682,10 +785,39 @@ func (a *App) StartLoginFor(kind string) (string, error) {
 		a.finishLogin()
 		return "", err
 	}
-	// 浏览器打开由前端 Web UI 通过 window.open() 完成
+	// 浏览器打开通常由前端 Web UI 通过 window.open() 完成；但 CodeArts 例外：
+	// 它的授权页会**复用日常浏览器里已登录的华为云会话**，于是「想添加第二个账号，
+	// 却总被授权成已登录的那个」（2026-10-17 用户实测报告）。故这里由本工具用**无痕窗口**拉起。
+	if k == provider.CodeArts {
+		a.openAuthURLIncognito(authURL)
+	}
 	go a.pollLogin(ctx)
 	log.Printf("%s 登录流程已发起", k)
 	return authURL, nil
+}
+
+// openAuthURLIncognito 用无痕窗口打开授权页（用于必须避开日常浏览器登录态的渠道）。
+//
+// 成功时置 loginBackendOpened，让前端**不再** window.open —— 否则会在日常浏览器里再开一个
+// 带登录态的标签页，无痕那一步就白做了。
+// 探测不到支持无痕的浏览器 / 启动失败时**退回系统默认打开**：可用性优先于隔离性，
+// 并在日志里说明原因，便于排查「为什么还是登录成了老账号」。
+func (a *App) openAuthURLIncognito(url string) {
+	exe, flag, ok := platform.DefaultBrowserIncognito()
+	if !ok {
+		log.Printf("登录：未探测到支持无痕的默认浏览器，退回系统默认打开（可能带上已有登录态）")
+		_ = platform.OpenURL(url)
+		return
+	}
+	if err := platform.LaunchIncognito(exe, flag, url); err != nil {
+		log.Printf("登录：无痕窗口启动失败（%v），退回系统默认打开", err)
+		_ = platform.OpenURL(url)
+		return
+	}
+	a.muLogin.Lock()
+	a.loginBackendOpened = true
+	a.muLogin.Unlock()
+	log.Printf("登录：已用无痕窗口打开授权页（避免复用日常浏览器的登录态）")
 }
 
 // CancelLogin 取消当前登录流程。
@@ -703,9 +835,28 @@ func (a *App) CancelLogin() error {
 	if kind == provider.QwenWork {
 		loginqwenwork.Shutdown()
 	}
+	// LobsterAI 同样是本机回调型（127.0.0.1 随机端口监听），取消时一并关闭
+	// （pollLogin 的 defer 还会再兜一次；Shutdown 幂等）。
+	if kind == provider.LobsterAI {
+		loginlobsterai.Shutdown()
+	}
+	// Gemini 的 loopback OAuth 同样持有本机监听端口（pollLogin 的 defer 还会再兜一次）。
+	if kind == provider.Gemini {
+		logingemini.Shutdown()
+	}
+	// CodeArts 的 PKCE OAuth 同样持有本机回调端口。
+	if kind == provider.CodeArts {
+		logincodearts.Shutdown()
+	}
 	// 小浣熊网页版登录：取消时关闭浏览器（幂等；pollLogin 的 defer 还会再兜一次）
 	if kind == provider.Raccoon {
 		loginraccoon.Shutdown()
+	}
+	// Loomy 登录引导页占着 127.0.0.1 的随机端口，取消时一并关闭（幂等）。
+	// ⚠️ 必须与上面平铺在同一层：曾经被误插进 Raccoon 的 if 块里，于是只有
+	// 「取消小浣熊登录」时才会执行到，取消 Loomy 时引导页不关（端口/页面残留）。
+	if kind == provider.Loomy {
+		loginloomy.Shutdown()
 	}
 	log.Printf("登录已取消")
 	return nil
@@ -721,6 +872,23 @@ func (a *App) pollLogin(ctx context.Context) {
 		// 都必须关闭独立 profile 的浏览器（Shutdown 幂等）。
 		if a.loginKind == provider.Raccoon {
 			loginraccoon.Shutdown()
+		}
+		// LobsterAI 与 Raccoon 同属「持有本机资源」的登录：它起的是 127.0.0.1 上的
+		// 回调监听端口，故无论成功、失败、超时、取消还是 panic，都必须关掉（Shutdown 幂等）。
+		// Loomy 的登录引导页同样持有 127.0.0.1 监听端口，必须一并关闭。
+		if a.loginKind == provider.Loomy {
+			loginloomy.Shutdown()
+		}
+		if a.loginKind == provider.LobsterAI {
+			loginlobsterai.Shutdown()
+		}
+		// Gemini 的 loopback OAuth 同样持有本机监听端口，必须一并关闭。
+		if a.loginKind == provider.Gemini {
+			logingemini.Shutdown()
+		}
+		// CodeArts 的 PKCE OAuth 同样持有本机回调端口。
+		if a.loginKind == provider.CodeArts {
+			logincodearts.Shutdown()
 		}
 		a.finishLogin()
 	}()
@@ -738,6 +906,61 @@ func (a *App) pollLogin(ctx context.Context) {
 		if time.Now().After(deadline) {
 			log.Printf("登录超时，请重新发起")
 			return
+		}
+		if a.loginKind == provider.CodeArts {
+			r, err := logincodearts.Poll(a.loginClient, a.loginStateFP)
+			if err == nil {
+				a.completeCodeArtsLogin(r)
+				return
+			}
+			if !errors.Is(err, logincodearts.ErrPending) {
+				log.Printf("codearts login poll failed: %v", err)
+			}
+			continue
+		}
+		if a.loginKind == provider.Gemini {
+			r, err := logingemini.Poll(a.loginClient, a.loginStateFP)
+			if err == nil {
+				a.completeGeminiLogin(r)
+				return
+			}
+			if !errors.Is(err, logingemini.ErrPending) {
+				log.Printf("gemini login poll failed: %v", err)
+			}
+			continue
+		}
+		if a.loginKind == provider.ZCode {
+			r, err := loginzcode.Poll(a.loginClient, a.loginStateFP)
+			if err == nil {
+				a.completeZCodeLogin(r)
+				return
+			}
+			if !errors.Is(err, loginzcode.ErrPending) {
+				log.Printf("zcode login poll failed: %v", err)
+			}
+			continue
+		}
+		if a.loginKind == provider.LobsterAI {
+			r, err := loginlobsterai.Poll(a.loginClient, a.loginStateFP)
+			if err == nil {
+				a.completeLobsterAILogin(r)
+				return
+			}
+			if !errors.Is(err, loginlobsterai.ErrPending) {
+				log.Printf("lobsterai login poll failed: %v", err)
+			}
+			continue
+		}
+		if a.loginKind == provider.Minimax {
+			r, err := loginminimax.Poll(a.loginClient, a.loginStateFP)
+			if err == nil {
+				a.completeMinimaxLogin(r)
+				return
+			}
+			if !errors.Is(err, loginminimax.ErrPending) {
+				log.Printf("minimax login poll failed: %v", err)
+			}
+			continue
 		}
 		if a.loginKind == provider.TraeWork {
 			r, err := logintrae.Poll(a.loginClient, a.loginStateFP)
@@ -802,6 +1025,21 @@ func (a *App) pollLogin(ctx context.Context) {
 			}
 			if !errors.Is(err, loginqwenwork.ErrPending) {
 				log.Printf("qwenwork login poll failed: %v", err)
+			}
+			continue
+		}
+		if a.loginKind == provider.Loomy {
+			r, err := loginloomy.Poll(a.loginClient, a.loginStateFP)
+			if err == nil {
+				a.completeLoomyLogin(r)
+				return
+			}
+			if !errors.Is(err, loginloomy.ErrPending) {
+				// 终态错误（下发验证码失败 / 引导页起不来）：立即结束轮询，
+				// 由 defer 关闭引导页；继续轮询只会重复报同一个错。
+				log.Printf("loomy login poll failed: %v", err)
+				a.setLoginError("登录失败：" + err.Error())
+				return
 			}
 			continue
 		}
@@ -894,6 +1132,81 @@ func (a *App) firstCheckinRaccoon(uid string) {
 }
 
 // completeLogin 登录成功：写 auth 文件、重载账号池，异步签到。
+// completeLoomyLogin Loomy 浏览器登录（短信验证码）成功后的收尾。
+//
+// 凭据形态与「从本机客户端导入」（import_local.go 的 importLoomy）**完全一致** ——
+// 两者拿到的是同一个上游 session，只是来源不同：
+//   - uid 优先取上游 userid，缺失时由 login_loomy 从前缀派生（账号池需要稳定去重标识）；
+//   - domain/apiHost 对齐 internal/loomy 的调用前缀；
+//   - refreshToken 留空：Loomy **没有任何 refresh 端点**，session 约 14 天到期后
+//     只能重新登录（或重新从客户端导入）。留空还能让 scheduler 跳过必然失败的保活。
+//
+// 刻意**不**做登录即签到：internal/loomy 没有签到端点（见 noExplicitCheckin 的说明），
+// 硬加一次请求只会产生一条无意义的失败流水。
+func (a *App) completeLoomyLogin(r loginloomy.Result) {
+	uid := strings.TrimSpace(r.UID)
+	if uid == "" {
+		// login_loomy 已保证非空（上游缺 userid 时会派生）；这里是防御，
+		// 避免把半成品凭据写成 loomy-default.json 污染账号池。
+		log.Printf("loomy 登录失败：缺少账号标识（上游未下发 userid）")
+		a.finishLogin()
+		return
+	}
+	// LogFields 只含 uid / 脱敏手机号 / 到期时刻，**不含 token**（零 token 落盘红线）。
+	log.Printf("loomy 登录成功 %s", r.LogFields())
+	doc := authDoc{
+		Auth: authSection{
+			AccessToken: r.AccessToken,
+			// 留空：Loomy 无 refresh 端点（与 importLoomy 同口径）。
+			RefreshToken: "",
+			ExpiresAt:    r.ExpiresAt,
+			Domain:       r.Domain,
+			ApiHost:      r.ApiHost,
+		},
+		Account: accountSection{
+			UID:      uid,
+			Nickname: r.Nickname,
+		},
+	}
+	fp, err := a.writeAuthFile("loomy", uid, doc)
+	if err != nil {
+		log.Printf("loomy 登录失败：写凭据出错 uid=%s err=%v", uid, err)
+		a.finishLogin()
+		return
+	}
+	log.Printf("loomy 登录成功，凭据已落盘 uid=%s file=%s", uid, filepath.Base(fp))
+	a.reloadAccounts()
+	a.finishLogin()
+	a.afterAccountAdded(provider.Loomy)
+	// 登录后立即领一次宠物打工奖励：此时凭据刚拿到，若该账号今天在官方客户端已有
+	// 有效对话轮次，这一步就能把已达档位的奖励领掉，不必等到下一个签到时刻。
+	// 与 raccoon 同款（firstCheckinRaccoon）：**走调度器**，领到的积分才会进流水账；
+	// 失败只记日志，不影响「登录成功」这个主结果。
+	a.safeGo(func() { a.firstCheckinLoomy(uid) })
+}
+
+// firstCheckinLoomy 新账号首次签到（领宠物打工奖励）+ 积分兜底。
+//
+// 与 firstCheckinRaccoon 同形：走调度器的 CheckinAccount，因而领到的积分会经
+// Ledger.RecordCheckinEarn 进流水；随后独立刷一次余额，保证新账号首屏数字正确。
+// 幂等：未达档位时上游返回 granted=false，不会重复发放。
+func (a *App) firstCheckinLoomy(uid string) {
+	rt := a.runtime(provider.Loomy)
+	if rt == nil || rt.Scheduler == nil {
+		return
+	}
+	if res, err := rt.Scheduler.CheckinAccount(uid); err != nil {
+		log.Printf("loomy 新账号签到失败 %s: %v", uid, err)
+	} else {
+		log.Printf("loomy 新账号签到完成 %s：%s", uid, res.Msg)
+	}
+	// 积分兜底：签到路径失败（余额查询失败/未达档位）时 pool 内 credits 仍为 0，
+	// 独立刷一次保证新账号首屏正确（幂等：多刷无害；Loomy 已在积分自动刷新名单里）。
+	if _, err := a.RefreshCredits(uid); err != nil {
+		log.Printf("loomy 新账号积分兜底失败 %s: %v", uid, err)
+	}
+}
+
 func (a *App) completeLogin(r login.Result) {
 	log.Printf("workbuddy 登录成功 uid=%s nickname=%s expires_in=%d refresh_token=%t", r.UID, r.Nickname, r.ExpiresIn, r.RefreshToken != "")
 	fp, err := login.SaveAuth(a.cfg.AuthDir, r)
@@ -972,6 +1285,97 @@ func (a *App) completeWbaiLogin(r loginwbai.Result) {
 			log.Printf("workbuddyai 新账号积分获取完成 %s: %d", r.Nickname, remain)
 		}
 	})
+}
+
+// completeMinimaxLogin MiniMax 设备码登录成功后的收尾。
+//
+// 刻意**不**像 trae 登录那样顺带签到：MiniMax 是 7 天签到面板，用户在面板点一次即可，
+// 少发一次上游请求（AGENTS.md §0.1「验证上游行为最小化请求数」的同源纪律）。
+// completeLobsterAILogin LobsterAI 本机回调登录成功后的收尾。
+//
+// 与 minimax 同样**不**登录即签到：签到是面板上的显式动作，少发一次上游请求
+// （AGENTS.md §0.1 的同源纪律）。
+// completeZCodeLogin ZCode 设备授权登录成功后的收尾。
+//
+// 与 minimax / lobsterai 同样**不**登录即签到：ZCode 的积分领取依赖阿里云验证码
+// （headful 浏览器），本仓不实现；签到走面板手动或干脆不做，少发一次上游请求。
+// completeGeminiLogin Gemini loopback OAuth 登录成功后的收尾。
+//
+// 与其他渠道一致**不**登录即签到：Gemini 本渠道就没有签到（DailyCheckin 返回「不支持」）。
+// completeCodeArtsLogin CodeArts PKCE OAuth 登录成功后的收尾。
+//
+// 本渠道**有**每日签到（三步、走 HMAC 签名，渠道包实现了 CheckinReporter/CheckinGranter），
+// 但与其他渠道一致**不**在登录时顺手签到：定时任务会在签到时间自行领取，少发一次上游请求。
+func (a *App) completeCodeArtsLogin(r logincodearts.Result) {
+	// 带上用户在登录弹窗里填的「账号标识」：上游不提供稳定身份字段（实测），只能靠它区分账号
+	// ——留空 = 覆盖该渠道已有条目（同一账号重新登录）；填写 = 作为独立账号并存。
+	// 取完即清，避免污染下一次登录。
+	a.muLogin.Lock()
+	r.Label = a.loginLabel
+	a.loginLabel = ""
+	a.muLogin.Unlock()
+	log.Printf("codearts 登录成功 uid=%s nickname=%s label=%q expires_at=%d refresh_token=%t", r.UID, r.Nickname, r.Label, r.ExpiresAt, r.RefreshToken != "")
+	fp, err := logincodearts.SaveAuth(a.cfg.AuthDir, r)
+	if err != nil {
+		log.Printf("codearts 登录保存凭证失败 uid=%s err=%v", r.UID, err)
+		return
+	}
+	log.Printf("codearts 登录凭证已保存 uid=%s file=%s", r.UID, filepath.Base(fp))
+	a.reloadAccounts()
+	a.finishLogin()
+	a.afterAccountAdded(provider.CodeArts)
+}
+
+func (a *App) completeGeminiLogin(r logingemini.Result) {
+	log.Printf("gemini 登录成功 uid=%s nickname=%s expires_at=%d refresh_token=%t", r.UID, r.Nickname, r.ExpiresAt, r.RefreshToken != "")
+	fp, err := logingemini.SaveAuth(a.cfg.AuthDir, r)
+	if err != nil {
+		log.Printf("gemini 登录保存凭证失败 uid=%s err=%v", r.UID, err)
+		return
+	}
+	log.Printf("gemini 登录凭证已保存 uid=%s file=%s", r.UID, filepath.Base(fp))
+	a.reloadAccounts()
+	a.finishLogin()
+	a.afterAccountAdded(provider.Gemini)
+}
+
+func (a *App) completeZCodeLogin(r loginzcode.Result) {
+	log.Printf("zcode 登录成功 uid=%s nickname=%s expires_at=%d refresh_token=%t", r.UID, r.Nickname, r.ExpiresAt, r.RefreshToken != "")
+	fp, err := loginzcode.SaveAuth(a.cfg.AuthDir, r)
+	if err != nil {
+		log.Printf("zcode 登录保存凭证失败 uid=%s err=%v", r.UID, err)
+		return
+	}
+	log.Printf("zcode 登录凭证已保存 uid=%s file=%s", r.UID, filepath.Base(fp))
+	a.reloadAccounts()
+	a.finishLogin()
+	a.afterAccountAdded(provider.ZCode)
+}
+
+func (a *App) completeLobsterAILogin(r loginlobsterai.Result) {
+	log.Printf("lobsterai 登录成功 uid=%s nickname=%s expires_at=%d refresh_token=%t", r.UID, r.Nickname, r.ExpiresAt, r.RefreshToken != "")
+	fp, err := loginlobsterai.SaveAuth(a.cfg.AuthDir, r)
+	if err != nil {
+		log.Printf("lobsterai 登录保存凭证失败 uid=%s err=%v", r.UID, err)
+		return
+	}
+	log.Printf("lobsterai 登录凭证已保存 uid=%s file=%s", r.UID, filepath.Base(fp))
+	a.reloadAccounts()
+	a.finishLogin()
+	a.afterAccountAdded(provider.LobsterAI)
+}
+
+func (a *App) completeMinimaxLogin(r loginminimax.Result) {
+	log.Printf("minimax 登录成功 uid=%s nickname=%s expires_at=%d refresh_token=%t", r.UID, r.Nickname, r.ExpiresAt, r.RefreshToken != "")
+	fp, err := loginminimax.SaveAuth(a.cfg.AuthDir, r)
+	if err != nil {
+		log.Printf("minimax 登录保存凭证失败 uid=%s err=%v", r.UID, err)
+		return
+	}
+	log.Printf("minimax 登录凭证已保存 uid=%s file=%s", r.UID, filepath.Base(fp))
+	a.reloadAccounts()
+	a.finishLogin()
+	a.afterAccountAdded(provider.Minimax)
 }
 
 func (a *App) completeTraeLogin(r logintrae.Result) {
@@ -1252,13 +1656,25 @@ func (a *App) CancelGLMAutoLogin() error {
 
 // StartOfficeAceLogin 发起 OfficeAce 自助登录（华为云 OAuth 授权码 + PKCE + DPoP）。
 // 返回待打开的授权 URL；后台轮询完成登录并落盘。前端轮询 GetOfficeAceLoginStatus。
+//
+// 不在服务端开浏览器（#143）：授权页由前端 window.open 在「用户正在使用的设备」打开
+// —— 捕获走云端轮询 state→code，与授权页在哪台设备打开无关；服务端弹窗对局域网用户
+// 不可见，反而造成「点了没反应」的困惑。前端有「复制链接」兜底。
+//
+// 并发约定（2026-10-17 修）：只有「进行中」的会话才拒绝新请求；已进入终态的旧会话
+// 必须**先清空再解锁**，否则并发的状态轮询会读到上一轮的 done/failed，把用户新点的
+// 「新增账号」直接顶成旧终态（表现为「点了没反应」）。
 func (a *App) StartOfficeAceLogin() (string, error) {
 	a.muOALogin.Lock()
-	defer a.muOALogin.Unlock()
 	if a.oaLogin != nil {
-		if st, _ := a.oaLogin.Status(); st == "pending" || st == "exchanging" {
-			return a.oaLogin.URL(), errors.New("已有 OfficeAce 登录流程进行中，请先在浏览器完成登录或取消")
+		if st, _ := a.oaLogin.Status(); oaLoginActive(st) {
+			url := a.oaLogin.URL()
+			a.muOALogin.Unlock()
+			return url, errors.New("已有 OfficeAce 登录流程进行中，请先完成或取消")
 		}
+		// 上一轮已到终态：清空，让本次新建的会话立刻成为唯一可见状态。
+		// 刻意在上锁期间清空 —— 否则并发的 GetOfficeAceLoginStatus 会读到旧会话。
+		a.oaLogin = nil
 	}
 	sess, err := officeace.StartLogin(a.cfg.AuthDir, func(r officeace.LoginResult) {
 		a.reloadAccounts()
@@ -1266,30 +1682,37 @@ func (a *App) StartOfficeAceLogin() (string, error) {
 		log.Printf("officeace 自助登录完成，账号池已重载 uid=%s", r.UID)
 	})
 	if err != nil {
+		a.muOALogin.Unlock()
 		return "", err
 	}
 	a.oaLogin = sess
-	// 尝试用系统浏览器打开授权页（失败不阻断：URL 已返回给前端，可手动打开）。
-	_ = sess.OpenInBrowser()
+	// 不在服务端开浏览器：授权页由前端 window.open 在「用户正在使用的设备」打开
+	//（捕获走云端轮询 state→code，与授权页在哪台设备打开无关；服务端弹窗对
+	// 局域网用户不可见，反而造成「点了没反应」的困惑）。前端有复制链接兜底。
 	return sess.URL(), nil
 }
 
 // GetOfficeAceLoginStatus 查询 OfficeAce 自助登录状态。
-func (a *App) GetOfficeAceLoginStatus() map[string]any {
+// GetOfficeAceLoginStatus 查询 OfficeAce 自助登录状态。
+func (a *App) GetOfficeAceLoginStatus() officeAceLoginStatus {
 	a.muOALogin.Lock()
 	sess := a.oaLogin
 	a.muOALogin.Unlock()
 	if sess == nil {
-		return map[string]any{"status": "idle"}
+		return officeAceLoginStatus{Status: "idle"}
 	}
 	status, err := sess.Status()
-	out := map[string]any{"status": status}
+	out := officeAceLoginStatus{Status: status}
+	if status == "" {
+		// 会话刚建立、run() 还没写首个状态：按「进行中」上报，避免前端误判成空闲。
+		out.Status = "pending"
+	}
 	if err != nil {
-		out["error"] = err.Error()
+		out.Error = err.Error()
 	}
 	if r, ok := sess.Result(); ok {
-		out["uid"] = r.UID
-		out["nickname"] = r.Nickname
+		out.UID = r.UID
+		out.Nickname = r.Nickname
 	}
 	return out
 }
@@ -1305,6 +1728,27 @@ func (a *App) CancelOfficeAceLogin() error {
 	sess.Cancel()
 	return nil
 }
+
+// officeAceLoginStatus OfficeAce 自助登录状态（**单一来源**：前端读的字段名以此为准）。
+//
+// 字段契约（app.js 的 startOfficeAcePoll 依赖它）：
+//	status: pending | exchanging | done | failed | expired | canceled | idle
+//	可选 error / uid / nickname / warning
+//
+// 历史：这里原先返回 map[string]any，字段名靠手写字符串维护 —— 改一个拼写前端就静默读不到
+// （表现为「永远转圈」）。改成结构体后由 json 标签约束，并有静态断言测试锁死。
+type officeAceLoginStatus struct {
+	Status   string `json:"status"`
+	Error    string `json:"error,omitempty"`
+	UID      string `json:"uid,omitempty"`
+	Nickname string `json:"nickname,omitempty"`
+	AuthURL  string `json:"auth_url,omitempty"`
+	Warning  string `json:"warning,omitempty"`
+}
+
+// oaLoginActive 该状态是否表示「流程进行中」（此时不允许再起一条）。
+func oaLoginActive(st string) bool { return st == "pending" || st == "exchanging" }
+
 
 // completeQwenWorkLogin 登录成功：写 auth 文件、重载账号池。
 // 千问办公无签到活动（每日积分服务端被动发放），不做首次签到。
@@ -1357,16 +1801,6 @@ func (a *App) completeQwenWorkLogin(r loginqwenwork.Result) {
 	})
 }
 
-// mustLoadQwenWork 重新扫描千问办公凭证目录（错误仅记日志）。
-func mustLoadQwenWork(dir string) []*auth.Auth {
-	auths, err := auth.LoadQwenWorkDir(dir)
-	if err != nil {
-		log.Printf("reload qwenwork accounts: %v", err)
-		return nil
-	}
-	return auths
-}
-
 func (a *App) finishLogin() {
 	a.muLogin.Lock()
 	a.loginBusy = false
@@ -1376,7 +1810,7 @@ func (a *App) finishLogin() {
 }
 
 // reloadAccounts 用 auths 目录最新文件对齐账号池。
-// 注意：oczen 不在此列——匿名虚拟账号没有凭证文件，
+// 注意：oczen 与 kilo 不在此列——两者的虚拟账号都没有凭证文件，
 // SyncToDir 会因「目录扫描不到」而把它从池里剔除，故只能由 main 装配时注入一次。
 func (a *App) reloadAccounts() {
 	if rt := a.runtime(provider.WorkBuddy); rt != nil && rt.Pool != nil {
@@ -1423,6 +1857,46 @@ func (a *App) reloadAccounts() {
 		auths, err := auth.LoadWorkBuddyAiDir(a.cfg.AuthDir)
 		if err != nil {
 			log.Printf("reload workbuddyai accounts: %v", err)
+		} else {
+			rt.Pool.SyncToDir(auths)
+		}
+	}
+	if rt := a.runtime(provider.Minimax); rt != nil && rt.Pool != nil {
+		auths, err := auth.LoadMinimaxDir(a.cfg.AuthDir)
+		if err != nil {
+			log.Printf("reload minimax accounts: %v", err)
+		} else {
+			rt.Pool.SyncToDir(auths)
+		}
+	}
+	if rt := a.runtime(provider.LobsterAI); rt != nil && rt.Pool != nil {
+		auths, err := auth.LoadLobsterAIDir(a.cfg.AuthDir)
+		if err != nil {
+			log.Printf("reload lobsterai accounts: %v", err)
+		} else {
+			rt.Pool.SyncToDir(auths)
+		}
+	}
+	if rt := a.runtime(provider.ZCode); rt != nil && rt.Pool != nil {
+		auths, err := auth.LoadZCodeDir(a.cfg.AuthDir)
+		if err != nil {
+			log.Printf("reload zcode accounts: %v", err)
+		} else {
+			rt.Pool.SyncToDir(auths)
+		}
+	}
+	if rt := a.runtime(provider.Gemini); rt != nil && rt.Pool != nil {
+		auths, err := auth.LoadGeminiDir(a.cfg.AuthDir)
+		if err != nil {
+			log.Printf("reload gemini accounts: %v", err)
+		} else {
+			rt.Pool.SyncToDir(auths)
+		}
+	}
+	if rt := a.runtime(provider.CodeArts); rt != nil && rt.Pool != nil {
+		auths, err := auth.LoadCodeArtsDir(a.cfg.AuthDir)
+		if err != nil {
+			log.Printf("reload codearts accounts: %v", err)
 		} else {
 			rt.Pool.SyncToDir(auths)
 		}
@@ -1608,7 +2082,10 @@ func (a *App) creditSnapshot(rt *Runtime, au *auth.Auth) (remain int64, items []
 	_, unusable = provider.Summarize(items)
 	expiring = provider.ExpiringWithin(items, a.cfg.ExpiringThresholdDur)
 	// 差分记账：与上次快照对比产出 earn/spend/expire 流水（锦上添花，失败不干扰）
-	if a.ledger != nil {
+	// 积分流水只记「积分口径」的余额变化：token 计量渠道（credits_unit="token"）的 remain
+	// 是 token 数，记进积分流水会污染统计（2026-10-17 用户实测报告）。
+	// Token 用量本身另有 token 流水（按请求实测计量），不受影响。
+	if a.ledger != nil && a.creditsUnit(rt.Kind.String()) == "" {
 		a.ledger.DiffCredits(rt.Kind.String(), au.UID, remain, items)
 	}
 	rt.Pool.SetCreditDetail(au.UID, remain, expiring, unusable)
@@ -1752,12 +2229,18 @@ func (a *App) RefreshCredits(uid string) (int64, error) {
 		// 匿名通道无积分概念，面板显示「不适用」，无刷新语义。
 		return 0, fmt.Errorf("OpenCodeZen 匿名通道无积分，不适用")
 	}
+	if rt.Kind == provider.Kilo {
+		// 免密免费池同样没有积分概念（面板显示「不适用」）。
+		return 0, fmt.Errorf("Kilo 免费池无积分，不适用")
+	}
 	if rt.Custom {
 		// 自定义渠道（R66）无积分接口：凭据本体是渠道级 api_key（对话转发用），
 		// 不拒绝会落入 creditSnapshot 把 pool 快照写成 0（UserResourceDetail 恒返回空），
 		// 让人误读成「额度已用光」。
 		return 0, fmt.Errorf("%s 为自定义渠道，无积分概念，不适用", rt.Kind)
 	}
+	// 注意：ZCode **不**在这里拒绝 —— 它的额度是 token 口径，同样需要刷新才能看到用量；
+	// 它的数字由 credits_unit="token" 标注，不进积分小计与流水（见 creditsUnit）。
 	log.Printf("credits refresh start platform=%s uid=%s", rt.Kind, uid)
 	usable, expiring, unusable, err := a.creditTotals(rt, au)
 	if err != nil {
@@ -1788,8 +2271,9 @@ func (a *App) RefreshAll() RefreshSummary {
 		if rt == nil || rt.Pool == nil || rt.Upstream == nil || rt.Alias {
 			continue
 		}
-		// oczen 无积分可刷：纳入只会产生一条无意义的「无积分」失败记录。
-		if rt.Kind == provider.Oczen {
+		// oczen / kilo 无「额度」可刷：纳入只会产生一条无意义的失败记录。
+		// （ZCode 要走刷新：它的额度是 token 口径，同样需要更新才能看到用量。）
+		if rt.Kind == provider.Oczen || rt.Kind == provider.Kilo {
 			continue
 		}
 		// 自定义渠道（R66）同样无积分概念：凭据本体是渠道级 api_key（对话转发用），
@@ -1851,7 +2335,7 @@ type AccountRefresh struct {
 }
 
 // RemoveAccount 删除账号（auth 文件 + 内存池）。
-// oczen 是唯一例外：匿名虚拟账号不可删除（需求约束），返回明确错误而非默默失败。
+// oczen / kilo 是例外：免密渠道的虚拟账号不可删除（需求约束），返回明确错误而非默默失败。
 func (a *App) RemoveAccount(uid string) error {
 	rt, au := a.findRuntimeAuth(uid)
 	if rt == nil || au == nil {
@@ -1859,6 +2343,9 @@ func (a *App) RemoveAccount(uid string) error {
 	}
 	if rt.Kind == provider.Oczen {
 		return fmt.Errorf("OpenCodeZen 匿名通道账号不可删除")
+	}
+	if rt.Kind == provider.Kilo {
+		return fmt.Errorf("Kilo 免费池账号不可删除")
 	}
 	if rt.Custom {
 		var next []custom.ChannelConfig
@@ -1878,8 +2365,8 @@ func (a *App) RemoveAccount(uid string) error {
 }
 
 // DisableAccount 停用/启用账号。
-// oczen 匿名账号不可停用：停用后无法从面板恢复，而该渠道只有一个虚拟账号，
-// 停用等于禁用整个渠道。
+// oczen / kilo 的虚拟账号不可停用：停用后无法从面板恢复，而这两条渠道各自只有一个
+// 虚拟账号，停用等于禁用整条渠道。
 func (a *App) DisableAccount(uid string, disabled bool) error {
 	rt, _ := a.findRuntimeAuth(uid)
 	if rt == nil || rt.Pool == nil {
@@ -1887,6 +2374,9 @@ func (a *App) DisableAccount(uid string, disabled bool) error {
 	}
 	if rt.Kind == provider.Oczen {
 		return fmt.Errorf("OpenCodeZen 匿名通道账号不可停用/启用")
+	}
+	if rt.Kind == provider.Kilo {
+		return fmt.Errorf("Kilo 免费池账号不可停用/启用")
 	}
 	if rt.Custom {
 		var next []custom.ChannelConfig
@@ -1920,6 +2410,9 @@ func (a *App) ResourceDetail(uid string) (remain int64, items []provider.Resourc
 	if rt.Kind == provider.Oczen {
 		return 0, nil, 0, 0, fmt.Errorf("OpenCodeZen 匿名通道无积分，不适用")
 	}
+	if rt.Kind == provider.Kilo {
+		return 0, nil, 0, 0, fmt.Errorf("Kilo 免费池无积分，不适用")
+	}
 	if rt.Custom {
 		// 自定义渠道（R66）无明细接口：UserResourceDetail 恒返回空 items，
 		// 不拒绝会让前端弹出一张空白明细层。
@@ -1931,6 +2424,24 @@ func (a *App) ResourceDetail(uid string) (remain int64, items []provider.Resourc
 // ---------------------------------------------------------------------------
 // 配置操作
 // ---------------------------------------------------------------------------
+
+// SetBodyLog 开关请求体构成摘要记录（诊断用：定位上下文为何膨胀）。
+func (a *App) SetBodyLog(on bool) error {
+	a.mu.Lock()
+	a.cfg.BodyLog = on
+	err := config.Save(a.cfg, a.cfgPath)
+	a.mu.Unlock()
+	if err != nil {
+		return err
+	}
+	ledger.SetBodyTrace(on)
+	if on {
+		log.Printf("请求体摘要记录已开启（写 data/ledger/body-trace-*.jsonl）")
+	} else {
+		log.Printf("请求体摘要记录已关闭")
+	}
+	return nil
+}
 
 // SetCheckinTimes 更新自动签到时间（HH:MM）并立即唤醒两个调度器。
 func (a *App) SetCheckinTimes(times []string) error {
@@ -2460,6 +2971,9 @@ func (a *App) SetAccountNickname(uid, nickname string) error {
 	if rt.Kind == provider.Oczen {
 		return fmt.Errorf("OpenCodeZen 匿名通道账号不可改名")
 	}
+	if rt.Kind == provider.Kilo {
+		return fmt.Errorf("Kilo 免费池账号不可改名")
+	}
 	if au.FilePath == "" {
 		return fmt.Errorf("账号 %s 无凭证文件，不可改名", uid)
 	}
@@ -2479,6 +2993,24 @@ func (a *App) LoginBusy() bool {
 	a.muLogin.Lock()
 	defer a.muLogin.Unlock()
 	return a.loginBusy
+}
+
+// setLoginError 记录本次登录的终态错误（供面板展示）。
+func (a *App) setLoginError(msg string) {
+	a.muLogin.Lock()
+	a.loginErr = msg
+	a.muLogin.Unlock()
+}
+
+// peekLoginError 读取本次登录的终态错误（不清空）。
+//
+// 故意**非破坏式**：`/api/state` 有多个调用方（页面加载、其他轮询），
+// 若读取即清空，面板的登录轮询可能拿不到而被别的调用偷走，toast 就永远不显示了。
+// 由下一次 startLogin 置空。
+func (a *App) peekLoginError() string {
+	a.muLogin.Lock()
+	defer a.muLogin.Unlock()
+	return a.loginErr
 }
 
 // ---------------------------------------------------------------------------
@@ -2502,8 +3034,16 @@ type AccountView struct {
 	// CreditsNA 积分概念不适用（如 OpenCodeZen 匿名通道），UI 显示「不适用」
 	// 而非 0，并隐藏刷新积分与明细入口。
 	CreditsNA bool   `json:"credits_na,omitempty"`
+	// CreditsUnit 该账号额度的计量单位：空 = 积分（credits），`"token"` = Token 计数。
+	// 前端据此把它渲染成「Token 计数」面板（文案/单位/合计口径都随之切换），
+	// 且**不并入积分合计**——即「与积分分开统计和显示」（用户 2026-10-17 的要求）。
+	CreditsUnit string `json:"credits_unit,omitempty"`
 	Cooling   bool   `json:"cooling"`
 	Until     string `json:"until"`
+	// UntilTS 解冻时刻的 unix 秒（0 = 无）。面板用它实时算「剩 X 时 X 分」——
+	// until 文案是 "01-02 15:04"（24h 制），跨零点的次日 07:07 极易被误读成
+	// 「19 点被显示成 7 点」；带相对时长后（issue：24h 制统一）歧义即消除。
+	UntilTS int64 `json:"until_ts,omitempty"`
 	Reason    string `json:"reason"`
 	// ModelCooling 该账号上处于冷却的模型（上游按模型独立限流）。
 	// 与 Cooling/Reason 分开：非空不代表账号整体不可用，其他模型仍可路由，
@@ -2514,6 +3054,9 @@ type AccountView struct {
 	LastCheckinOK  bool            `json:"last_checkin_ok"`
 	LastCheckinAt  string          `json:"last_checkin_at"`
 	LastCheckinMsg string          `json:"last_checkin_msg"`
+	// SessionDead 登录态失效（401/登录已失效）：面板显示「需重新登录」+ 重新登录入口（#134）。
+	SessionDead       bool   `json:"session_dead,omitempty"`
+	SessionDeadReason string `json:"session_dead_reason,omitempty"`
 }
 
 // ModelCoolView 面板展示的单条模型级冷却。时间与 Until 一样格式化为字符串，
@@ -2580,6 +3123,9 @@ type State struct {
 
 	// OczenAPIKey OpenCodeZen 自定义 API key（只读脱敏回显：sk-xxx…尾4位；保存走同端点）。
 	OczenAPIKey string `json:"oczen_api_key"`
+
+	// BodyLog 请求体摘要诊断是否开启（只读，保存走 POST /api/config/body_log）。
+	BodyLog bool `json:"body_log"`
 
 	// LoopGuard 思考链死循环检测（发癫拦截）是否开启（只读，保存走 POST /api/config/loop_guard）。
 	LoopGuard bool `json:"loop_guard"`
@@ -2653,6 +3199,7 @@ func (a *App) GetState() State {
 	st.BackupProxyActive = backuplink.Enabled()
 	// oczen key 脱敏回显：仅露首 5 + 尾 4（空则原样空串）
 	st.OczenAPIKey = maskKey(a.cfg.OczenAPIKey)
+	st.BodyLog = a.cfg.BodyLog
 	// 自定义渠道路由的 api_key 同样脱敏回显（不把上游密钥明文送进面板载荷）。
 	// 返回深拷贝而非配置引用，避免调用方意外改写配置。
 	st.CustomChannels = maskCustomChannels(a.cfg.CustomChannels)
@@ -2674,16 +3221,20 @@ func (a *App) accountViews() []AccountView {
 			UnusableCredits: s.UnusableCredits,
 			CreditsStale:    s.CreditsStale,
 			// 匿名与自定义渠道无积分：前端据此显示「不适用」
-			CreditsNA:      a.creditsNAKind(group),
-			Cooling:        s.Cooling,
-			Until:          fmtTime(s.Until),
-			Reason:         s.Reason,
-			ModelCooling:   modelCoolViews(s.ModelCooling),
-			Disabled:       s.Disabled,
-			ErrCount:       s.ErrCount,
-			LastCheckinOK:  s.LastCheckinOK,
-			LastCheckinAt:  fmtTime(s.LastCheckinAt),
-			LastCheckinMsg: s.LastCheckinMsg,
+			CreditsNA:         a.creditsNAKind(group),
+			CreditsUnit:       a.creditsUnit(group),
+			Cooling:           s.Cooling,
+			Until:             fmtTime(s.Until),
+			UntilTS:           unixOrZero(s.Until),
+			Reason:            s.Reason,
+			ModelCooling:      modelCoolViews(s.ModelCooling),
+			Disabled:          s.Disabled,
+			ErrCount:          s.ErrCount,
+			LastCheckinOK:     s.LastCheckinOK,
+			LastCheckinAt:     fmtTime(s.LastCheckinAt),
+			LastCheckinMsg:    s.LastCheckinMsg,
+			SessionDead:       s.SessionDead,
+			SessionDeadReason: s.SessionDeadReason,
 		})
 	}
 	// 面板固定渠道序展示：OpenCodeZen → WorkBuddyCN → WorkBuddyAI → QoderCN → QoderCOM → TraeWork → 千问办公
@@ -2828,14 +3379,25 @@ func (a *App) HandleAPI(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/login/start", func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
 			Channel string `json:"channel"`
+			// AccountLabel 用户指定的「账号标识」（可选）。
+			// 只对上游不提供稳定身份字段的渠道有意义（当前是 CodeArts）：填了就是独立账号，
+			// 留空则按「同一账号重新登录」处理（覆盖该渠道已有条目）。
+			AccountLabel string `json:"account_label"`
 		}
 		_ = json.NewDecoder(r.Body).Decode(&req)
+		a.muLogin.Lock()
+		a.loginLabel = strings.TrimSpace(req.AccountLabel)
+		a.loginBackendOpened = false
+		a.muLogin.Unlock()
 		url, err := a.StartLoginFor(req.Channel)
 		if err != nil {
 			apiError(w, http.StatusBadRequest, err.Error())
 			return
 		}
-		writeJSON(w, http.StatusOK, map[string]any{"auth_url": url})
+		a.muLogin.Lock()
+		opened := a.loginBackendOpened
+		a.muLogin.Unlock()
+		writeJSON(w, http.StatusOK, map[string]any{"auth_url": url, "backend_opened": opened})
 	})
 	mux.HandleFunc("POST /api/login/cancel", func(w http.ResponseWriter, r *http.Request) {
 		if err := a.CancelLogin(); err != nil {
@@ -3163,6 +3725,17 @@ func (a *App) HandleAPI(mux *http.ServeMux) {
 		}
 		if err := a.SetBackupProxy(req.Proxy, key); err != nil {
 			apiError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+	})
+	mux.HandleFunc("POST /api/config/body_log", func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			On bool `json:"on"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		if err := a.SetBodyLog(req.On); err != nil {
+			apiError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
@@ -3696,6 +4269,16 @@ func fmtTime(t time.Time) string {
 	return t.Format("01-02 15:04")
 }
 
+// unixOrZero 解冻时刻的 unix 秒（零值返回 0）。统一 24 小时制补充通道：
+// "01-02 15:04" 文案虽是 24h 制，但跨零点的次日清晨时刻（如 07:07）仍易被
+// 误读为「12 小时制丢了上午/下午」；面板拿到 until_ts 后可实时算出
+// 「剩 11 时 53 分」，绝对时刻 + 相对时长并列展示，歧义自然消除。
+func unixOrZero(t time.Time) int64 {
+	if t.IsZero() {
+		return 0
+	}
+	return t.Unix()
+}
 func shortUID(uid string) string {
 	if len(uid) <= 10 {
 		return uid

@@ -247,22 +247,6 @@ func (c *Client) tryLegacyCheckin(a *auth.Auth) string {
 // itoa64 int64 → 字符串。
 func itoa64(n int64) string { return strconv.FormatInt(n, 10) }
 
-// checkinMsg 拼装可读文案（含打卡进度）。
-func checkinMsg(info CheckinInfo, prefix string) string {
-	msg := prefix
-	if info.TotalDays > 0 {
-		msg += "（累计打卡 " + itoa(info.TotalDays) + " 天"
-		if info.NeedDays > 0 {
-			msg += "/" + itoa(info.NeedDays)
-		}
-		msg += "）"
-	}
-	if info.PrizeChance > 0 {
-		msg += "，可抽奖 " + itoa(info.PrizeChance) + " 次"
-	}
-	return msg
-}
-
 // classifyCheckinErr 把签到错误映射成结构化结果（而不是裸 error）。
 // 之所以要分类：调度器需要区分「可重试」与「已完成」，
 // 裸 error 无法表达「无签到活动」这类可重试状态（wild-work 不变量 23 的教训）。

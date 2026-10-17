@@ -156,29 +156,6 @@ var staticAssistants = map[string]string{
 	"ppt":    "670e3c3e119b48fe5a851149", // 清言PPT
 }
 
-// UpstreamModel 返回某客户端模型名对应的**上游服务端模型代号**（仅文档/展示用途）。
-// 未知返回空串。这些值是 2026-09-26 实测得到的。
-func UpstreamModel(clientModel string) string {
-	m := strings.ToLower(strings.TrimSpace(clientModel))
-	if i := strings.LastIndex(m, "/"); i >= 0 {
-		m = m[i+1:]
-	}
-	if i := strings.LastIndex(m, ":"); i >= 0 {
-		return m[i+1:]
-	}
-	// 无后缀的旧名：按已知映射回填
-	switch {
-	case m == "chatglm" || m == "glm" || m == "default",
-		m == "chatglm-think" || m == "chatglm-deepresearch":
-		return "moe_53f"
-	case m == "search":
-		return "ai-search"
-	case m == "ppt" || m == "video":
-		return "all-tools-glms-glms-v2"
-	}
-	return ""
-}
-
 // staticModelNames 面板展示用的静态模型清单（顺序即展示顺序）。
 //
 // 只列实测可用的；失效/需额外参数的智能体不列（见 staticAssistants 的实测结论）。

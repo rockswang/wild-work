@@ -87,12 +87,6 @@ func (w modelWire) parseContextConfig() (int64, []int64) {
 	return cc.tokenCount(), cc.windows()
 }
 
-// contextWindow 解析 context_config 得到默认档上下文窗口（兼容旧调用点）。
-func (w modelWire) contextWindow() int64 {
-	def, _ := w.parseContextConfig()
-	return def
-}
-
 // parseDynamicModels 解析模型列表响应：assistant→developer→chat 三级回退。
 func parseDynamicModels(apiResp map[string]json.RawMessage) ([]ModelEntry, error) {
 	for _, scene := range []string{"assistant", "developer", "chat"} {

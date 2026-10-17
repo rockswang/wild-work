@@ -49,7 +49,7 @@ func retryableStatus(status int) bool {
 
 // retryPolicyAllowsRetry 判定上游是否在响应体里显式声明「这个错误可以重试」。
 //
-// WorkBuddyAI 网关对瞬时拥塞返回的 429  historically 带结构化字段：
+// WorkBuddyAI 网关对瞬时拥塞返回的 429，早期形态带结构化字段：
 //
 //	{"code":14003,"msg":"too many requests","retry_policy":{"retry":true},
 //	 "displayTips":{"en":"Wait about a minute before retry, or switch to a less busy model."}}

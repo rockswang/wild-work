@@ -35,10 +35,9 @@ const (
 	EpDailyCheckin = "/v2/billing/meter/daily-checkin"
 
 	// 登录三端点（与国内版路径完全相同，仅 host 不同）。
-	EpAuthState   = "/v2/plugin/auth/state?platform=CLI"
-	EpAuthToken   = "/v2/plugin/auth/token?state="
-	EpLoginAcct   = "/v2/plugin/login/account?state="
-	loginPlatform = "CLI"
+	EpAuthState = "/v2/plugin/auth/state?platform=CLI"
+	EpAuthToken = "/v2/plugin/auth/token?state="
+	EpLoginAcct = "/v2/plugin/login/account?state="
 )
 
 // ProductCode 账单查询固定产品码（与国内版一致）。

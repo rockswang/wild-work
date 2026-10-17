@@ -116,13 +116,17 @@ func TestMultiAccountDisablesAndSwitchesOnNextRequest(t *testing.T) {
 		t.Errorf("请求1 状态码 = %d, want 200（账号级 401 应在同请求内换号到 B 后成功）", rec1.Code)
 	}
 
-	// A 必须被禁用（这是「下次会换号」的前提）
+	// A 必须被标记登录失效（挑号跳过 =「下次会换号」的前提）；
+	// 不再混入用户域的停用（#134）
 	st, _ := p.Status("A")
-	if !st.Disabled {
-		t.Fatalf("账号 A 应因 session_dead 被禁用，实际 Disabled=%v —— 否则下次仍会选到坏号", st.Disabled)
+	if !st.SessionDead {
+		t.Fatalf("账号 A 应因 session_dead 被标记，实际 SessionDead=%v —— 否则下次仍会选到坏号", st.SessionDead)
+	}
+	if st.Disabled {
+		t.Fatalf("登录失效不应混入用户手动停用：Disabled=%v", st.Disabled)
 	}
 
-	// --- 请求 2：A 已禁用 → 应选中 B 并成功 ---
+	// --- 请求 2：A 已标记失效 → 应选中 B 并成功 ---
 	up.mu.Lock()
 	before := len(up.calls)
 	up.mu.Unlock()
@@ -130,7 +134,7 @@ func TestMultiAccountDisablesAndSwitchesOnNextRequest(t *testing.T) {
 	rec2 := httptest.NewRecorder()
 	h.ServeHTTP(rec2, httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body)))
 	if rec2.Code != http.StatusOK {
-		t.Fatalf("请求2 状态码 = %d, want 200（A 已禁用，应自动切到 B）\n响应: %s",
+		t.Fatalf("请求2 状态码 = %d, want 200（A 已标记失效，应自动切到 B）\n响应: %s",
 			rec2.Code, rec2.Body.String())
 	}
 

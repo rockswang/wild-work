@@ -91,23 +91,6 @@ func Set(raw string) error {
 	return nil
 }
 
-// URL 返回生效中的代理地址（未配置返回 nil）。
-func URL() *url.URL {
-	if l := cur.Load(); l != nil {
-		return l.u
-	}
-	return nil
-}
-
-// Raw 返回面板回显用的原始地址（未配置返回空串）。
-// 注意：地址里可能带 user:pass，仅在**已通过面板会话鉴权**的路径上回传。
-func Raw() string {
-	if l := cur.Load(); l != nil {
-		return l.raw
-	}
-	return ""
-}
-
 // Enabled 报告是否已配置可用的备用通道。
 func Enabled() bool { return cur.Load() != nil }
 

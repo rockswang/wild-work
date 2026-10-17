@@ -344,7 +344,7 @@ func TestStream_Transfer(t *testing.T) {
 	defer resp.Body.Close()
 
 	rec := httptest.NewRecorder()
-	if _, err := Stream(rec, resp.Body, "qwenwork/flash"); err != nil {
+	if _, err := StreamCapture(rec, resp.Body, "qwenwork/flash", nil); err != nil {
 		t.Fatal(err)
 	}
 	out := rec.Body.String()

@@ -109,7 +109,6 @@ type envelope struct {
 	Status  int             `json:"status"`
 	Message string          `json:"message"`
 	Result  json.RawMessage `json:"result"`
-	Rid     string          `json:"rid"`
 }
 
 // errText 从信封提取可读错误文案。
@@ -446,28 +445,6 @@ func jwtExpiry(token string) int64 {
 	return payload.Exp
 }
 
-// AdoptJWTExpiry 用 access_token 的 JWT exp 校正本地 ExpiresAt（仅当 JWT 更晚时）。
-//
-// 用于**自愈历史脏数据**：早期版本因上游不返回 expires_in 而把 expiresAt 落成 0，
-// 导致每次请求都刷 token。加载凭证时调用本方法即可原地修好（仅内存，不写盘——
-// 校正后不再触发刷新路径，下次真正刷新时自然落盘正确值）。
-//
-// 对应 wild-work 不变式 19（401 必须自愈）与 R21（expires_in 单位陷阱）的同族问题。
-func AdoptJWTExpiry(a *auth.Auth) {
-	if a == nil {
-		return
-	}
-	exp := jwtExpiry(a.AccessTokenValue())
-	if exp <= 0 {
-		return
-	}
-	a.Lock()
-	defer a.Unlock()
-	if exp > a.ExpiresAt {
-		a.ExpiresAt = exp
-	}
-}
-
 // acquireToken 返回可用的 access_token。
 // 若本地 token 尚未过期（留 10 分钟余量）直接用；否则刷新并落盘。
 func (c *Client) acquireToken(ctx context.Context, a *auth.Auth) (string, error) {
@@ -568,10 +545,10 @@ func (c *Client) FetchMemberInfo(a *auth.Auth) (MemberInfo, error) {
 		return MemberInfo{}, err
 	}
 	var m struct {
-		LeftScore    int64  `json:"left_score"`
-		LeftToken    int64  `json:"left_token"`
-		ScoreRule    string `json:"score_rule"`
-		IsMember     bool   `json:"is_member"`
+		LeftScore int64  `json:"left_score"`
+		LeftToken int64  `json:"left_token"`
+		ScoreRule string `json:"score_rule"`
+		IsMember  bool   `json:"is_member"`
 	}
 	if err := json.Unmarshal(raw, &m); err != nil {
 		return MemberInfo{}, fmt.Errorf("glm: 解析 member_info 失败: %w", err)

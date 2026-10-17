@@ -23,8 +23,8 @@ func TestSetValidation(t *testing.T) {
 		if err := Set(raw); err != nil {
 			t.Fatalf("合法地址被拒 %q: %v", raw, err)
 		}
-		if Raw() != raw || URL() == nil {
-			t.Fatalf("回显不一致：%q", Raw())
+		if !Enabled() {
+			t.Fatalf("Set 成功后应处于已配置态：%q", raw)
 		}
 	}
 
@@ -36,15 +36,15 @@ func TestSetValidation(t *testing.T) {
 	}
 	// 校验失败不得污染现值（否则一次误填就把可用链路清空）
 	_ = Set("socks5://127.0.0.1:1080")
-	if err := Set("ftp://x"); err == nil || Raw() != "socks5://127.0.0.1:1080" {
-		t.Errorf("非法 Set 应报错且不改现值：raw=%q", Raw())
+	if err := Set("ftp://x"); err == nil || !Enabled() {
+		t.Errorf("非法 Set 应报错且不改现值（仍应处于已配置态）")
 	}
 
 	// 空串 = 关闭
 	if err := Set(""); err != nil {
 		t.Fatalf("关闭失败：%v", err)
 	}
-	if Enabled() || Raw() != "" || Client(nil) != nil {
+	if Enabled() || Client(nil) != nil {
 		t.Error("关闭后一切应回到未配置")
 	}
 }

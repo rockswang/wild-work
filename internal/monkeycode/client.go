@@ -562,10 +562,9 @@ func milliCredits(milli int64) int64 {
 	return (milli + 999) / 1000
 }
 
-// DailyCheckin 本渠道无签到活动（渠道声明 noExplicitCheckin，调度器不会调用）。
-func (c *Client) DailyCheckin(_ *auth.Auth) error {
-	return fmt.Errorf("monkeycode 渠道无签到活动")
-}
+// DailyCheckin 见 checkin.go（2026-10-17 起本渠道有签到：POST {console}/api/v1/users/wallet/checkin）。
+// 历史：此前这里返回「本渠道无签到活动」的桩，渠道也因此在前端名单里被列为无签到；
+// 桌面端现身含该端点，故移入 checkin.go 实现。
 
 // Classify 上游错误分类。
 //

@@ -68,19 +68,6 @@ func sseHeader(w http.ResponseWriter) func() {
 	return fl.Flush
 }
 
-// writeSSE 写一条 SSE 事件并立即 flush。
-func writeSSE(w http.ResponseWriter, flush func(), payload any) error {
-	raw, err := json.Marshal(payload)
-	if err != nil {
-		return err
-	}
-	if _, err := w.Write([]byte("data: " + string(raw) + "\n\n")); err != nil {
-		return err
-	}
-	flush()
-	return nil
-}
-
 // writeSSEEvent 写带 event: 行的 SSE（Anthropic 与 Responses 均使用具名事件）。
 func writeSSEEvent(w http.ResponseWriter, flush func(), event string, payload any) error {
 	raw, err := json.Marshal(payload)

@@ -59,10 +59,22 @@ func Stream(w http.ResponseWriter, r io.Reader, model string) (map[string]any, e
 		skipped  strings.Builder
 	)
 	for sc.Scan() {
-		payload, ok := ssePayload(sc.Text())
+		line := sc.Text()
+		payload, ok := ssePayload(line)
 		if !ok {
+			// 非 `data:` 行：可能是「HTTP 200 + 业务码」信封（上游鉴权失效就走这条形态）。
+			// 只对以 `{` 开头的行做判定——注释行/空行里偶然出现的数字不该触发误判。
+			// 逐行先判：命中即补一帧 error 并返回（**不补 [DONE]**，R36）。
+			if trimmed := strings.TrimSpace(line); strings.HasPrefix(trimmed, "{") {
+				if businessErrKind(trimmed) != provider.ErrNone {
+					writeStreamErrorFrame(w, trimmed)
+					return usage, &StreamError{Status: http.StatusOK, Body: trimmed}
+				}
+			}
+			// 同时留存非 SSE 原文：若整段都不是 SSE（多行信封、或错误体不满足单行判定），
+			// 由流末的统一判定兜底（R75）。上限见 streamSniffLimit。
 			if !sawFrame && skipped.Len() < streamSniffLimit {
-				skipped.WriteString(sc.Text())
+				skipped.WriteString(line)
 				skipped.WriteByte('\n')
 			}
 			continue
@@ -141,6 +153,11 @@ func aggregate(r io.Reader, model string) (map[string]any, error) {
 	}
 	trimmed := bytes.TrimSpace(raw)
 	if len(trimmed) > 0 && trimmed[0] == '{' {
+		// ⚠️ 先判业务信封：`{"code":"100002"}` 同样以 `{` 开头，直接当 chat.completion 返回
+		// 会让客户端收到一个**没有 choices 的假响应**（2026-10-17 修复 D1）。
+		if businessErrKind(string(trimmed)) != provider.ErrNone {
+			return nil, &StreamError{Status: http.StatusOK, Body: string(trimmed)}
+		}
 		var out map[string]any
 		if err := json.Unmarshal(trimmed, &out); err == nil {
 			// 回填客户端模型名（上游常返回裸名或别名）。

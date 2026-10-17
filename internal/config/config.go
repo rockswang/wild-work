@@ -137,10 +137,20 @@ type Config struct {
 	Region    string `json:"region"`         // 只收 "cn"
 
 	Cooldown struct {
-		HardCredit  string `json:"hard_credit"`   // "12h"
+		HardCredit  string `json:"hard_credit"`   // "12h" 硬冷却上限
 		SoftRate    string `json:"soft_rate"`     // "60s"
 		ErrThresh   int    `json:"err_threshold"` // 默认 3
 		ErrCooldown string `json:"err_cooldown"`  // "10m"
+		// DailyGrantAt 每日额度发放时刻（UTC+8 墙钟 "HH:MM"）。非空时硬冷却
+		// （402/余额不足）**截到下一个发奖窗口**而不跑满 hard_credit：额度一到
+		// 账就能用，不让固定 12h 把刚补发的额度白锁几小时。
+		// 仅适用于「每日固定时刻发放」的渠道（qwenwork 00:00 UTC+8 实测 00:01~00:20
+		// 到账）；traework/raccoon 发奖时刻不固定，保持空串 = 不启用。
+		DailyGrantAt string `json:"daily_grant_at,omitempty"`
+		// DailyGrantBuffer 发奖窗口缓冲（默认 30m）。账本实测 qwenwork 到账
+		// 落在 00:01~00:20，取 30m 覆盖实测最晚值：既不在到账前空转撞 402，
+		// 也不把解冻拖到发奖之后。
+		DailyGrantBuffer string `json:"daily_grant_buffer,omitempty"`
 	} `json:"cooldown"`
 
 	Schedule struct {
@@ -225,6 +235,11 @@ type Config struct {
 	// 自定义 key 有独立配额（不受匿名通道共享限流），且可调用付费模型（需账户余额）。
 	OczenAPIKey string `json:"oczen_api_key,omitempty"`
 
+	// BodyLog 诊断开关：把每次请求的「上下文构成摘要」写入 data/ledger/body-trace-*.jsonl，
+	// 用于定位上下文为何膨胀（哪条消息/哪段文本占了大头）。默认关。
+	// 摘要含消息内容前 200 字预览，属临时排查工具，用完请关掉。
+	BodyLog bool `json:"body_log,omitempty"`
+
 	// ModelFallback 模型降级链：请求模型在该渠道全部账号上限流冷却（no_healthy_account
 	// 的「模型全冷」形态）时，按 To 顺序找第一个仍有可用账号的备胎模型顶上，
 	// 响应头 X-Model-Fallback 标注实际使用的备胎。仅全冷场景触发，正常路由零开销；
@@ -253,6 +268,13 @@ type Config struct {
 	HardCreditDur  time.Duration `json:"-"`
 	SoftRateDur    time.Duration `json:"-"`
 	ErrCooldownDur time.Duration `json:"-"`
+	// DailyGrantAt 每日发奖窗口（UTC+8 墙钟时刻）。注意 00:00 解析后是 0，
+	// 与「未配置」不可区分，故是否启用看 DailyGrantEnabled。
+	DailyGrantAt time.Duration `json:"-"`
+	// DailyGrantEnabled 是否启用「硬冷却截到发奖窗口」策略（配置了 daily_grant_at 即启用）。
+	DailyGrantEnabled bool `json:"-"`
+	// DailyGrantBufferDur 发奖窗口缓冲（默认 30m）。
+	DailyGrantBufferDur time.Duration `json:"-"`
 	// ExpiringThresholdDur 临期阈值解析结果（normalize 里钳到 >= 24h）。
 	ExpiringThresholdDur time.Duration `json:"-"`
 	// StreamIdleDur 流式空闲超时解析结果（normalize 里钳到 >= 10s，默认 90s）。
@@ -291,6 +313,10 @@ func Default() *Config {
 	c.Cooldown.SoftRate = "60s"
 	c.Cooldown.ErrThresh = 3
 	c.Cooldown.ErrCooldown = "10m"
+	// 每日发奖窗口：qwenwork 每日 00:00（UTC+8）服务端自动发放，账本实测
+	// 00:01~00:20 到账。硬冷却据此截到「下个发奖窗口 + 缓冲」，不再跑满 12h。
+	c.Cooldown.DailyGrantAt = "00:00"
+	c.Cooldown.DailyGrantBuffer = "30m"
 	c.Schedule.CheckinHours = []int{9, 21}
 	c.Schedule.CheckinTimes = []string{"09:00", "21:00"}
 	c.Schedule.KeepaliveHours = []int{22}
@@ -370,6 +396,15 @@ func ParseClockTimes(values []string) ([]int, error) {
 	}
 	sort.Ints(out)
 	return out, nil
+}
+
+// parseClockHM 解析 "HH:MM" 为当天分钟偏移（0 ~ 1439）。
+func parseClockHM(v string) (time.Duration, error) {
+	mins, err := ParseClockTimes([]string{v})
+	if err != nil || len(mins) != 1 {
+		return 0, fmt.Errorf("invalid HH:MM %q", v)
+	}
+	return time.Duration(mins[0]) * time.Minute, nil
 }
 
 // FormatClockTimes 将当天分钟数格式化为排序后的 HH:MM 列表。
@@ -564,6 +599,19 @@ func (c *Config) normalize() error {
 	if c.ErrCooldownDur, err = time.ParseDuration(c.Cooldown.ErrCooldown); err != nil {
 		return fmt.Errorf("cooldown.err_cooldown: %w", err)
 	}
+	// 每日发奖窗口：空串 = 不启用（走完整 hard_credit）；非空必须是合法 "HH:MM"。
+	if c.Cooldown.DailyGrantAt != "" {
+		c.DailyGrantEnabled = true
+		if c.DailyGrantAt, err = parseClockHM(c.Cooldown.DailyGrantAt); err != nil {
+			return fmt.Errorf("cooldown.daily_grant_at: %w", err)
+		}
+		if c.Cooldown.DailyGrantBuffer == "" {
+			c.Cooldown.DailyGrantBuffer = "30m"
+		}
+		if c.DailyGrantBufferDur, err = time.ParseDuration(c.Cooldown.DailyGrantBuffer); err != nil {
+			return fmt.Errorf("cooldown.daily_grant_buffer: %w", err)
+		}
+	}
 	if c.Cooldown.ErrThresh <= 0 {
 		c.Cooldown.ErrThresh = 3
 	}
@@ -669,4 +717,41 @@ func (c *Config) normalize() error {
 		seenCustom[ch.Name] = true
 	}
 	return nil
+}
+
+// hardCooldownLoc 每日发奖窗口的时区口径：固定 UTC+8 墙钟（与各渠道上游一致）。
+var hardCooldownLoc = time.FixedZone("UTC+8", 8*60*60)
+
+// HardCooldownFor 返回一次「硬冷却」（402 余额/权益不足）应持续多久。
+//
+// 为什么不是固定 HardCreditDur：qwenwork 等渠道每日 00:00（UTC+8）服务端自动
+// 发放额度（账本实测 00:01~00:20 到账）。固定 12h 会把「19:07 撞 402」锁到次日
+// 07:07——额度早在 00:20 就到账了，却被白锁 7 小时。故当 DailyGrantAt 已配置时，
+// 冷却截到「下一个发奖窗口 + 缓冲」，让解冻点落在额度到账之后、且不早于到账
+// （避免解冻后立刻再撞 402）。窗口配置为空时退回完整 HardCreditDur（老行为）。
+//
+// 上限保护：截断只会缩短、不会延长——超过 HardCreditDur 时仍按 HardCreditDur。
+func (c *Config) HardCooldownFor(now time.Time) time.Duration {
+	base := c.HardCreditDur
+	if !c.DailyGrantEnabled {
+		return base
+	}
+	until := NextDailyGrant(now, c.DailyGrantAt, c.DailyGrantBufferDur)
+	d := until.Sub(now)
+	if d <= 0 || d > base {
+		return base
+	}
+	return d
+}
+
+// NextDailyGrant 返回 now 之后（严格晚于）最近一个「发奖时刻 + 缓冲」。
+// 已过当日窗口则顺延到次日；时刻按 UTC+8 墙钟解释，与上游发奖口径一致。
+func NextDailyGrant(now time.Time, at, buffer time.Duration) time.Time {
+	local := now.In(hardCooldownLoc)
+	day := time.Date(local.Year(), local.Month(), local.Day(), 0, 0, 0, 0, hardCooldownLoc)
+	next := day.Add(at + buffer)
+	if !next.After(now) {
+		next = next.AddDate(0, 0, 1)
+	}
+	return next
 }

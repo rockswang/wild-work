@@ -309,7 +309,6 @@ func (w *WebSocket) Close() error {
 const (
 	opContinuation byte = 0x0
 	opText         byte = 0x1
-	opBinary       byte = 0x2
 	opClose        byte = 0x8
 	opPing         byte = 0x9
 	opPong         byte = 0xA

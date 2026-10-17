@@ -28,7 +28,7 @@ func reasoningLoopFixture() string {
 // 不补 [DONE]，返回 *loopguard.Error，且死循环之后的正文帧不再透传。
 func TestStreamReasoningLoopIntercepted(t *testing.T) {
 	rec := httptest.NewRecorder()
-	err := Stream(rec, strings.NewReader(reasoningLoopFixture()))
+	err := StreamCapture(rec, strings.NewReader(reasoningLoopFixture()), nil)
 	if err == nil {
 		t.Fatal("期望守卫命中返回错误，实际 nil")
 	}
@@ -54,7 +54,7 @@ func TestStreamReasoningLoopDisabled(t *testing.T) {
 	defer loopguard.SetEnabled(true)
 
 	rec := httptest.NewRecorder()
-	err := Stream(rec, strings.NewReader(reasoningLoopFixture()))
+	err := StreamCapture(rec, strings.NewReader(reasoningLoopFixture()), nil)
 	if err != nil {
 		t.Fatalf("禁用守卫后不应报错：%v", err)
 	}
@@ -77,7 +77,7 @@ func TestStreamNormalReasoningPasses(t *testing.T) {
 	b.WriteString("data: [DONE]\n\n")
 
 	rec := httptest.NewRecorder()
-	err := Stream(rec, strings.NewReader(b.String()))
+	err := StreamCapture(rec, strings.NewReader(b.String()), nil)
 	if err != nil {
 		t.Fatalf("正常推理不应报错：%v", err)
 	}

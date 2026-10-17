@@ -214,27 +214,6 @@ func TestResolveAssistantStripsUpstreamSuffix(t *testing.T) {
 	}
 }
 
-// TestUpstreamModelMapping 校验「客户端模型名 → 上游代号」的映射。
-func TestUpstreamModelMapping(t *testing.T) {
-	cases := map[string]string{
-		"glm/chatglm:moe_53f":              "moe_53f",
-		"chatglm:moe_53f":                  "moe_53f",
-		"chatglm":                          "moe_53f", // 旧名回填
-		"chatglm-think":                    "moe_53f",
-		"glm/chatglm-deepresearch:moe_53f": "moe_53f",
-		"glm/search":                       "ai-search",
-		"search":                           "ai-search",
-		"glm/ppt":                          "all-tools-glms-glms-v2",
-		"video":                            "all-tools-glms-glms-v2",
-		"unknown-model":                    "",
-	}
-	for in, want := range cases {
-		if got := UpstreamModel(in); got != want {
-			t.Errorf("UpstreamModel(%q) = %q, want %q", in, got, want)
-		}
-	}
-}
-
 func isLowerHex(s string) bool {
 	for i := 0; i < len(s); i++ {
 		c := s[i]

@@ -16,11 +16,26 @@ import (
 
 // 华为云 AgentArts / 模型网关常量。
 const (
-	agentartsBase  = "https://agentarts.cn-southwest-2.myhuaweicloud.com"
 	defaultGateway = "https://modelgw-0004.officeace.cn-southwest-2.huaweicloud-agentarts.com"
-	stsTokenURL    = "https://sts.cn-north-4.myhuaweicloud.com/v1/oauth2/tokens"
 	oauthClientID  = "pdp5_for_agentarts"
 	pointsAttrCode = "officeace_points"
+)
+
+// 生产上游地址。单独列成常量，供 httptest 用例结束时还原（防串测）。
+const (
+	productionAgentartsBase = "https://agentarts.cn-southwest-2.myhuaweicloud.com"
+	productionStsTokenURL   = "https://sts.cn-north-4.myhuaweicloud.com/v1/oauth2/tokens"
+	productionAuthBase      = "https://auth.huaweicloud.com"
+)
+
+// 三个上游地址做成**变量**的唯一原因是可测性：登录链路（state → code → STS → validate）
+// 必须能在 httptest 假上游上端到端回归——否则「新增账号不成功」这一类断点只能靠真实
+// 华为账号实盘才能发现，而实盘会产生真实 state/令牌消耗与风控暴露（AGENTS.md §0.1）。
+// 生产运行时一律保持默认值；**没有任何代码路径会改写它们**（仅 *_test.go 内临时替换）。
+var (
+	agentartsBase = productionAgentartsBase
+	stsTokenURL   = productionStsTokenURL
+	authBase      = productionAuthBase
 )
 
 // UserResource 返回该账号**可消耗积分**（套餐剩余 + 奖励剩余）。
@@ -137,17 +152,18 @@ func (c *Client) fetchSubscription(ac *Account) (*subscription, error) {
 	return &sub, nil
 }
 
-// gatewayBase 解析账号专属网关：配置里没有就读 client-permission-validate。
+// gatewayBase 解析账号专属网关（**裸 host**）：配置里没有就读 client-permission-validate。
+// 返回前一律过 bareGateway：额度/签到端点直接拼 `/v1/subscription`，不得带 `/v2`（#152）。
 func (c *Client) gatewayBase(ac *Account) (string, error) {
 	if ac.BaseURL != "" {
-		return ac.BaseURL, nil
+		return bareGateway(ac.BaseURL), nil
 	}
 	// 无网关凭据时尝试用临时凭据问控制面。
 	base, _, err := c.clientPermissionValidate(ac)
 	if err != nil || base == "" {
 		return defaultGateway, nil
 	}
-	return base, nil
+	return bareGateway(base), nil
 }
 
 // clientPermissionValidate 调 {agentartsBase}/v1/claw/client-permission-validate（V4 签名）。
@@ -295,13 +311,11 @@ func (c *Client) DailyCheckinReport(a *auth.Auth) (provider.CheckinReport, error
 // ---------------------------------------------------------------------------
 
 type subscription struct {
-	SubscribeStatus string     `json:"subscribe_status"`
-	SKUs            []sku      `json:"skus"`
-	BonusSKUs       []bonusSKU `json:"bonus_skus"`
+	SKUs      []sku      `json:"skus"`
+	BonusSKUs []bonusSKU `json:"bonus_skus"`
 }
 
 type sku struct {
-	SKUCode     string  `json:"sku_code"`
 	SKUName     string  `json:"sku_name"`
 	ExpiredTime string  `json:"expired_time"`
 	Quotas      []quota `json:"quotas"`
@@ -315,11 +329,10 @@ type quota struct {
 }
 
 type bonusSKU struct {
-	ActivityName  string `json:"activity_name"`
-	Points        string `json:"points"`
-	CurrentValue  string `json:"current_value"`
-	ExpiredTime   string `json:"expired_time"`
-	CBCResourceID string `json:"cbc_resource_id"`
+	ActivityName string `json:"activity_name"`
+	Points       string `json:"points"`
+	CurrentValue string `json:"current_value"`
+	ExpiredTime  string `json:"expired_time"`
 }
 
 // parseISO 解析 ISO8601（含毫秒）为 Unix 毫秒。

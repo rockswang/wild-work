@@ -426,13 +426,14 @@ function chPrefixChip(k) {
   return `<code class="ch-prefix" title="客户端模型名须以此前缀开头，如 ${esc(p)}&lt;模型名&gt;（点击复制前缀）"` +
     ` onclick="copyText('${esc(p)}','渠道前缀 ${esc(p)}')">${esc(p)}</code>`;
 }
-// 不支持显式签到（手动按钮）的渠道：
+// 不支持显式签到（手动按钮）的渠道 —— 必须与后端 app.noExplicitCheckin 同口径
+// （`internal/app/app.go`；两处不一致会出现「按钮亮着但点了必失败」或「按钮灰着但后端能签」）：
 // 旧 Qoder 渠道无签到活动（qoder.DailyCheckin 直接返回错误，见 internal/qoder/client.go）；
 // WorkBuddy 国际版不提供手动签到，而是自动对话保活领日活奖励；千问办公无签到活动；
-// 小浣熊 / Loomy 无签到端点；OpenCodeZen 匿名通道无账号概念（也无积分）；
-// Cline 官方无签到活动（Key 不过期，无保活语义）。
-// QoderCN / QoderCOM 已实现签到（campaigns 主路径），保留手动按钮。
-const NO_EXPLICIT_CHECKIN = new Set(["qoder", "workbuddyai", "qwenwork", "raccoon", "loomy", "monkeycode", "oczen", "cline"]);
+// Kilo / ZCode / Gemini 无签到活动（ZCode 的领取依赖网页验证码，本工具不实现）；
+// OpenCodeZen 匿名通道无账号概念（也无积分）；Cline 官方无签到活动（Key 不过期，无保活语义）。
+// 小浣熊（R65 setting_info 惰性落账）/ Loomy / MonkeyCode 已实现签到，保留手动按钮。
+const NO_EXPLICIT_CHECKIN = new Set(["qoder", "workbuddyai", "qwenwork", "oczen", "kilo", "zcode", "gemini", "cline"]);
 const noExplicitCheckin = (g) => NO_EXPLICIT_CHECKIN.has(g);
 // 粘贴凭据型渠道：凭据是官方文档化的 API Key，创建动作发生在上游网页里，本工具无法代劳，
 // 故走专用输入框（而非「打开浏览器登录」）。当前仅 Cline（sk_ Key，见 internal/cline）。

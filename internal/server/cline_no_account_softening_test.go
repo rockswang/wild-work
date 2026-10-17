@@ -165,7 +165,7 @@ func TestClineBadParamsDoesNotPenalize(t *testing.T) {
 }
 
 // TestClineSessionDeadDisablesKey Key 被删/失效 ⇒ 禁用该号（不可刷新，只能人工换 Key）。
-func TestClineSessionDeadDisablesKey(t *testing.T) {
+func TestClineSessionDeadMarksKey(t *testing.T) {
 	up := &kindedUpstream{status: http.StatusUnauthorized,
 		kind: provider.ErrSessionDead, body: `{"error":"Unauthorized"}`,
 		succeed: func(uid string) bool { return uid == "apk-B" }}
@@ -175,13 +175,13 @@ func TestClineSessionDeadDisablesKey(t *testing.T) {
 		t.Fatalf("应换到 B 成功，实得 %d", rec.Code)
 	}
 	st := p.List()
-	var disabled int
+	var dead int
 	for _, s := range st {
-		if s.Disabled {
-			disabled++
+		if s.SessionDead {
+			dead++
 		}
 	}
-	if disabled != 1 {
-		t.Fatalf("失效 Key 应被禁用 1 个，实得 %d（多账号池的正确行为）", disabled)
+	if dead != 1 {
+		t.Fatalf("失效 Key 应被标记登录失效 1 个，实得 %d（多账号池的正确行为）", dead)
 	}
 }

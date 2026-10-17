@@ -81,6 +81,7 @@ func New(dir string) (*Ledger, error) {
 	l := &Ledger{dir: dir}
 	l.migrateDupKeyCredit() // 一次性：归档旧版重复 key 差分错误流水（issue #38）
 	l.cleanup()
+	l.cleanupBodyTrace() // 清理过期的请求体摘要分片（诊断数据保留 7 天）
 	l.trimCurrentMonth() // 裁剪当月文件内 7 天前条目
 	return l, nil
 }
@@ -328,6 +329,11 @@ func (l *Ledger) AutoFlush(stop <-chan struct{}) {
 			return
 		case <-t.C:
 			l.Flush()
+			// 每小时清理一次过期的请求体摘要分片（诊断数据保留 7 天）
+			if now := time.Now().Unix(); now-btClean.Load() >= 3600 {
+				btClean.Store(now)
+				l.cleanupBodyTrace()
+			}
 		}
 	}
 }

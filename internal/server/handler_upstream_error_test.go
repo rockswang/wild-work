@@ -121,19 +121,19 @@ func TestUpstreamRequestLevelErrorsDoNotPunishAccount(t *testing.T) {
 	}
 }
 
-// TestUpstreamUnknown4xxStillPunishesAccount 对照：未知业务错误仍走 ErrClient → NoteError。
-//
-// 没有这条，「上面那组用例断言不罚号」就无法证明测试有效——它证明的是
-// 「分类真的被区分了」，而不是「handler 根本不罚号」。
-func TestUpstreamUnknown4xxStillPunishesAccount(t *testing.T) {
+// TestUpstreamUnknown4xxStillRotatesWithoutPunishing 对照：未知业务错误归 ErrClient ——
+// 只轮转、绝不累计错误计数（PR #145：错误跟着请求体走，换号必然同样拒收，罚号等于
+// 拿客户端的问题惩罚健康账号）。对照另一侧换成 5xx（ErrServer 仍 NoteError）才能证明
+// 「分类真的被区分」，而不是「handler 根本不罚号」。
+func TestUpstreamUnknown4xxStillRotatesWithoutPunishing(t *testing.T) {
 	h, p := newErrHandler(400, `{"code":9999,"msg":"unknown business error"}`)
 	rec := postChat(h)
 	if rec.Code != 400 {
 		t.Fatalf("status=%d want 400", rec.Code)
 	}
 	st, _ := p.Status("u1")
-	if !st.Cooling {
-		t.Fatalf("未知 4xx 应经 NoteError 冷却账号，实际 errCount=%d cooling=%v", st.ErrCount, st.Cooling)
+	if st.ErrCount != 0 || st.Cooling {
+		t.Fatalf("未知 4xx（ErrClient）不得累计 errCount：errCount=%d cooling=%v", st.ErrCount, st.Cooling)
 	}
 }
 

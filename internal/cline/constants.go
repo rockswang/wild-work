@@ -38,7 +38,6 @@ const (
 	EpChat         = "/chat/completions"
 	EpRecommends   = "/ai/cline/recommended-models" // 返回 recommended/free/clinePass/clineCloud 四组；free[] 是模型面唯一来源
 	EpAPIKeys      = "/api-keys"                    // 返回本账号全部 Key（uid 与同账号判定的来源）
-	EpPlans        = "/plans"                       // 权益目录（含 inferenceCapThreshold 结构）
 	defaultBaseURL = APIBase
 )
 

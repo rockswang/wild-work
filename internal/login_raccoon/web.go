@@ -70,7 +70,6 @@ type Result struct {
 	RefreshToken   string
 	OfficeIdentity string
 	OfficeOrgName  string
-	OfficeOrgRole  string
 	ExpiresAt      int64
 }
 

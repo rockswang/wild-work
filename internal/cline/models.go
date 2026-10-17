@@ -23,11 +23,9 @@ type remoteModel struct {
 	Tags        []string `json:"tags"`
 }
 
+// recommendResp 上游 recommended-models 信封：模型面只消费 free 数组（其余分组不落结构）。
 type recommendResp struct {
-	Recommended []remoteModel `json:"recommended"`
-	Free        []remoteModel `json:"free"`
-	ClinePass   []remoteModel `json:"clinePass"`
-	ClineCloud  []remoteModel `json:"clineCloud"`
+	Free []remoteModel `json:"free"`
 }
 
 // StaticModels 恒 nil：本渠道**不做任何本地假设**（无静态表、无映射、无过滤）。
@@ -201,13 +199,6 @@ func (c *Client) rememberLiveModel(id, name string) {
 		c.knownIDs = map[string]string{}
 	}
 	c.knownIDs[id] = name
-}
-
-func (c *Client) nameOf(id string) string {
-	if n, ok := c.knownIDs[id]; ok && n != "" {
-		return n
-	}
-	return prettifyID(id)
 }
 
 // capCooldown 撞共享上限后的默认摘除时长：`limit_rpd` 是**日**上限，给 1 小时足够

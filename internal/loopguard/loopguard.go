@@ -212,16 +212,6 @@ func SetEnabled(v bool) { enabled.Store(v) }
 // Enabled 报告当前是否启用。
 func Enabled() bool { return enabled.Load() }
 
-// Stats 守卫观测数据（用于日志回溯误报）。
-type Stats struct {
-	TotalChars    int // 喂入的推理字符总数（rune）
-	LineCount     int // 已结算行数
-	LastStreak    int // 当前同行连续重复计数
-	WindowLines   int // 滑动窗口内行数
-	WindowUnique  int // 滑动窗口内不同行数
-	SkippedInline int // 被代码围栏豁免的行内检查次数
-}
-
 // Guard 每个流式请求一个实例（用完即弃）。
 type Guard struct {
 	cfg Config
@@ -296,18 +286,6 @@ func (g *Guard) Push(text string) *Hit {
 		}
 	}
 	return nil
-}
-
-// Stats 观测快照。
-func (g *Guard) Stats() Stats {
-	return Stats{
-		TotalChars:    g.totalChars,
-		LineCount:     g.lineCount,
-		LastStreak:    g.streak,
-		WindowLines:   len(g.window),
-		WindowUnique:  uniqueCount(g.window),
-		SkippedInline: g.skippedInline,
-	}
 }
 
 // trip 构造命中结果。

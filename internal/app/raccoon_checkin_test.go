@@ -55,9 +55,12 @@ func TestRaccoonCheckinWiring(t *testing.T) {
 			"批量签到也会跳过该渠道（App.CheckinAccount/CheckinAll 两处守卫）")
 	}
 	// 反向守门：真正无签到的渠道不得被误移除（防止将来「顺手删多了」）。
+	// 注：MonkeyCode 与 Loomy 均已实装签到（见 internal/monkeycode/checkin.go、
+	// internal/loomy/checkin.go），故它们**不再**属于这一组，而由
+	// TestMonkeyCodeCheckinWiring / TestLoomyCheckinWiring 正向锁定。
 	for _, k := range []provider.Kind{
-		provider.WorkBuddyAI, provider.QwenWork, provider.MonkeyCode,
-		provider.Loomy, provider.Oczen, provider.Cline,
+		provider.WorkBuddyAI, provider.QwenWork,
+		provider.Oczen, provider.Cline,
 	} {
 		if !noExplicitCheckin(k) {
 			t.Errorf("❌ noExplicitCheckin(%s) 应为 true（该渠道确无签到活动）", k)

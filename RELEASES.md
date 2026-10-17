@@ -2291,3 +2291,218 @@ issue #117 二次反馈「升级了还是恒 403」，并附**逐项消元矩阵
 - 本地实测（macOS，带 4 个自定义渠道的真实配置）：`POST /api/account/refresh_all`
   返回 `failed=0`，自定义渠道不再出现在 platforms；单账号刷新与明细均明确报「不适用」；
   `/api/state` 中自定义账号 `credits_na=true` 不变。
+
+---
+
+# wild-work v2.8.2 — 硬冷却截到每日发奖窗口 + 面板时间统一 24 小时制
+
+## ⏱ 402 硬冷却不再跑满 12h：截到「每日发奖窗口 + 缓冲」（R73）
+
+**现象**：千问办公账号 19:07 撞上游 `402 PAYMENT_REQUIRED` 后被锁 12 小时到**次日 07:07**，
+面板显示「冷却至 10-18 07:07」，看起来像「19 点被显示成 7 点」。
+
+**根因**：402 本身没错（上游对「余额不足以支付该档模型」的固定返回码，账号还有 11 分
+跑不动 1.8x 的 `qwen3.8-max`，但跑得动 0.1x 的 `flash`），错的是**冷却时长取的是固定
+`cooldown.hard_credit=12h`**。而千问办公每日 00:00（UTC+8）服务端自动发额度——
+账本 22 次「每日奖励」实测全部落在 **00:01~00:20**。于是 00:20 就到账的额度被白锁 7 小时。
+
+**修法**：新增 `cooldown.daily_grant_at`（默认 `"00:00"`）+ `cooldown.daily_grant_buffer`
+（默认 `30m`）。硬冷却时长改为 `min(距下一个发奖窗口 + 缓冲, hard_credit)`——**只缩短不延长**：
+
+| 撞 402 时刻 | 旧行为 | 新行为 |
+|---|---|---|
+| 19:07 | 锁到次日 07:07（12h） | 锁到次日 00:30（5h23m） |
+| 00:40（窗口已过） | 12h | 12h（顺延距离 23h50m 超上限，取上限） |
+
+**边界**：未配置 `daily_grant_at` 时行为与旧版**完全一致**；traework（08:37/13:31 发）与
+raccoon（08:37/10:28/16:37）发奖时刻不固定，不启用该策略。上游 402 body 不含任何重置时间
+（对比 429 会带「将在 X 重置」），故窗口来自配置假设而非上游声明。
+
+## 🕐 面板时间统一 24 小时制
+
+- `/api/state` 账号视图新增 `until_ts`（unix 秒），冷却标签并列显示相对时长：
+  「冷却至 10-18 07:07（剩 11 时 35 分）」，30 秒局部刷新。绝对时刻 + 相对时长双保险，
+  跨零点不再被误读成 12 小时制。
+- 流水时间弃用 `toLocaleString`（随浏览器 locale/ICU 可能渲染成 12 小时制或「上午/下午」
+  前缀），改为强制 24h 的 `fmtDateTime24`，全站口径一致（`10-17 19:07`）。
+
+## 验证
+
+- `go build ./... && go test ./...` 全绿；`scripts/ui-static-check.mjs` 通过。
+- 新增回归：`internal/config/daily_grant_test.go`（7 例）、
+  `internal/server/hard_cooldown_window_test.go`（3 例）。
+
+---
+
+# wild-work v2.9.0 — 六个新渠道（14→20）+ 请求内降级 + 登录态自愈 + 面板安全加固
+
+> 发布主题：**内建渠道从 14 条扩到 20 条**，并把「降级/记账/签到/登录态」四条链路的
+> 语义补到自洽。本版包含 51 个提交、12 个社区 PR、2 个新 issue 修复。
+
+## 🆕 六个新内建渠道（14 → 20）
+
+| 渠道 | 前缀 | 凭据形态 | 特点 |
+|------|------|---------|------|
+| **Kilo** | `kilo/*` | **免密**（无账号、无 Key） | 免费模型池，只反代上游 `isFree=true` 的模型；无签到无积分 |
+| **MiniMax Code** | `minimax/*` | OAuth 设备码 + PKCE | Anthropic Messages 形状；凭据非 JWT，过期由 `expires_in` 自算 |
+| **LobsterAI**（有道龙虾） | `lobsterai/*` | 本机 127.0.0.1 回调 + state | OpenAI 兼容面；必须持久化 `keyfrom` 四元组（refresh/模型列表的必需载荷） |
+| **ZCode**（智谱） | `zcode/*` | 服务端中介设备授权 | Anthropic Messages 形状；`system` 须内嵌官方身份块，否则 405/3012 |
+| **Gemini**（Google Code Assist） | `gemini/*` | 本机回调授权 | 自有 `v1internal` 信封 + 逐字身份五头；请求体须**逐层字母序**序列化 |
+| **CodeArts**（华为云） | `codearts/*` | PKCE OAuth | 对话走 snap-access（SDK-HMAC-SHA256 签名）；头名是否参与签名须逐字节对齐 |
+
+配套：`kilo` 与 `oczen` 同属「无账号渠道」（R16），不建 auth 加载器、不进 `reloadAccounts`，
+虚拟账号由 `main` 装配时注入；六条渠道的 `Sch.Run(sctx)` 均已接线（R34），
+devdump 抓包接线表同步补齐（`cmd/wild-work/transport_test.go` 静态锁死）。
+
+> ⚠️ **ZCode 的积分领取依赖阿里云验证码 + headful 浏览器，本版不实现**（渠道包注释已注明）。
+
+## 🔁 降级链：从「整渠道全灭」扩展到「请求内无感切换」
+
+**① 积分耗尽（429 + code 14018）不再误判为软限流**（#150）
+上游文案是复数 `Credits exhausted`，而 `hardMarkers` 配的是单数 `credit exhausted`，
+429 分支又在 hardMarkers 之前无条件 return ⇒ 误归软限流 → 只冷「账号×模型」60s →
+12h 账号级硬冷却从不触发 → **降级链永不触发**，客户端死循环吃 429。
+现按 `"code":14018`（精确匹配，防 `140180` 前缀误伤）或 `credits exhausted` 归 `ErrHardCredit`。
+`6004` / `14003` / `quota exceeded` 保持软限流不回归。
+
+**② 请求内单次降级重入**（#150）
+轮转耗尽且最后错误是 `hard_credit` 时，**在同一请求内**按降级链切备胎重入
+（`serveRotation` 抽方法使重入 = 再次调用），客户端全程 200 无感，
+响应头 `X-Model-Fallback` 标注实际备胎。重入**封顶一次**（A→B→C 链式规则下不会无限续跳，
+有测试独立锁定）；单账号渠道豁免（惩罚豁免不变量）。
+
+**③ 降级记账改归「实际执行模型」**（#148）
+原口径按客户端请求名记账，导致「谁在干活」与「面板记的谁」不一致。
+现 `statRow.Model` / `stats.AddUsage` / `ledger.Model` 全部归备胎
+——谁实际消耗 token/积分就记在谁名下；原请求名→备胎的对照由日志行 +
+面板「降级记录」+ `X-Model-Fallback` 头承担。
+
+## 🔐 登录态失效：从「永久禁用」改为「可自愈的标记」
+
+**（issue #134 / PR #139）**
+旧版对 401 走 `Disable`，把机器状态混进用户控制项：账号被禁用后面板看不出该做什么，
+且**重新登录也救不回来**（`SyncToDir` 只换 `e.a`，禁用/标记不清除）。
+
+- `pool.Status` 新增 `session_dead` / `session_dead_reason`（与用户手动「停用」分离）；
+- 账号卡片显示「需重新登录」徽标 + ⟳ 一键重新登录（仅对有登录编排的渠道）；
+- 签到失败若为登录态形态，追加可操作指引；
+- 401 统一归 `ErrSessionDead`（原 `{"code":9999,"msg":"bad token"}` 被归 `ErrClient`，走错惩罚路径）。
+
+**合并期补的阻断性缺陷**：新增 `sessionDeadAt`（标记建立时间），重登后
+**auth 文件 mtime 晚于标记建立时间即自动清除标记** —— 否则用户点 ⟳ 重登成功、
+token 也刷了，标记仍在，账号永不被 `Pick()` 选中（点了也没用）。
+
+## ⚡ 请求级错误不再拖垮账号池（#145）
+
+`ErrClient`（请求内容/形态类 4xx，如 workbuddy `11148` 工具调用与结果不配对）原会累计
+错误计数。错误跟着请求体走，换号必然同样拒收 ⇒ 一个坏会话的客户端重试风暴能在几分钟内
+把全池账号记满冷却（阈值默认 3），面板呈现「渠道自己挂了」假象，还诱发无意义的降级。
+现 `ErrClient` 不累计错误计数（仅轮转以兼容「同模型不同账号权益差异」）。
+
+## 🔒 面板安全加固：DNS rebinding 防护
+
+**未启用管理密码时，面板只接受环回 Host**（`internal/app/hostguard.go`）。
+
+威胁：攻击者页面用自己控制的域名（`evil.com`）承载脚本，先正常解析、随后 TTL 压 0 并
+重新解析到 `127.0.0.1`；浏览器于是把请求发到本机 wild-work，而 **Host 头仍是 `evil.com`**。
+既有的两道防线挡不住：`guardMux` 在无密码时对 `/api/*` 完全放行，而
+`http.NewCrossOriginProtection()` 判的是**跨站**，rebinding 从浏览器视角是**同源**。
+
+- **已设密码** ⇒ 密码即保护，不做 Host 限制（局域网/反代访问照常）；
+- **未设密码** ⇒ 只认 `localhost` 字面量与环回 IP（`127.0.0.0/8`、`::1`），其余返回 421。
+  代价：自定义 hosts 名（如 `wildwork.local`）会被拒——确有该用法时设个管理密码即可。
+- 挂在**最外层**（不是只挂 `/api/`）：面板静态页与 `/v1/*` 同样不该被跨站域名访问。
+
+## 🩺 签到链路：从「写后猜文本」改为「先只读探测再按需写」（issue #147）
+
+WorkBuddy 国内版新增 `CheckinReporter` 实现：先只读查 `checkin-activity-status`，
+**确认未签才发写请求**。
+
+- 已签到 → `already_claimed`，**零写请求**（旧实现必然打一次 `daily-checkin` 换 400+10001 噪音）；
+- 活动未开启 → `no_campaign`（可重试；旧实现靠文本匹配「已签到」兜底，上游改文案就退化成「签到失败」）；
+- 探测失败 → **降级**为旧的直接领取路径（上游撤端点也不会让签到失效）；
+- 面板收益：`已签到（连续 18 天，本周 6 天）`，不再只有干巴巴的「已签到」。
+
+**顺带修 reporter 路径漏记账**：issue #67 的「回执发放额直接入账」原先只在
+`CheckinGranter` 路径生效；改为 `CheckinReporter` 后若不补，就会重现
+「签到成功但面板今日收入显示 0」。现两条路径同口径。
+
+**另修**：`checkinOne` 守卫过严导致长会话渠道签到从未被调用；Loomy 登录与每日积分接线
+（含 MonkeyCode 签到）；Loomy 识别「HTTP 200 + 业务码」信封。
+
+## 🌐 局域网/远程访问友好化（#142 / #143）
+
+- **「复制链接」在明文 HTTP 下静默失效**：`http://<内网IP>` 是非安全上下文，
+  `navigator.clipboard` 被浏览器直接禁用，而 `copyUrl` 只走该 API ⇒ 点复制必失败。
+  改走带 `execCommand` 降级的 `copyText`（与顶栏 API-Key 复制同一 helper）。
+- **OfficeAce 授权页改在用户当前设备打开**：原设计在**服务端**屏幕打开，局域网用户看不见
+  （表现为「点了没反应」）。捕获本就走云端轮询，与授权页在哪台设备打开无关。
+- **评审实测修正**：`window.open(..., "noopener")` 的返回值**恒为 `null`**（MDN），
+  拿它判「弹窗被拦截」会每次误报 ⇒ 改为「先开、后断链」（拿句柄后手动置 `w.opener = null`）。
+
+## 🧾 记账与统计口径
+
+- **降级请求记账归实际执行模型**（见上，R54 配套）；
+- **自定义渠道全面退出积分体系**（R66 收尾）：`RefreshAll` 跳过、单账号刷新/明细明确报
+  「不适用」、前端动态判定隐藏无意义按钮——修「刷新积分」恒报「成功 32 / 失败 4」的假失败噪音；
+- **Token 与积分分开口径**：ZCode/MonkeyCode 的额度以 **token** 计量，按积分展示会严重误导
+  （上亿 token 像巨额积分）。`provider.ResourceItem.Unit` 新增单位标注，`stats.CreditsUnit`
+  让 token 渠道**不并入任何积分口径**，面板另设「Token 计数」面板展示真实用量。
+- **缓存利用率三态**：字段存在但为 0 ⇒ 显示 0%；字段不存在/空对象 ⇒ 显示「—」，
+  绝不把「不知道」显示成 0%（R24 口径的延续）。
+
+## 🎨 面板与交互
+
+- **模型降级链与思考强度配置区升级**（#149）：combobox 模糊搜索下拉、规则卡片、
+  备胎 chip 拖拽改序、未保存提示、主力模型互斥；
+- **请求体摘要日志开关 `body_log`**（#140）：诊断「上下文为何膨胀」，按会话切片写
+  `data/ledger/body-trace-*.jsonl`（单文件超 8MB 滚动，保留 7 天）；**默认关闭**；
+- **顶栏 API-Key 脱敏显示**（#140）：中间省略，完整值存 `data-key` 供一键复制（防旁人瞟屏）；
+- **自定义渠道保存陷阱**（#141）：填完输入行没点「＋新增渠道」就点保存，会把空列表存进后端
+  （toast 显示已保存但渠道实际未创建）⇒ 保存前自动收录未提交的输入行；
+- **24 小时制统一**（v2.8.2）：冷却时刻弃用 `toLocaleString`，并列「剩 X 时 X 分」消除跨零点误读；
+- **积分明细浮窗 ReferenceError**：`renderCreditDetail` 内部误用形参 `uid`（作用域外），
+  浮窗 `display:block` 但 `innerHTML` 是空串 ⇒ 用户看到「点了什么都没发生」；
+  同时补空明细/接口报错的**可见提示**（此前静默 return）。
+
+## 🐛 其它修复
+
+- **officeace 网关 base 字段语义**（issue #152）：`model_api_url_base` 被两类端点复用且前缀要求相反
+  （模型/对话要 `{host}/v2/...`，额度/签到要 `{host}/v1/subscription`）。上游在不同账号/网关版本下
+  可能带也可能不带 `/v2`。现统一存**裸 host**（`bareGateway` 剥 `/v2`），各端点按需拼前缀，
+  **旧凭据自动归一、无需重新登录**。
+- **macOS 自启动**（#136）：预建 `data/` 日志目录（否则 launchd 打开重定向文件失败），
+  模板改为无头 + `KeepAlive` + 日志重定向 + `WorkingDirectory`。
+- **traework SOLO 排队拥塞观测**（#138）：`queue_begin` / `request_wait_in_queue` 心跳透传，
+  30s 限频日志。
+- **oczen 免费模型元数据补齐**（#137）：补 `deepseek-v4-flash-free` / `space-bunny-free`
+  与 `SupportsImages` 声明。
+- **devdump 落盘改 tee 流式**（#146 / R72）：原 `io.ReadAll` 会把 SSE 攒批，
+  表现为「对话正文突然整段出现」；现逐帧转发 + 独立 64 KiB 缓冲延迟写盘。
+- **CodeArts 重复登录不再新增条目**：上游无身份字段，改由用户指定「账号标识」区分
+  同账号重登与新增第二账号。
+- **全局死代码清理**：四口径扫描（`deadcode`）后移除 `internal/upstream/report.go` 等。
+
+## ✅ 验证
+
+- `go build ./... && go vet ./... && go test ./...` 全绿（**47 个有测试的包**）；
+- `node scripts/ui-static-check.mjs` 全部通过；`node --check app.js` 语法通过；
+- 本版新增回归测试覆盖：六渠道包（`codearts` 1389 行 / `gemini` 873 行 /
+  `lobsterai` 1269 行 / `minimax` 1062 行 / `zcode` 950 行 / `kilo` 235 行）、
+  14018 降级（7 例）、降级记账（2 例）、登录态自愈、Host 校验（5 例）、
+  签到活动探测（5 例）、reporter 入账（2 例）、officeace 网关 URL（3 例）。
+- **真实凭据端到端**（issue #147 取证，9 次请求，全部只读或幂等）：
+  签到路径返回 `already_claimed` + 进度信息，**零写请求**。
+
+## 🙏 致谢
+
+| 贡献者 | 内容 |
+|--------|------|
+| [@lzb354411](https://github.com/lzb354411) | #151 新增 Kilo/MiniMax/LobsterAI/ZCode/Gemini/CodeArts 六渠道 + 面板安全加固 |
+| [@ezjbc](https://github.com/ezjbc) | #148 降级记账归实际模型；#149 配置区交互升级；#150 积分耗尽降级重入 |
+| [@bertchiangchiang](https://github.com/bertchiangchiang) | #139 登录态失效标识（#134）；#140 body_log + Key 脱敏；#141 自定义渠道保存陷阱；#143 局域网友好化；#145 ErrClient 不罚号 |
+| [@wu546526](https://github.com/wu546526) | #136 macOS 自启动；#137 oczen 免费模型元数据；#138 traework 排队拥塞观测 |
+| [@xxhhlk](https://github.com/xxhhlk) | #146 devdump 落盘改 tee 流式（修「正文突然整段出现」） |
+| [@lzmuhioin](https://github.com/lzmuhioin) | issue #142 局域网复制链接失效；PR #143 评审给出 `noopener` 返回值实测 |
+| [@yanghuan](https://github.com/yanghuan) | issue #152 officeace 网关 base 前缀（附完整实测矩阵）；issue #153 授权页文案 |
+| [@jianzhangg](https://github.com/jianzhangg) | v2.8.2 硬冷却截到每日发奖窗口 + 面板 24h 制 |

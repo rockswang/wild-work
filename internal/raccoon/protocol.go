@@ -164,22 +164,6 @@ func SaveCallback(stateDir, rawURL string) error {
 	return nil
 }
 
-// LoadCallback 读取回调载荷；文件不存在时返回 ok=false（= 授权还没完成）。
-func LoadCallback(stateDir string) (CallbackPayload, bool, error) {
-	var p CallbackPayload
-	raw, err := os.ReadFile(CallbackPath(stateDir))
-	if err != nil {
-		if os.IsNotExist(err) {
-			return p, false, nil
-		}
-		return p, false, err
-	}
-	if err := json.Unmarshal(raw, &p); err != nil {
-		return p, false, fmt.Errorf("解析回调载荷失败：%w", err)
-	}
-	return p, true, nil
-}
-
 // ClearCallback 删除回调载荷（发起登录前清残留、登录结束后清理）。
 func ClearCallback(stateDir string) error {
 	err := os.Remove(CallbackPath(stateDir))

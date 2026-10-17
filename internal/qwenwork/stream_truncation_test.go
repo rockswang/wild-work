@@ -37,7 +37,7 @@ func TestStreamTruncationNotDisguisedAsDone(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			rec := httptest.NewRecorder()
-			_, err := Stream(rec, c.rd, "m")
+			_, err := StreamCapture(rec, c.rd, "m", nil)
 			body := rec.Body.String()
 			if (err != nil) != c.wantErr {
 				t.Fatalf("err=%v wantErr=%v", err, c.wantErr)

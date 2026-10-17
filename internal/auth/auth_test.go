@@ -85,7 +85,7 @@ func TestLoadDirFiltersRegion(t *testing.T) {
 	os.WriteFile(filepath.Join(dir, "workbuddy-g1.json"), []byte(gl), 0o600)
 	os.WriteFile(filepath.Join(dir, "workbuddy-bad.json"), []byte(bad), 0o600)
 
-	list, err := LoadDir(dir, "cn")
+	list, err := LoadWorkBuddyDir(dir, "cn")
 	if err != nil {
 		t.Fatalf("load: %v", err)
 	}
