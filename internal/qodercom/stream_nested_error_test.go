@@ -1,4 +1,4 @@
-// 流内业务错误（HTTP 200 + 信封内嵌 statusCodeValue>=400）的守门测试（R107）。
+// 流内业务错误（HTTP 200 + 信封内嵌 statusCodeValue>=400）的守门测试（R108）。
 // 帧原文取自 2026-10-21 本机抓包 wildwork-dump/qodercn/…-0021-post-….http（不含凭据）。
 package qodercom
 

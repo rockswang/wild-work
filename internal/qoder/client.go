@@ -507,7 +507,7 @@ func Classify(status int, body string) provider.ErrKind {
 	// 上游以 HTTP 200 包裹的排队/限流拒绝：内嵌 403 + subCode:RESOURCE_LIMIT
 	// （业务码 10605，带 retryAfterSeconds/waitTime/serviceAvailable:false）。
 	// 必须排在「403 且 body 为空 → ErrWafBlock」与 4xx 兜底之前，否则落 ErrClient
-	// ——既不罚账号也不进流错误分类（R107）。
+	// ——既不罚账号也不进流错误分类（R108）。
 	// 10605 走 provider.CodeMarker 而非裸 Contains：错误文本里的 trace_id/requestId
 	// 常含五位数字，裸匹配会把无关失败误判成限流（与 11115 同一教训）。
 	if strings.Contains(body, "RESOURCE_LIMIT") ||

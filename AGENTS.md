@@ -45,7 +45,7 @@
 
 ---
 
-## 1. 决议项索引（R1–R82 + R107）
+## 1. 决议项索引（R1–R82 + R108）
 
 **全文（含证据链、反例、已知限制）见 [`docs/决议项.md`](docs/决议项.md)** —— 改动相关代码前必读对应条目。
 
@@ -112,13 +112,13 @@
 | R77 | 上游声明可重试的 429（14003 瞬时拥塞，retry_policy.retry / actions 含 RETRY）必须请求内重试一次（独立预算，20s 退避）；6004 用量配额无信号，维持冷却到重置点 |
 | R78 | **网关 HTML 401 也是「登录态失效」**（APISIX/openresty 拦截页 → `ErrSessionDead`，不是 `ErrClient`）；对话路径先 refresh 再决定是否落失效标记；目录/费率接口必须返回类型化错误 |
 
-> **R79–R82、R107 为本仓独有决议**（上游 master 已自行推进至 R106，与本仓 R79–R82 号段重叠——本仓段保留原号，新增一律从上游最大值 +1 起取，下次合并再按「本仓顺延」约定调整）：
+> **R79–R82 为本仓独有决议**（上游无对应编号）；**R108 已按同一编号合入 `upstream/master`**（同号同内容，上游提交 `e3bc93f`）。上游 R83–R107 尚未合并进本仓，下次合并时本仓独有段按「顺延」约定调整：
 
 | R79 | **入库 prepbody 工具**（`cmd/prepbody`）：入站 dump → 出站请求体离线重放，定位「上游按出站 body 拒答」类故障；不参与运行时链路 |
 | R80 | **档位注入走上游 efforts 映射，能力表只做校验/展示**：注入 = `config.ReasoningEfforts`（`*` 通配，`handler.applyEffort`）；`internal/reasoning` 保留为能力表（`Clamp`/`Listing`）供渠道校验与面板展示 |
 | R81 | **DeepSeek 思考开关与多轮回填**（`internal/upstream/thinking.go`）：客户端表达思考意图时补 `thinking.type` + 默认档；每条 assistant 消息回填 `reasoning_content`（字符串），否则上游按「不思考」应答 |
 | R82 | **loomy 流式路径必须识别「HTTP 200 + 业务错误体」**：整段非 SSE 时补 error 帧、**不补 `[DONE]`**、不计成功；单号渠道流内登录态失效**不硬禁用**（走 SessionDead 标记；实测 100002 会自愈，硬禁用 = 整渠道下线） |
-| R107 | **Qoder 三渠道（qoder/qodercn/qodercom）流式必须剥壳识别信封内嵌 `statusCodeValue>=400`**：上游把失败塞在 HTTP 200 的 SSE 信封里，实测有**两种形态**——内嵌 403 + `10605`/`RESOURCE_LIMIT`（带 `retryAfterSeconds`）与内嵌 429 + 纯文本 rate limit，原先 `parseNestedSSE` 只解 `body` → 两种同形地表现为「连续无字节被空闲看门狗掐成 truncated」，上游若发完即断连更被收尾 `[DONE]` 伪造成空成功流；现补结构化 error 帧（含 `retry_after_seconds`）、**不补 `[DONE]`**，两类均归 `ErrSoftRate`（2026-10-21 压测实证：被拒请求 0.4s 返回，修前 90.7s 白等） |
+| R108 | **Qoder 三渠道（qoder/qodercn/qodercom）流式必须剥壳识别信封内嵌 `statusCodeValue>=400`**：上游把失败塞在 HTTP 200 的 SSE 信封里，实测有**两种形态**——内嵌 403 + `10605`/`RESOURCE_LIMIT`（带 `retryAfterSeconds`）与内嵌 429 + 纯文本 rate limit，原先 `parseNestedSSE` 只解 `body` → 两种同形地表现为「连续无字节被空闲看门狗掐成 truncated」，上游若发完即断连更被收尾 `[DONE]` 伪造成空成功流；现补结构化 error 帧（含 `retry_after_seconds`）、**不补 `[DONE]`**，两类均归 `ErrSoftRate`（2026-10-21 压测实证：被拒请求 0.4s 返回，修前 90.7s 白等） |
 
 > ⚠️ **R71 附带的实测纪律**（也是 §0.1 的来源）：上游校验的是**头族齐全**而非单点
 > （只补 `X-Conversation-ID` 仍被拒）；且 `X-Conversation-ID` 的**取值形态不被校验**
@@ -382,7 +382,7 @@ bash scripts/probe-dump.sh summarize                # 汇总各渠道 usage 字�
 | [README.md](README.md) | 用户文档 |
 | [DEVELOPMENT.md](DEVELOPMENT.md) | 开发者文档（面向 AI Agent） |
 | [AGENTS.md](AGENTS.md) | **本文件**：纪律 + 决议索引 + 关键不变量 + 构建发版 |
-| [docs/决议项.md](docs/决议项.md) | **R1–R82 + R107 决议全文**（证据链、反例、已知限制） |
+| [docs/决议项.md](docs/决议项.md) | **R1–R82 + R108 决议全文**（证据链、反例、已知限制） |
 | [docs/渠道接入备忘.md](docs/渠道接入备忘.md) | 各渠道协议要点、凭据模型、已知限制与踩坑 |
 | [docs/接口参考.md](docs/接口参考.md) | 面板区块规划 + 管理 API 全量清单 |
 | [docs/三接口兼容改造备忘.md](docs/三接口兼容改造备忘.md) | 三接口（Chat/Responses/Anthropic）兼容层架构决策与验证清单 |

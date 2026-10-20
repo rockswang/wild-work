@@ -140,7 +140,7 @@ func writeStreamErrorFrame(w io.Writer, e *sseError) {
 }
 
 // parseNestedSSE 逐行解析嵌套 SSE，每个有效 chunk 调 onChunk。
-//   - 信封 statusCodeValue >= 400 → 返回 *sseError（上游以 HTTP 200 包裹业务失败，R107）
+//   - 信封 statusCodeValue >= 400 → 返回 *sseError（上游以 HTTP 200 包裹业务失败，R108）
 //   - body == "[DONE]" → 正常结束
 //   - "event:finish" 行 → 忽略
 //   - body 二次 unmarshal 失败 → 跳过该行（不致命）
@@ -170,7 +170,7 @@ func parseNestedSSE(r io.Reader, onChunk func(map[string]any) error, truncated *
 			payload := strings.TrimPrefix(line, "data:")
 			var env envelope
 			outerOK := json.Unmarshal([]byte(payload), &env) == nil
-			// 剥壳判错（R107）：上游把排队/限流拒绝放在 200 连接里下发，
+			// 剥壳判错（R108）：上游把排队/限流拒绝放在 200 连接里下发，
 			// statusCodeValue>=400 即失败。必须在此拦下——继续走 onChunk 的话，
 			// 客户端收到一帧没有 choices 的伪 chunk，之后要么空等到空闲看门狗
 			// （90s 后误报 truncated），要么被收尾 [DONE] 伪造成空成功流。
@@ -422,7 +422,7 @@ func streamAsOpenAI(w io.Writer, r io.Reader, model string, flush func()) (map[s
 		}
 		return usage, provider.TruncationError(err)
 	}
-	// 流内业务错误（信封内嵌 statusCodeValue>=400，R107）：补一帧带原因的 SSE error
+	// 流内业务错误（信封内嵌 statusCodeValue>=400，R108）：补一帧带原因的 SSE error
 	// 并**不补 [DONE]**（R36）——补了就把失败伪装成正常结束，客户端会拿着空结果继续走，
 	// 网关侧还把它记成一条成功流水。原因与退避时长一并结构化传出，重试交回客户端。
 	var sErr *sseError
