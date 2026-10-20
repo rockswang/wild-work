@@ -20,3 +20,6 @@ func Enabled() bool { return false }
 
 // Wrap 原样返回入参（发布版不改变任何 Transport）。
 func Wrap(client *http.Client, _ string) *http.Client { return client }
+
+// DumpClientBody 发布版为空实现（不落盘任何入站 body）。
+func DumpClientBody(model string, body []byte) {}

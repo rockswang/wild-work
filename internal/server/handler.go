@@ -16,6 +16,7 @@ import (
 
 	"wild-work/internal/auth"
 	"wild-work/internal/config"
+	"wild-work/internal/devdump"
 	"wild-work/internal/ledger"
 	"wild-work/internal/loopguard"
 	"wild-work/internal/pool"
@@ -701,9 +702,10 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	clientUA := r.UserAgent()
 	// 档位能力表预热（首次请求才触发目录拉取，见 ensureEffortCaps）
 	h.ensureEffortCaps(rt)
-	// WILDWORK_DUMP_DIR 开启时落盘原始 body（可直接重放），默认 no-op；
-	// 返回的序号把本次请求的入站/出站/错误响应三份 dump 关联起来。
-	dumpSeqNo := dumpChatBody(body, clientModel, "client")
+	// 落盘客户端入站原始 body（可直接重放回 /v1/chat/completions），发布版为空实现。
+	// 只补这一份：出站 body 与上游响应由 devdump 的 .http 落盘（含 headers 与完整
+	// SSE 帧），Transport 层拿不到改写前的入站形态。
+	devdump.DumpClientBody(clientModel, body)
 	// 诊断：记录上下文构成摘要（config.body_log 关闭时立即返回，无实际开销）。
 	// 必须放在 rewriteModel 之前——要记的是客户端发来的原始体，而非改写后的。
 	if h.ledger != nil {
@@ -800,7 +802,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	// 不变）。serveRotation 保持纯轮转语义；降级状态同步（模型改写/档位注入/记账
 	// 归属/响应头）由本函数在重入前完成，与入口降级完全同构。
 	for fbAttempt := 0; ; fbAttempt++ {
-		res := h.serveRotation(w, sw, rt, model, body, clientModel, dispModel, acctModel, &statRow, clientUA, dumpSeqNo, peek.Stream)
+		res := h.serveRotation(w, sw, rt, model, body, clientModel, dispModel, acctModel, &statRow, clientUA, peek.Stream)
 		if res.done {
 			return
 		}
@@ -860,7 +862,7 @@ type rotationResult struct {
 func (h *Handler) serveRotation(
 	w http.ResponseWriter, sw *statWriter, rt *Runtime, model string, body []byte,
 	clientModel, dispModel, acctModel string, statRow *statsEngine.ReqRow,
-	clientUA string, dumpSeqNo int, stream bool,
+	clientUA string, stream bool,
 ) (res rotationResult) {
 	res.done = true // 默认：既有 return 出口都已把响应写完（成功/请求级错误/诊断引导）
 	// 上游报「参数被拒」时，客户端原始参数是唯一能定位「谁发的、发了什么」的依据
@@ -937,11 +939,8 @@ func (h *Handler) serveRotation(
 			kind := rt.Upstream.Classify(status, string(respBody))
 			log.Printf("client request platform=%s model=%s status=%d ua=%q params=%s",
 				rt.Kind, clientModel, status, clientUA, clientParams)
-			// WILDWORK_DUMP_DIR 开启时落盘「出站 body + 上游错误响应」对，默认 no-op。
-			// 上游按出站 body 校验/计数（如 Kimi 的 position N），仅凭入站 dump 定位不了。
-			// 保真度说明：部分渠道 client 在发送前还有渠道级改写（如 raccoon 删顶层
-			// reasoning_effort），但均不触碰 messages——按消息定位类故障此形态即等价。
-			dumpUpstreamFailure(dumpSeqNo, body, respBody, clientModel, status, rt.Kind.String(), acct.UID)
+			// 出站 body 与上游错误响应原文由 devdump 的 .http 落盘（含 headers，失败对
+			// 亦在其中），此处不再单独写一份。
 			// 单账号渠道：任何账号级惩罚都等于整条渠道下线，故一律原文透传、不罚账号。
 			// 尤其在 429（唯一需要的背压）上：冷却后后续请求会在挑号阶段被挡成
 			// no_healthy_account，反而不如透传 429 让客户端按 Retry-After 自行重试。

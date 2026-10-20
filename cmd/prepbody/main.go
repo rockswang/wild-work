@@ -6,7 +6,7 @@
 //	go run ./cmd/prepbody <入站 dump.json> <出站 body.json> [model]
 //
 // 为什么需要它：dump 里的 *_client.json 是 prepareChatBody **之前**的原始体
-// （dumpChatBody 刻意放在改写前，便于重放客户端真实请求），直接发上游会被拒——
+// （devdump.DumpClientBody 刻意放在改写前，便于重放客户端真实请求），直接发上游会被拒——
 // 实测 dump 里有 71 条 content 字段缺失的 assistant 消息，上游会整请求拒答。
 //
 // 处理链与线上逐段一致：

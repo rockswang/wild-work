@@ -478,3 +478,48 @@ func dumpName(req *http.Request, n int) string {
 	return fmt.Sprintf("%s-%04d-%s-%s-%s.http",
 		time.Now().Format("20060102-150405.000"), n, strings.ToLower(req.Method), slug, hex.EncodeToString(sum[:4]))
 }
+
+// clientSeq 入站 body 落盘的独立序号。与 .http 的 seq 分开计数：两者命名空间不同，
+// 共用会让 index.log 的 seq 与 .http 文件名各自跳号，检索时对不上。
+var clientSeq atomic.Uint64
+
+// DumpClientBody 落盘客户端**入站**原始请求体（prepareChatBody 之前的形态，
+// 可直接重放回 /v1/chat/completions），并在落盘根目录的 index.log 追加一行元数据。
+//
+// 为什么只有这一份：出站请求体与上游响应已由本包的 .http 落盘（含 headers、
+// 完整 SSE 帧、失败原因），server 侧再写一份出站/响应属重复。入站 body 是
+// Transport 层**看不到**的数据（那里拿到的已是改写后的出站请求），故单独补。
+//
+// 文件名与 index.log 格式沿用既有诊断脚本的约定
+// （<序号>_<时刻>_<模型>_client.json），失败静默：调试工具不得干扰主链路。
+func DumpClientBody(model string, body []byte) {
+	d := dir()
+	if d == "" || len(body) == 0 {
+		return
+	}
+	if os.MkdirAll(d, 0o700) != nil {
+		return
+	}
+	n := clientSeq.Add(1)
+	name := filepath.Join(d, fmt.Sprintf("%04d_%s_%s_client.json", n, time.Now().Format("150405.000"), clientModelSlug(model)))
+	if os.WriteFile(name, body, 0o600) != nil {
+		return
+	}
+	f, err := os.OpenFile(filepath.Join(d, "index.log"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+	fmt.Fprintf(f, "%s seq=%04d model=%s bytes=%d stage=client\n",
+		time.Now().Format("2006-01-02 15:04:05.000"), n, model, len(body))
+}
+
+// clientModelSlug 把模型名压成文件名安全片段（非字母数字与 .-_ 一律替换）。
+func clientModelSlug(model string) string {
+	return strings.Map(func(r rune) rune {
+		if r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '.' || r == '-' || r == '_' {
+			return r
+		}
+		return '_'
+	}, model)
+}
