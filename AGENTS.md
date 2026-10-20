@@ -340,9 +340,17 @@ GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -tags devdump -o dist/wild-work-l
 
 ```bash
 # Windows bash 下用 python 字节计数（strings 对 Go 二进制的长串不可靠）
-python -c "b=open('dist/wild-work.exe','rb').read(); print('new:',b.count(b'2.8.0'),'old:',b.count(b'2.7.3'))"
+python -c "b=open('dist/wild-work.exe','rb').read(); print('new:',b.count(b'2.9.3'),'old:',b.count(b'2.9.2'))"
 # 期望：new >= 1 且 old == 0。若旧版本号仍在，说明构建未生效。
+
+# 再核对 PE 子系统必须是 GUI(2)：漏掉 -H windowsgui 会得到 CUI(3)，双击就弹控制台黑框、
+# 托盘形态整体不对（2026-10-21 实测踩过：产物被构建成 3 才发现）。
+python -c "import struct;b=open('dist/wild-work.exe','rb').read(4096);o=struct.unpack_from('<I',b,0x3c)[0];print('subsystem=',struct.unpack_from('<H',b,o+24+68)[0])"
 ```
+
+> **不要自行动态加 `-s -w` / `-trimpath`**：本仓产物口径就是上面那条命令（体积差 ~26%，
+> 但去掉符号表后崩溃堆栈、pprof、以及「产物与 CI 是否一致」的比对都失去意义）。
+> 要瘦身就单独说明，不要混进日常构建。
 
 ### 发版（tag 触发）
 
