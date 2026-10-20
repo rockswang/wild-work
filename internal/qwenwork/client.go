@@ -648,19 +648,26 @@ func truncCredits(v float64) int64 {
 // 用 ParseInLocation + RFC3339 即可正确解析；fallback 到固定 UTC+8 墙钟。
 var softRateResetLoc = time.FixedZone("UTC+8", 8*60*60)
 
-// expireDate 把上游时间串转为 YYYY-MM-DD；缺失/不可解析时返回空串。
+// expireDate 把上游时间串转为 **RFC3339 精确时刻**（UTC+8）；缺失/不可解析时返回空串。
+//
+// 历史：旧实现返回 "YYYY-MM-DD"，把时分秒丢了。qwenwork 每日奖励的上游
+// valid_to 是 "2026-10-20T00:00:00+08:00"（次日零点就失效），截断成日期后
+// 面板按日期桶显示成「明日到期」，用户以为还有一整天，实际只剩 5.7 小时
+// （2026-10-19 实测）。现在保留完整时刻，供「N 小时内到期」分桶与剩余时长展示。
+//
+// 注：ledger 伪键用的是 "daily"/"longterm" 钱包类别，不含日期，故本改动零抖动。
 func expireDate(ts string) string {
 	ts = strings.TrimSpace(ts)
 	if ts == "" {
 		return ""
 	}
 	if t, err := time.Parse(time.RFC3339, ts); err == nil {
-		return t.In(softRateResetLoc).Format("2006-01-02")
+		return t.In(softRateResetLoc).Format(time.RFC3339)
 	}
 	// 无时区后缀时按 UTC+8 墙钟解析
 	for _, layout := range []string{"2006-01-02T15:04:05", "2006-01-02 15:04:05", "2006-01-02"} {
 		if t, err := time.ParseInLocation(layout, ts, softRateResetLoc); err == nil {
-			return t.Format("2006-01-02")
+			return t.Format(time.RFC3339)
 		}
 	}
 	return ""

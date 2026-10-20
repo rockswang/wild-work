@@ -176,7 +176,7 @@ func (m *mockChatGLM) handler() http.Handler {
 	}))
 
 	// 删会话
-	mux.HandleFunc("/chatglm/backend-api/assistant/conversation/delete", guard(func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/chatglm/mainchat-api/conversation/bulk_delete", guard(func(w http.ResponseWriter, r *http.Request) {
 		writeEnv(w, map[string]any{"ok": true})
 	}))
 
@@ -332,8 +332,15 @@ func TestE2E_ChatStreamDelta(t *testing.T) {
 	if meta["platform"] != "pc" {
 		t.Errorf("meta_data.platform = %v, want pc", meta["platform"])
 	}
-	if meta["if_plus_model"] != true {
-		t.Errorf("meta_data.if_plus_model = %v, want true", meta["if_plus_model"])
+	if meta["if_plus_model"] != false {
+		t.Errorf("meta_data.if_plus_model = %v, want false（IDE 实抓形态）", meta["if_plus_model"])
+	}
+	if meta["selected_model"] == "" {
+		t.Error("meta_data.selected_model 不应为空（IDE 通道必带）")
+	}
+	cv, _ := meta["cogview"].(map[string]any)
+	if cv == nil || cv["rm_label_watermark"] != true {
+		t.Errorf("cogview.rm_label_watermark = %v, want true（实证去水印）", cv)
 	}
 	// messages 必须是单条合并消息
 	msgs, _ := m.lastChatBody["messages"].([]any)

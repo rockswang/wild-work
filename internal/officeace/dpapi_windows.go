@@ -63,16 +63,35 @@ func readProtectedText(path string) (string, error) {
 }
 
 // cryptUnprotect 调 CryptUnprotectData 解密 blob。
+//
+// ⚠️ **参数个数/顺序是硬约束，不得"精简"**：CryptUnprotectData 的 Win32 原型是
+// **7 个参数**：
+//
+//	BOOL CryptUnprotectData(DATA_BLOB *pDataIn, LPWSTR *ppszDataDescr,
+//	    DATA_BLOB *pOptionalEntropy, PVOID pvReserved,
+//	    CRYPTPROTECT_PROMPTSTRUCT *pPromptStruct, DWORD dwFlags,
+//	    DATA_BLOB *pDataOut);
+//
+// 历史缺陷（2026-10-17 离线取证定位，非推断）：本函数曾只传 6 个参数（漏了第 2 个
+// `ppszDataDescr`）⇒ `dwFlags` 收到的是 `&out` 指针值而非 0 ⇒ Windows 立即返回
+// ERROR_INVALID_PARAMETER（"The parameter is incorrect."）⇒ 装在本机
+// `%LOCALAPPDATA%\Programs\OfficeAce` 的凭据档案**永远解不开**。表现为：导入出来的
+// OfficeAce 账号只有网关 Basic 凭据，临时 AK/SK 与 refresh_token 恒为空 ⇒ 积分查询
+// 用**空 AK** 签 V11（上游回 `401 APIG.0303 app not found, appkey `，appkey 为空正是
+// 这个原因）、签到恒报「无临时凭据」。
+// 锁死手段：`dpapi_windows_test.go` 的 `TestCryptUnprotectRoundTrip`（用
+// CryptProtectData 加密再解回；删掉本处任一 0 即变红）。
 func cryptUnprotect(blob []byte) ([]byte, error) {
 	in := newBlob(blob)
 	var out dataBlob
 	ret, _, err := procUnprotectData.Call(
-		uintptr(unsafe.Pointer(&in)),
-		0, // pOptionalEntropy
-		0, // pvReserved
-		0, // pPromptStruct
-		0, // dwFlags（0 = CurrentUser 作用域）
-		uintptr(unsafe.Pointer(&out)),
+		uintptr(unsafe.Pointer(&in)),  // pDataIn
+		0,                             // ppszDataDescr（可空，但**位置必须占**）
+		0,                             // pOptionalEntropy
+		0,                             // pvReserved
+		0,                             // pPromptStruct
+		0,                             // dwFlags（0 = CurrentUser 作用域）
+		uintptr(unsafe.Pointer(&out)), // pDataOut
 	)
 	if ret == 0 {
 		return nil, fmt.Errorf("dpapi: CryptUnprotectData 失败：%v", err)

@@ -17,7 +17,9 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log"
 	"net/http"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -297,12 +299,14 @@ func (c *Client) DrawPrize(a *auth.Auth) (string, error) {
 	return r.PrizeName, nil
 }
 
-// keepaliveChat 发一条最小对话以保活账号。
+// keepaliveChat 发一条最小对话以保活账号（2026-10-20 简化：直接 say hello，
+// 不再携带任何角色标记；对话完成（流读干）后**立即删除会话**，不在用户
+// 清言会话列表里留痕）。
 func (c *Client) keepaliveChat(a *auth.Auth) error {
 	body, _ := json.Marshal(map[string]any{
 		"model": "chatglm",
 		"messages": []any{
-			map[string]any{"role": "user", "content": "你好"},
+			map[string]any{"role": "user", "content": "hello"},
 		},
 		"stream": false,
 	})
@@ -315,10 +319,45 @@ func (c *Client) keepaliveChat(a *auth.Auth) error {
 			Msg: truncate(string(respBody), 160)}
 	}
 	defer rc.Close()
-	// 读干流即可：目的是让上游产生一次真实对话，内容不重要。
-	// 限制读取量避免长回复拖慢保活。
-	_, _ = io.CopyN(io.Discard, rc, 64*1024)
+	// 读首段流拿 conversation_id（SSE 首帧即回传，probe 实测 <8KB 内必有），
+	// 再把流读干让对话真实发生（限制读取量避免长回复拖慢保活）。
+	cid := drainKeepaliveStream(rc)
+	if cid != "" {
+		// 对话后立即删除会话。尽力而为：失败只记日志，不影响保活成功。
+		if err := c.DeleteConversation(a, cid, DefaultAssistantID); err != nil {
+			log.Printf("glm keepalive 会话删除失败（尽力而为）cid=%s err=%v", cid, err)
+		}
+	}
 	return nil
+}
+
+// convIDRe SSE 首帧里的 conversation_id（24 位 hex，与 conversation_id 形状一致）。
+var convIDRe = regexp.MustCompile(`"conversation_id":"([0-9a-f]{24})"`)
+
+// drainKeepaliveStream 从保活对话流里提取 conversation_id，然后读干流。
+// 读不到（异常形态）返回空串，调用方跳过删除。
+func drainKeepaliveStream(rc io.Reader) string {
+	buf := make([]byte, 0, 16<<10)
+	chunk := make([]byte, 4<<10)
+	cid := ""
+	for len(buf) < 64<<10 {
+		n, err := rc.Read(chunk)
+		if n > 0 {
+			buf = append(buf, chunk[:n]...)
+			if cid == "" {
+				if m := convIDRe.FindSubmatch(buf); m != nil {
+					cid = string(m[1])
+				}
+			}
+		}
+		if err != nil {
+			break
+		}
+		if cid != "" && len(buf) >= 16<<10 {
+			break // 已拿到 cid 且再读一段（确保对话已产生），不再拖慢保活
+		}
+	}
+	return cid
 }
 
 // asProviderError 用 errors.As 取出 *provider.Error。

@@ -11,10 +11,14 @@ package login_lobsterai
 import (
 	"crypto/rand"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"html"
+	"log"
 	"net/http"
 	"net/url"
+	"strconv"
+	"strings"
 )
 
 // handleCallback 处理 `GET /auth/callback?code=...&state=...`。
@@ -24,17 +28,45 @@ import (
 //  2. 再看 `error` 参数（用户在登录页拒绝授权）；
 //  3. 最后取 code。
 func (s *loginSession) handleCallback(w http.ResponseWriter, r *http.Request) {
+	// 取证日志（零 token：只记形态与结论，不记 code/state 的值）。
+	// 为什么必须有：回调「没到」「到了但 state 不符」「到了但路径不对」在面板上都只表现成
+	// 「一直登录中」，没有这行就无法区分——2026-10-18 局域网排查就卡在这里。
 	q := r.URL.Query()
+	ok, msg, stateRejected := s.applyCallback(q)
+	switch {
+	case ok:
+		log.Printf("lobsterai 回调到达并已收码 remote=%s（等待 exchange）", r.RemoteAddr)
+	case stateRejected:
+		log.Printf("lobsterai 回调被拒（state 不符/缺失）remote=%s 期望端口=%d", r.RemoteAddr, s.state.CallbackPort)
+	default:
+		log.Printf("lobsterai 回调到达但无法收码 remote=%s", r.RemoteAddr)
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	if stateRejected {
+		w.WriteHeader(http.StatusBadRequest)
+	}
+	// 注意：此刻**尚未**完成 exchange（Poll 随后立即做），故页面文案是「已收到授权」
+	// 而不是「登录成功」——避免兑换失败时误导用户（同 login_qwenwork 的取舍）。
+	_, _ = w.Write([]byte(callbackPage(ok, msg)))
+}
 
-	// 1. state 原样比对。**区分"缺失"与"不匹配"**只为日志可读，处置相同：400 + 拒绝。
+// applyCallback 解析回调参数并把结论写进会话。
+//
+// HTTP 回调（handleCallback）与手动粘贴（SubmitCallbackURL）**共用这一条结论通道**：
+// 两条入口写进同一个 pending 字段，Poll / exchange 路径因此零分叉（不变量：一处判定）。
+// stateRejected 只用于让自动回调页回 400；手动粘贴只需把 msg 当错误抛出。
+func (s *loginSession) applyCallback(q url.Values) (ok bool, msg string, stateRejected bool) {
+	// 1. state 原样比对。**区分"缺失"与"不匹配"**只为文案可读，处置相同：拒绝。
 	got := q.Get("state")
 	if got == "" {
-		s.reject(w, "回调缺少 state 参数，已拒绝")
-		return
+		const m = "回调缺少 state 参数，已拒绝"
+		s.fail(m)
+		return false, m, true
 	}
 	if got != s.state.State {
-		s.reject(w, "state 不匹配，已拒绝该回调")
-		return
+		const m = "state 不匹配，已拒绝该回调（多半是上一次登录遗留的地址，请用本次登录后跳转的那条）"
+		s.fail(m)
+		return false, m, true
 	}
 
 	// 2. 用户取消 / 上游报错：state 正确时才是"我们这条流程"的失败，可以回显 error 文案。
@@ -46,38 +78,89 @@ func (s *loginSession) handleCallback(w http.ResponseWriter, r *http.Request) {
 			desc = desc + " (" + e + ")"
 		}
 		s.fail(desc)
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		_, _ = w.Write([]byte(callbackPage(false, desc)))
-		return
+		return false, desc, false
 	}
 
 	// 3. 取 code 并置入内存，由 Poll 立即 exchange。
 	code := q.Get("code")
 	if code == "" {
-		s.fail("回调缺少 code 参数")
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		_, _ = w.Write([]byte(callbackPage(false, "回调缺少 code 参数")))
-		return
+		// 粘贴场景下用户最常见的错是只复制了 `…/auth/callback` 而丢了查询串，
+		// 光说「缺少 code 参数」他不知道自己该复制什么，故文案要可执行。
+		const m = "回调缺少 code 参数：请复制登录完成后浏览器地址栏里含 code=… 的整条 URL" +
+			"（若地址栏里只有 …/auth/callback 而没有 code=，说明授权没完成，请重新登录）"
+		s.fail(m)
+		return false, m, false
 	}
-	if !s.set(code) {
-		// 同一条流程收到第二个 code：保留第一个（已被 Poll 取走或即将取走），
-		// 避免后到的把先到的覆盖掉。浏览器刷新/预取可能触发，属正常现象。
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		_, _ = w.Write([]byte(callbackPage(true, "")))
-		return
-	}
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	// 注意：此刻**尚未**完成 exchange（Poll 随后立即做），故页面文案是「已收到授权」
-	// 而不是「登录成功」——避免兑换失败时误导用户（同 login_qwenwork 的取舍）。
-	_, _ = w.Write([]byte(callbackPage(true, "")))
+	// 同一条流程收到第二个 code：保留第一个（已被 Poll 取走或即将取走），
+	// 避免后到的把先到的覆盖掉。浏览器刷新/预取可能触发，属正常现象。
+	s.set(code)
+	return true, "", false
 }
 
-// reject 对 state 校验失败的回调回 400 并拒绝（不写入任何 pending 状态）。
-func (s *loginSession) reject(w http.ResponseWriter, msg string) {
-	s.fail(msg) // 记入 pending 让 Poll 报出可行动的错误，但不写入 code
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	w.WriteHeader(http.StatusBadRequest)
-	_, _ = w.Write([]byte(callbackPage(false, msg)))
+// SubmitCallbackURL 手动提交浏览器跳转后的回调地址（远程/局域网场景的兜底入口）。
+//
+// 为什么必须有它：本渠道的回调地址是 portal 按 `redirect_uri` 参数**原样跳回**的，
+// 而本工具只能给出 `http://127.0.0.1:<port>/auth/callback`（不变量：回调口绝不监听
+// 0.0.0.0，监听非环回等于把「收 code 即换 token」的口暴露到局域网）。这隐含了
+// 「浏览器与网关同一台机器」的前提（Termux 手机、本机桌面均满足）。用户从局域网另一台
+// 电脑打开面板时，浏览器跳到的是**他自己机器**的 127.0.0.1:<port> ⇒ 连接被拒、
+// 授权码到不了网关，流程只能枯等到超时（用户侧现象：「登录完成后跳到一个打不开的
+// 127.0.0.1 页面」）。
+//
+// 本函数不改 portal 侧约定（改不了），只补一条入口：让用户把地址栏里的完整 URL
+// 粘回来，解析出 code 后走与 HTTP 回调完全相同的结论/兑换路径（state 仍原样比对）。
+//
+// raw 接受三种形态：完整 URL / `?code=…&state=…` 查询串 / 裸授权码
+// （裸码缺少 state，会按 state 缺失拒绝——本渠道 state 是唯一防伪手段，不得放宽）。
+func SubmitCallbackURL(raw string) error {
+	q, port, err := parseCallbackInput(raw)
+	if err != nil {
+		return err
+	}
+	sess := currentSession()
+	if sess == nil {
+		return errors.New("没有进行中的登录流程（可能已完成或已超时），请重新发起登录")
+	}
+	// 端口自检：多开/重试场景下很容易粘到**上一次**登录的回调地址。放过去只会得到
+	// 一个语焉不详的 exchange 失败，故在这里拦下并说清原因。
+	if port != 0 && sess.state.CallbackPort != 0 && port != sess.state.CallbackPort {
+		return fmt.Errorf("回调地址的端口 %d 与本次登录的回调口 %d 不一致——多半粘贴的是上一次登录的地址，请用本次登录后跳转的那条 URL",
+			port, sess.state.CallbackPort)
+	}
+	ok, msg, _ := sess.applyCallback(q)
+	if !ok {
+		return fmt.Errorf("登录失败: %s", msg)
+	}
+	return nil
+}
+
+// parseCallbackInput 把用户粘贴的内容解析成回调参数，并尽力取出回调端口。
+// 端口取不到（裸 code / 无端口的查询串）时返回 0，调用方跳过端口自检。
+func parseCallbackInput(raw string) (url.Values, int, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil, 0, errors.New("回调地址为空")
+	}
+	if strings.HasPrefix(raw, "http://") || strings.HasPrefix(raw, "https://") {
+		u, err := url.Parse(raw)
+		if err != nil {
+			return nil, 0, fmt.Errorf("回调地址无法解析: %w", err)
+		}
+		port := 0
+		if p, err := strconv.Atoi(u.Port()); err == nil {
+			port = p
+		}
+		return u.Query(), port, nil
+	}
+	if strings.Contains(raw, "=") {
+		q, err := url.ParseQuery(strings.TrimPrefix(raw, "?"))
+		if err != nil && len(q) == 0 {
+			return nil, 0, fmt.Errorf("回调地址无法解析: %w", err)
+		}
+		return q, 0, nil
+	}
+	// 只贴了裸授权码（部分用户会只复制 code= 后面的值）。state 缺失会被 applyCallback 拒绝。
+	return url.Values{"code": {raw}}, 0, nil
 }
 
 // set 写入授权码；已有一个码时返回 false（不覆盖）。

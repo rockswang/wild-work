@@ -1,4 +1,4 @@
-package login_raccoon
+﻿package login_raccoon
 
 import (
 	"encoding/base64"
@@ -94,7 +94,7 @@ func TestPollWithoutSession(t *testing.T) {
 	mu.Unlock()
 	defer func() { mu.Lock(); current = old; mu.Unlock() }()
 
-	if _, err := Poll(); err != ErrPending {
+	if _, err := Poll(nil, ""); err != ErrPending {
 		t.Fatalf("无会话时 Poll 应返回 ErrPending（取消由上层 ctx 分支处理），实际 %v", err)
 	}
 }
@@ -123,7 +123,7 @@ func TestPollSessionStates(t *testing.T) {
 		mu.Lock()
 		current = c.sess
 		mu.Unlock()
-		r, err := Poll()
+		r, err := Poll(nil, "")
 		if c.wantErr {
 			if err == nil {
 				t.Errorf("%s: 期望错误，实际成功 %+v", c.name, r)
@@ -152,7 +152,7 @@ func TestStartRejectsConcurrentLogin(t *testing.T) {
 	mu.Unlock()
 	defer func() { mu.Lock(); current = nil; mu.Unlock() }()
 
-	if _, err := Start(); err == nil {
+	if _, err := Start(nil, ""); err == nil {
 		t.Fatal("已有 pending 会话时应拒绝并发登录")
 	}
 }

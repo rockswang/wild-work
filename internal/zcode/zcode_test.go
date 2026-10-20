@@ -699,8 +699,10 @@ func TestBillingParsing(t *testing.T) {
 	if !bal.Usable || !bal.InfoOnly {
 		t.Errorf("token 桶应 可展示(Usable) 且 InfoOnly（token 不是积分）：%+v", bal)
 	}
-	if bal.ExpireAt != "2030-01-01" {
-		t.Errorf("ExpireAt = %q，期望 UTC+8 墙钟日期 2030-01-01", bal.ExpireAt)
+	// 保留精确时刻（2026-10-19）：面板按「N 小时内到期」分桶需要时分秒，
+	// 旧版截成日期会让今晚失效的包被算进「明日到期」。
+	if bal.ExpireAt != "2030-01-01T08:00:00+08:00" {
+		t.Errorf("ExpireAt = %q，期望保留时刻的 RFC3339（UTC+8）", bal.ExpireAt)
 	}
 	plan := items[1]
 	if !plan.InfoOnly || !plan.Usable {

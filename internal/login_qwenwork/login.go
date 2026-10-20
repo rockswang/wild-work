@@ -81,6 +81,48 @@ var (
 	srvOnce     sync.Once
 )
 
+// SubmitCallbackURL 手动提交浏览器跳转后的回调地址（远程/局域网面板的粘贴兜底入口）。
+//
+// 与 codearts/lobsterai/gemini 的同名函数同构：解析 URL query → 复用 HTTP 回调
+// 同一条校验链（error 透传 → code 先到保留）。qwenwork 的 state 服务端只透传不校验
+// （uuid4Hex 透传标识，见 Start），故这里不做 state 比对——与 HTTP 回调行为一致。
+// 写入同一 pending 通道，Poll 兑换路径零分叉。
+func SubmitCallbackURL(raw string) error {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return errors.New("回调地址为空：请复制登录完成后浏览器地址栏里的完整 URL")
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		return fmt.Errorf("回调地址无法解析: %w", err)
+	}
+	q := u.Query()
+	if len(q) == 0 && strings.Contains(raw, "=") {
+		// 只贴了查询串：容忍
+		if qq, perr := url.ParseQuery(strings.TrimPrefix(raw, "?")); perr == nil && len(qq) > 0 {
+			q = qq
+		}
+	}
+	if e := q.Get("error"); e != "" {
+		desc := q.Get("error_description")
+		if desc == "" {
+			desc = e
+		} else {
+			desc = desc + " (" + e + ")"
+		}
+		pending.fail(desc)
+		return fmt.Errorf("登录失败: %s", desc)
+	}
+	code := q.Get("code")
+	if code == "" {
+		const m = "回调缺少 code 参数：请复制登录完成后浏览器地址栏里含 code=… 的整条 URL"
+		pending.fail(m)
+		return errors.New(m)
+	}
+	pending.set(code)
+	return nil
+}
+
 // NewClient 简单 HTTP 客户端（无 cookie 需求；token 兑换用）。
 func NewClient() *http.Client {
 	return &http.Client{Timeout: 30 * time.Second}

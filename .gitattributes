@@ -1,0 +1,32 @@
+# 统一行尾：仓库内一律存 LF，检出也一律给 LF。
+#
+# 为什么需要（2026-10-19 实录）：
+#   本仓此前没有任何行尾约束，core.autocrlf 也未设置，于是 Git 按字节原样存取。
+#   结果 macOS/Linux 侧的文件是 LF（462 个），而远端有 6 个文件被 Windows 侧工具
+#   存成了 CRLF。当两侧都改同一个文件时，Git 逐行比较会认为**每一行都不同**，
+#   报成整文件冲突：internal/app/app.go 一次合并因此冒出 8698 行冲突，实际真实
+#   改动只有 2 处。这会把真正的逻辑冲突埋掉，也让 git blame / diff 失去可读性。
+#
+# 规则说明：
+#   text=auto  —— 让 Git 自动识别文本文件（二进制自动排除，如图标/图片）。
+#   eol=lf     —— 入库与检出都用 LF。比 eol=crlf 更省事：Windows 上的编辑器
+#                 （VS Code / GoLand / Vim）都原生支持 LF，不会显示异常。
+#
+# 落地配套：`git add --renormalize .` 把已存在的 CRLF 文件一次性洗成 LF，
+# 见同批提交。此后任何人提交都会被规范化，CRLF 不会再进仓库。
+* text=auto eol=lf
+
+# 明确标记二进制，避免被当文本做行尾转换（转换会损坏文件）。
+*.png  binary
+*.jpg  binary
+*.jpeg binary
+*.gif  binary
+*.ico  binary
+*.icns binary
+*.zip  binary
+*.gz   binary
+*.woff binary
+*.woff2 binary
+
+# 锁文件与生成物：即使将来工具写成 CRLF 也不参与 diff 噪声
+package-lock.json text eol=lf

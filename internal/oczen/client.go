@@ -321,7 +321,7 @@ func (c *Client) SetAPIKey(key string) {
 //   - `x-opencode-project` 必须是**裸 40 位小写 hex**（官方 CLI 自身形态）；
 //     `prj_` 前缀的规范 id 会被拒，值本身不校验只校验形状。
 //   - 会话头四个都要带：`x-opencode-session` + **`x-opencode-session-id`**
-//     + `x-session-affinity` + `X-Session-Id`，且同值（缺 `-id` 变体会被拒）。
+//   - `x-session-affinity` + `X-Session-Id`，且同值（缺 `-id` 变体会被拒）。
 func (c *Client) headered(req *http.Request, session string) {
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json, text/event-stream")
@@ -420,11 +420,20 @@ func (c *Client) ChatStream(_ *auth.Auth, body []byte) (io.ReadCloser, int, []by
 	return rp.Do()
 }
 
-// regionBlockedMarkers 是「换出口 IP 有可能救回来」的地区拒绝文案（触发备用通道重放）。
+// regionBlockedMarkers 是「换出口 IP 有可能救回来」的拒绝文案（触发备用通道重放）。
 //
-// 实测形态：上游以 403 + `{"error":{"type":"RegionError",...}}` 拒绝地域受限的免费模型
-// （如 muse-spark-*-contributor-free）。判据**宁窄勿宽**：命中会多发一发经代理的重放请求，
-// 误判的代价是把流量发到第三方出口，故只认明确的地区/国家语义文案。
+// 实测形态：
+//   - 403 + `{"error":{"type":"RegionError",...}}`：地域受限的免费模型
+//     （如 muse-spark-*-contributor-free）。
+//   - 403 + `{"error":{"type":"FreeTierError","message":"...aren't available from
+//     your current network because we've detected abusive traffic from this IP
+//     address..."}}`：**出口 IP 级**封禁。2026-10-19 实盘：同一条请求在武汉家宽、
+//     日本/香港/新加坡/英国/德国/韩国/土耳其/加拿大/法国节点全部命中此文案，
+//     而换到干净的美国出口后同一实现立刻 200 —— 判据必须是「换 IP 能救」，此文案正合。
+//
+// 判据**宁窄勿宽**：命中会多发一发经代理的重放请求，误判的代价是把流量发到第三方出口，
+// 故只认明确的地区/国家/出口 IP 语义文案；`access forbidden` 这类宽文案仍不得入选
+// （回归测试 TestOczenIsRegionBlocked 有对应用例）。
 var regionBlockedMarkers = []string{
 	"regionerror", // 实测的 error.type 字面量
 	"not available in your region",
@@ -432,6 +441,8 @@ var regionBlockedMarkers = []string{
 	"region-restricted",
 	"geo-block",
 	"geoblock",
+	"abusive traffic",                     // FreeTierError：出口 IP 被判定滥用（换 IP 可解）
+	"available from your current network", // FreeTierError：网络/出口级不可用（换 IP 可解）
 }
 
 // IsRegionBlocked 报告响应是否属于「地域限制」（可尝试经备用通道重试）。

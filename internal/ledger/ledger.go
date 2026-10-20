@@ -553,9 +553,12 @@ func (l *Ledger) Query(days int, enrich func(uid string) (name, channel string))
 		st.RecordedSince = time.Unix(ts, 0).Format("2006-01-02")
 	}
 
-	// by_day / by_hour 序列化
+	// by_day / by_hour 序列化。
+	// **横轴必须是整窗固定刻度**（R98）：只列「有过用量的时段」会让曲线随当前时间
+	// 右端一路收缩（今天 11 点看就只画到 11:00），刻度本身随时刻变化、无法横向比较。
+	// 故一律按窗口全枚举补空桶：days=1 ⇒ 00:00~23:00 共 24 个；days=7 ⇒ 窗口内每天一个。
 	if days == 1 {
-		for h := 0; h <= now.Hour(); h++ {
+		for h := 0; h < 24; h++ {
 			a := hours[h]
 			dt := DayTokens{Date: fmt.Sprintf("%02d:00", h), ByChannel: map[string]int64{}}
 			if a != nil {
@@ -564,13 +567,18 @@ func (l *Ledger) Query(days int, enrich func(uid string) (name, channel string))
 			st.Token.ByDay = append(st.Token.ByDay, dt)
 		}
 	} else {
-		keys := make([]string, 0, len(days_))
-		for k := range days_ {
-			keys = append(keys, k)
-		}
-		sort.Strings(keys)
-		for _, k := range keys {
-			st.Token.ByDay = append(st.Token.ByDay, DayTokens{Date: k, Total: days_[k].total, ByChannel: days_[k].byCh})
+		// 按日期步进而非 map 遍历：缺数据的日期也要有刻度（否则某天没用量就从横轴上消失）。
+		for i := 0; ; i++ {
+			d := time.Date(from.Year(), from.Month(), from.Day()+i, 0, 0, 0, 0, now.Location())
+			if d.After(now) {
+				break
+			}
+			k := d.Format("01-02")
+			dt := DayTokens{Date: k, ByChannel: map[string]int64{}}
+			if a := days_[k]; a != nil {
+				dt.Total, dt.ByChannel = a.total, a.byCh
+			}
+			st.Token.ByDay = append(st.Token.ByDay, dt)
 		}
 	}
 

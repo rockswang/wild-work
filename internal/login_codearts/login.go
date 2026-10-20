@@ -29,8 +29,10 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -45,6 +47,14 @@ import (
 // 协议未给该值；取 10 分钟（与 login_lobsterai 一致）：足够用户完成华为云登录，
 // 又不至于让一个被放弃的回调口长期挂着。
 const flowTTL = 10 * time.Minute
+
+// FlowTTL 暴露本次登录流程的最长存活时间，供调用方（app.pollLogin）对齐等待上限。
+//
+// 为什么要暴露：app 侧有通用登录上限 loginTimeout（5 分钟），比本包的 flowTTL 短。
+// 直接用 5 分钟会在「用户仍在授权页输入账号」时先放弃并 Shutdown 掉回调口，
+// 浏览器随后跳回 127.0.0.1:<port> 只能得到连接被拒 —— 真机实测踩到过
+// （2026-10-18：登录用时约 50s 侥幸赶上，慢一点必失败）。调用方应以较长者为准。
+func FlowTTL() time.Duration { return flowTTL }
 
 // ErrPending 表示授权尚未完成（用户还没在浏览器里登录完）。
 // 与 login_trae / login_qwenwork / login_lobsterai 同名同义，app.pollLogin 用 errors.Is 判定。
@@ -342,23 +352,96 @@ func exchange(client *http.Client, st state, code string) (Result, error) {
 // handleCallback 收授权码（或用户的拒绝）。
 func (s *session) handleCallback(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	q := r.URL.Query()
+	ok, msg := s.applyCallback(r.URL.Query())
+	_, _ = io.WriteString(w, callbackPage(ok, msg))
+}
+
+// applyCallback 解析回调参数并把结论写进会话。
+//
+// HTTP 回调（handleCallback）与手动粘贴（SubmitCallbackURL）**共用这一条结论通道**：
+// 两条入口写进同一个 session 字段，Poll/兑换路径因此零分叉（不变量：一处判定）。
+// 返回「是否拿到授权码」与给用户看的文案。
+func (s *session) applyCallback(q url.Values) (bool, string) {
 	if e := strings.TrimSpace(q.Get("error")); e != "" {
 		desc := firstNonEmpty(q.Get("error_description"), e)
 		s.fail(desc)
-		_, _ = io.WriteString(w, callbackPage(false, desc))
-		return
+		return false, desc
 	}
 	code := strings.TrimSpace(q.Get("code"))
 	if code == "" {
-		s.fail("回调缺少 code 参数")
-		_, _ = io.WriteString(w, callbackPage(false, "回调缺少 code 参数"))
-		return
+		// 语义保持上游原状（缺 code = 参数异常 ⇒ 终态，见 TestPollMissingCode）；
+		// 但文案必须可执行：粘贴场景下用户最常见的错是只复制了 `…/oauth/callback`
+		// 而丢了查询串，光说「缺少 code 参数」他不知道自己该复制什么。
+		const msg = "回调缺少 code 参数：请复制登录完成后浏览器地址栏里含 code=… 的整条 URL" +
+			"（若地址栏里只有 …/oauth/callback 而没有 code=，说明授权没完成，请重新登录）"
+		s.fail(msg)
+		return false, msg
 	}
 	s.setCode(code)
-	// 此时尚未完成兑换（Poll 每 2s 轮询兑换），页面文案用「已收到授权」而非「登录成功」，
-	// 避免兑换失败时误导（与 login_qwenwork 同款处理）。
-	_, _ = io.WriteString(w, callbackPage(true, ""))
+	return true, ""
+}
+
+// SubmitCallbackURL 手动提交浏览器跳转后的回调地址（远程/局域网场景的兜底入口）。
+//
+// 为什么必须有它：新式 OAuth 的回调地址是**写死的回环地址** —— portal 只接受
+// `port` 参数（协议 §2.1），跳转目标恒为 `http://127.0.0.1:<port>/oauth/callback`。
+// 这隐含了「浏览器与网关同一台机器」的前提（Termux 手机、本机桌面均满足）。
+// 用户从局域网另一台电脑打开面板时，浏览器会跳到**他自己机器**的 127.0.0.1:<port>
+// ⇒ 连接被拒、授权码到不了网关，流程只能枯等到 10 分钟超时（用户侧现象：
+// 「登录完成后跳到一个打不开的 127.0.0.1 页面」）。
+//
+// 本函数不改 portal 侧约定（改不了），只补一条入口：让用户把地址栏里的完整 URL
+// 粘回来，解析出 code 后走与 HTTP 回调完全相同的兑换路径。
+//
+// raw 接受三种形态：完整 URL / `?code=…` 查询串 / 裸授权码。
+func SubmitCallbackURL(raw string) error {
+	q, port, err := parseCallbackInput(raw)
+	if err != nil {
+		return err
+	}
+	sess := currentSession()
+	if sess == nil {
+		return errors.New("没有进行中的登录流程（可能已完成或已超时），请重新发起登录")
+	}
+	// 端口自检：多开/重试场景下很容易粘到**上一次**登录的回调地址。放过去只有
+	// STS 回一个语焉不详的 invalid_grant，故在这里拦下并说清原因。
+	if port != 0 && sess.state.CallbackPort != 0 && port != sess.state.CallbackPort {
+		return fmt.Errorf("回调地址的端口 %d 与本次登录的回调口 %d 不一致——多半粘贴的是上一次登录的地址，请用本次登录后跳转的那条 URL",
+			port, sess.state.CallbackPort)
+	}
+	if ok, msg := sess.applyCallback(q); !ok {
+		return fmt.Errorf("登录失败: %s", msg)
+	}
+	return nil
+}
+
+// parseCallbackInput 把用户粘贴的内容解析成回调参数，并尽力取出回调端口。
+// 端口取不到（裸 code / 无端口的查询串）时返回 0，调用方跳过端口自检。
+func parseCallbackInput(raw string) (url.Values, int, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil, 0, errors.New("回调地址为空")
+	}
+	if strings.HasPrefix(raw, "http://") || strings.HasPrefix(raw, "https://") {
+		u, err := url.Parse(raw)
+		if err != nil {
+			return nil, 0, fmt.Errorf("回调地址无法解析: %w", err)
+		}
+		port := 0
+		if p, err := strconv.Atoi(u.Port()); err == nil {
+			port = p
+		}
+		return u.Query(), port, nil
+	}
+	if strings.Contains(raw, "=") {
+		q, err := url.ParseQuery(strings.TrimPrefix(raw, "?"))
+		if err != nil && len(q) == 0 {
+			return nil, 0, fmt.Errorf("回调地址无法解析: %w", err)
+		}
+		return q, 0, nil
+	}
+	// 只贴了裸授权码（部分用户会只复制 code= 后面的值）。
+	return url.Values{"code": {raw}}, 0, nil
 }
 
 // setCode 记录授权码。

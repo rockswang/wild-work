@@ -761,11 +761,19 @@ func (c *Client) UserResourceDetail(a *auth.Auth) (int64, []provider.ResourceIte
 }
 
 // unixDate 把上游 Unix 秒转为 UTC+8 的 YYYY-MM-DD；0/负值（上游未下发到期时间）返回空串。
+// unixDate 把 Unix 秒转为 **RFC3339 精确时刻**（UTC+8）；sec<=0（上游表示无到期）返回空串。
+//
+// 历史：旧实现返回 "YYYY-MM-DD"，丢了时分秒。traework 的每日签到 expire_time
+// 实测是次日 "00:00:0x"（零点后几秒），而每月登录积分是 "23:59:59"——两种都有。
+// 截断成日期后两者长得一样，面板无法区分「今晚就死」和「明晚才死」
+// （2026-10-19 实测）。现在保留完整时刻供剩余时长分桶。
+//
+// 注：ledger 伪键用 entitlement_id（真 ID，不含日期），故本改动零抖动。
 func unixDate(sec int64) string {
 	if sec <= 0 {
 		return ""
 	}
-	return time.Unix(sec, 0).In(softRateResetLoc).Format("2006-01-02")
+	return time.Unix(sec, 0).In(softRateResetLoc).Format(time.RFC3339)
 }
 
 func (c *Client) GetUserInfo(a *auth.Auth) (uid, nickname, enterpriseID string, err error) {

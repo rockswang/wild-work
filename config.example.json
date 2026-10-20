@@ -23,6 +23,9 @@
     "timeout_seconds": 120,
     "stream_idle_seconds": 90
   },
+  "login": {
+    "lobsterai_callback_port": 0
+  },
   "compat": {
     "default_channel": "workbuddy",
     "max_tokens_cap": 32000,

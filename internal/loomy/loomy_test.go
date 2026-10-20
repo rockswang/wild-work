@@ -186,16 +186,22 @@ func TestParsePoints(t *testing.T) {
 	}
 }
 
-// TestParsePointsDailyExpiry 守门：每日池「当日有效」必须带 ExpireAt（今天，UTC+8），
-// 常规池不带。这是「临期积分」能在面板/汇总条上显示的前提 ——
-// ExpiringWithin 只累计 ExpireAt 非空且「到期日零点 < now+horizon」的条目。
+// TestParsePointsDailyExpiry 守门：上游**没有**下发到期时间的每日池，
+// 一律不带 ExpireAt（不伪造）。
+//
+// 历史（2026-10-19 用户明确要求变更）：旧实现用 provider.ExpireDateToday()
+// 给每日池静态补「今天」，等于编造一个上游从未声明的到期时刻。用户要求
+// 「上游没给就不显示」，故改为空串。影响面：前端「有效期」列自动隐藏该行，
+// 且不进「N 小时内到期」分桶（ExpireInstant 对空串返回 ok=false）。
+//
+// 注：这条测试反转了断言方向（旧版要求 ExpireAt == today），是为了锁住
+// 「不得编造到期时刻」这个新决策，而不是简单改个期望值。
 func TestParsePointsDailyExpiry(t *testing.T) {
 	var rec pointsRecord
 	if err := json.Unmarshal([]byte(`{"data":{"balance":15000,"dailyBalance":4800}}`), &rec); err != nil {
 		t.Fatal(err)
 	}
 	_, items := parsePoints(rec)
-	today := provider.ExpireDateToday()
 
 	var daily, base *provider.ResourceItem
 	for i := range items {
@@ -209,15 +215,15 @@ func TestParsePointsDailyExpiry(t *testing.T) {
 	if daily == nil || base == nil {
 		t.Fatalf("items = %+v, want 积分 + 每日积分", items)
 	}
-	if daily.ExpireAt != today {
-		t.Fatalf("每日积分 ExpireAt = %q, want %q（当日有效）", daily.ExpireAt, today)
+	if daily.ExpireAt != "" {
+		t.Fatalf("每日积分不应有 ExpireAt（上游未下发，不得编造），got %q", daily.ExpireAt)
 	}
 	if base.ExpireAt != "" {
 		t.Fatalf("常规积分不应有 ExpireAt，got %q", base.ExpireAt)
 	}
-	// 临期额度只应统计每日池（常规池长期有效，不参与）
-	if got := provider.ExpiringWithin(items, 24*time.Hour); got != 4800 {
-		t.Fatalf("ExpiringWithin = %d, want 4800（每日池全额临期）", got)
+	// 无 ExpireAt ⇒ 两池都不参与临期统计（不再有「每日池全额临期」这个假信号）
+	if got := provider.ExpiringWithin(items, 24*time.Hour); got != 0 {
+		t.Fatalf("ExpiringWithin = %d, want 0（上游无到期时间，不得计入临期）", got)
 	}
 }
 

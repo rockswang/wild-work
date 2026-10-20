@@ -534,15 +534,21 @@ func parsePoints(rec pointsRecord) (int64, []provider.ResourceItem) {
 		items = append(items, provider.ResourceItem{Name: "积分", Total: *base, Remain: *base, Usable: true})
 	}
 	if daily != nil {
-		// 每日池「当日有效」：上游只下发数值、不下发到期时间，按渠道规则静态补今天。
-		// ExpiringWithin 判定「到期日零点 < now+horizon」，今天到期必然计入临期；
-		// 前端「有效期」列与 ledger 差分同用 YYYY-MM-DD 粒度（UTC+8 墙钟）。
+		// 每日池「当日有效」：上游**只下发数值、不下发到期时间**。
+		//
+		// 历史：旧实现用 provider.ExpireDateToday() 静态补今天，等于编造一个到期时刻
+		// （用户 2026-10-19 明确要求：上游没给就不显示，不要造）。现在留空串，
+		// 前端「有效期」列自动隐藏该行，且不进「N 小时内到期」分桶（ExpireInstant
+		// 对空串返回 ok=false，调用方自然跳过）。
+		//
+		// 影响面：ledger 差分对 ExpireAt="" 的条目下降时恒归 spend（poolShrankExpiry
+		// 门槛 1 要求 ExpireAt 非空），这正是历史行为（ExpireDateToday() 当日不会
+		// 触发 expired()），故口径不变。
 		items = append(items, provider.ResourceItem{
-			Name:     "每日积分",
-			Total:    *daily,
-			Remain:   *daily,
-			Usable:   true,
-			ExpireAt: provider.ExpireDateToday(),
+			Name:   "每日积分",
+			Total:  *daily,
+			Remain: *daily,
+			Usable: true,
 		})
 	}
 	if v := rec.Data.AvailableBalance; v != nil {

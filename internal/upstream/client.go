@@ -95,17 +95,12 @@ func Classify(status int, body string) ErrKind {
 			return ErrSessionDead
 		}
 	}
-	// 网关层认证拦截页（APISIX/openresty 的 HTML 401）：与「上游业务码拒绝」同义，
-	// 都是 access token 被拒 ⇒ 归 ErrSessionDead 才能触发 refresh + 重试一次的自愈
-	// （不变量 19）。不识别时会落到下方 ErrClient，自愈静默失效（2026-10-17 现场）。
-	// 判据集中在 IsGatewayAuthPage（窄而确定），见 gateway.go 的取证说明。
-	if status == http.StatusUnauthorized && IsGatewayAuthPage(body) {
-		return ErrSessionDead
-	}
 	// 429 + 业务码 14018 = 账号积分耗尽（上游把「余额耗尽」也走 429 返回）：
 	// 按硬冷却弃号，等次日签到恢复。必须放在 429 兜底之前。
 	// 只认结构化业务码，不靠文案：429 body 高频带 "quota exceeded" 这类跨计费/限流
 	// 两界的措辞，靠文案猜会把限流误归硬冷却，白扔号约 12h（这正是 429 前置的原因）。
+	// 用 codeMarker 而非字面量 Index：后者只覆盖紧凑 JSON，`{"code": 14018}` 这类带
+	// 空白的合法形态会漏判（详见 provider.CodeMarker）。
 	if status == http.StatusTooManyRequests && codeMarker(lower, "14018") {
 		return ErrHardCredit
 	}
@@ -188,19 +183,6 @@ func Classify(status int, body string) ErrKind {
 	}
 	// HTTP 200 但业务 code 非 0 且含余额关键词的情况已被上面 hardMarkers 捕获。
 	return ErrNone
-}
-
-// errorFromBody 把「HTTP ≥400 + 原始响应体」统一转成带分类的 *Error。
-//
-// 网关 HTML 认证页（见 gateway.go）在这里被换成可行动文案：原始 HTML 对用户零信息量，
-// 却会被 `shortErr` 截成半截 `<html><head><title>401 Authori…` 塞进面板 toast 与日志。
-func errorFromBody(status int, body string) *Error {
-	kind := Classify(status, body)
-	msg := truncate(body, 200)
-	if kind == ErrSessionDead && IsGatewayAuthPage(body) {
-		msg = GatewayAuthHint
-	}
-	return &Error{Kind: kind, Status: status, Msg: msg}
 }
 
 // apiEnvelope 上游统一信封。
@@ -330,7 +312,8 @@ func (c *Client) doJSONWith(client *http.Client, req *http.Request) (json.RawMes
 	defer resp.Body.Close()
 	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if resp.StatusCode >= 400 {
-		return nil, errorFromBody(resp.StatusCode, string(raw))
+		kind := Classify(resp.StatusCode, string(raw))
+		return nil, &Error{Kind: kind, Status: resp.StatusCode, Msg: truncate(string(raw), 200)}
 	}
 	var env apiEnvelope
 	if err := json.Unmarshal(raw, &env); err != nil {
@@ -477,10 +460,12 @@ func (c *Client) FetchModels(a *auth.Auth) ([]ModelInfo, error) {
 	defer resp.Body.Close()
 	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if resp.StatusCode != http.StatusOK {
-		// 必须返回**类型化**错误（而非裸 fmt.Errorf）：401 时 handler/app 靠
-		// errors.As 取 ErrSessionDead 才能走「refresh + 重试」，模型面才不会
-		// 卡在 5min 负缓存里反复静默失败（不变量 19 的同族缺口）。
-		return nil, errorFromBody(resp.StatusCode, string(raw))
+		// 必须返回**类型化**错误（而非裸 fmt.Errorf）：上层靠 errors.As 取分类
+		// 才能走「refresh + 重试」自愈（不变量 19）。裸错误会让模型列表的
+		// 401 自愈永远不生效——本地 expiresAt 仍在未来而上游已拒绝时，
+		// 费率/模型面板只能一直陈旧（见 R79）。
+		return nil, &Error{Kind: Classify(resp.StatusCode, string(raw)), Status: resp.StatusCode,
+			Msg: fmt.Sprintf("models api: %s", truncate(string(raw), 200))}
 	}
 	var env struct {
 		Code int `json:"code"`
@@ -609,7 +594,7 @@ func (c *Client) UserResourceDetail(a *auth.Auth) (int64, []provider.ResourceIte
 			Remain:   remain,
 			ExpireAt: acct.expireAt(),
 			// 套餐名+到期日组合伪键：上游无显式 ID，同名录包靠周期结束时间区分
-			Key:    fmt.Sprintf("%s|%s", acct.PackageName, acct.expireAt()),
+			Key:    fmt.Sprintf("%s|%s", acct.PackageName, acct.expireDay()),
 			Usable: true, // 国内版无端点分区，所有套餐均可被本工具消耗
 		})
 	}
@@ -657,16 +642,29 @@ func (r resourceAccount) remain() int64 {
 	return remain
 }
 
-// expireAt 把 CycleEndTime 墙钟串转为 YYYY-MM-DD；缺失/不可解析时返回空串。
+// expireAt 把 CycleEndTime 墙钟串转为 **RFC3339 精确时刻**（UTC+8）；缺失/不可解析时返回空串。
+//
+// 历史：旧实现返回 "YYYY-MM-DD"，丢了时分秒（上游格式本身是 "2006-01-02 15:04:05"，
+// 时分秒是有的）。面板要按「N 小时内到期」分桶，必须拿精确时刻
+// （2026-10-19 实测：按日期桶会把今晚失效的包报成「明日到期」）。
+//
+// ⚠ 伪键不要用本函数（会带时刻）：Key 必须用 expireDay() 取日期前缀，否则升级瞬间
+// 每个包一对 expire+earn 假流水（单账号 28 个包 ⇒ 56 条）。
 func (r resourceAccount) expireAt() string {
 	ts := strings.TrimSpace(r.CycleEndTime)
 	if ts == "" {
 		return ""
 	}
 	if t, err := time.ParseInLocation("2006-01-02 15:04:05", ts, softRateResetLoc); err == nil {
-		return t.Format("2006-01-02")
+		return t.Format(time.RFC3339)
 	}
 	return ""
+}
+
+// expireDay 取到期日的**日期前缀**（"YYYY-MM-DD"），专供 ledger 伪键使用。
+// 与 expireAt() 分开的原因见其注释：键要稳定（不含时刻），值要精确（含时刻）。
+func (r resourceAccount) expireDay() string {
+	return provider.ExpireDate(r.expireAt())
 }
 
 // userResourceResp get-user-resource 响应信封。
@@ -787,8 +785,9 @@ func (c *Client) FetchModelPricing(a *auth.Auth) ([]provider.ModelPricing, error
 	defer resp.Body.Close()
 	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if resp.StatusCode != http.StatusOK {
-		// 同上：类型化错误，401 才能被 refreshIfSessionDead 接住并自愈。
-		return nil, errorFromBody(resp.StatusCode, string(raw))
+		// 同上：类型化错误，否则 RefreshPricing 里的 refreshIfSessionDead 拿不到分类。
+		return nil, &Error{Kind: Classify(resp.StatusCode, string(raw)), Status: resp.StatusCode,
+			Msg: fmt.Sprintf("pricing api: %s", truncate(string(raw), 200))}
 	}
 	var env struct {
 		Code int `json:"code"`

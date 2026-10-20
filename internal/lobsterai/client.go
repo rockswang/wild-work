@@ -229,6 +229,17 @@ func buildChatBody(body []byte) ([]byte, error) {
 	}
 	delete(obj, "tool_choice")
 	delete(obj, "prompt_cache_key")
+	// developer → system：上游对 role 不做白名单校验，而是**内部崩掉**返回
+	// `500 {"code":500,"message":"服务器内部错误","data":null}`（实测，见下）。
+	// 本渠道请求体不经 upstream.PrepareBody，此前漏做归一 ⇒ DSH 一发 developer
+	// 角色，三个健康账号各挨一发 500，被 consecutive errors 冷却 10 分钟，
+	// 整条渠道回 503。与 officeace 的 400 ModelArts.81001 是同一个病、不同的崩法。
+	//
+	// 实测证据（2026-10-18，devdump 抓包，同一账号 123905、同一模型 deepseek-flash）：
+	//   role=user      → 200（正常 SSE）
+	//   role=developer → 500 空体（唯一变量）
+	// 修法统一走 upstream.NormalizeRoles，不再复制一份。
+	upstream.NormalizeRoles(obj)
 	return json.Marshal(obj)
 }
 
@@ -491,18 +502,29 @@ func creditItems(raw json.RawMessage) []provider.ResourceItem {
 	return out
 }
 
-// dateOfISO 把上游 ISO8601 的到期时间归一到 UTC+8 墙钟的日期粒度（不变式 18）。
+// dateOfISO 把上游 ISO8601 的到期时间归一到 UTC+8 墙钟的 **RFC3339 精确时刻**。
 // 解析不出（缺失 / 非 ISO）→ 空串：**不得**用零值时间冒充「永不过期」。
+//
+// 历史：旧实现截到日期粒度（不变式 18 时代的写法），丢了时分秒。面板按
+// 「N 小时内到期」分桶需要精确时刻（2026-10-19 实测）。
+//
+// 注：lobsterai 的 ledger 伪键用条目名（Key 留空 ⇒ itemKey 退回 Name），
+// 不含日期，故本改动零抖动。
 func dateOfISO(s string) string {
 	s = strings.TrimSpace(s)
 	if s == "" {
 		return ""
 	}
-	for _, layout := range []string{
-		time.RFC3339, "2006-01-02T15:04:05", "2006-01-02 15:04:05", "2006-01-02",
-	} {
-		if t, err := time.Parse(layout, s); err == nil {
-			return t.In(expireLoc).Format("2006-01-02")
+	// 带时区偏移的形态：按偏移解析后归一到 UTC+8 输出
+	if t, err := time.Parse(time.RFC3339, s); err == nil {
+		return t.In(expireLoc).Format(time.RFC3339)
+	}
+	// 无时区后缀的形态：按 **UTC+8 墙钟**解析（上游是国内服务，下发的是本地墙钟）。
+	// 旧实现用 time.Parse 会按 UTC 解析，"2026-10-31 12:00:00" 变成 20:00+08:00，
+	// 整整偏 8 小时——精确到时刻后这个偏差会直接算错「剩几小时」（2026-10-19 修）。
+	for _, layout := range []string{"2006-01-02T15:04:05", "2006-01-02 15:04:05", "2006-01-02"} {
+		if t, err := time.ParseInLocation(layout, s, expireLoc); err == nil {
+			return t.Format(time.RFC3339)
 		}
 	}
 	return ""

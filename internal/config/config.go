@@ -173,6 +173,21 @@ type Config struct {
 		StreamIdleSeconds int `json:"stream_idle_seconds,omitempty"`
 	} `json:"upstream"`
 
+	// Login 登录流程的可调项。
+	Login struct {
+		// LobsterAICallbackPort 固定 LobsterAI 的 OAuth 回调端口（0 = 每次随机）。
+		//
+		// 为什么需要它：有道 portal 的回调派发器**只认**
+		// `http://127.0.0.1:<port>/auth/callback`（hostname 严格等于 127.0.0.1，
+		// 否则丢弃该地址、改发 `lobsterai://` deep-link —— 见 docs/决议项.md R97）。
+		// 所以「浏览器与网关不同机」（局域网/远程访问面板）时要自动完成回调，
+		// 只能让浏览器侧也能连到那个环回端口：在那台机器上建端口转发
+		// （`ssh -L 127.0.0.1:<port>:127.0.0.1:<port> <网关>`）。
+		// 随机端口无法预建隧道，故允许写死一个端口。留空/0 保持随机（更省心，
+		// 但异地浏览器只能用面板的「粘贴回调地址」兜底）。
+		LobsterAICallbackPort int `json:"lobsterai_callback_port,omitempty"`
+	} `json:"login"`
+
 	// Compat 三接口兼容层（OpenAI Responses / Anthropic Messages）配置。
 	// 零值即关闭模型名映射，仅接受 "channel/model" 形式。
 	Compat struct {
@@ -275,7 +290,9 @@ type Config struct {
 	DailyGrantEnabled bool `json:"-"`
 	// DailyGrantBufferDur 发奖窗口缓冲（默认 30m）。
 	DailyGrantBufferDur time.Duration `json:"-"`
-	// ExpiringThresholdDur 临期阈值解析结果（normalize 里钳到 >= 24h）。
+	// ExpiringThresholdDur 临期阈值（时长形态，保留供既有调用方使用）。
+	// 自 2026-10-19 起临期判定改用**自然日**口径（ExpiringThresholdDays），
+	// 本字段仅作展示/兼容，不再参与判据。
 	ExpiringThresholdDur time.Duration `json:"-"`
 	// StreamIdleDur 流式空闲超时解析结果（normalize 里钳到 >= 10s，默认 90s）。
 	// 装配时注入到 loomy/raccoon 的 Client.IdleTimeout。
@@ -754,4 +771,24 @@ func NextDailyGrant(now time.Time, at, buffer time.Duration) time.Time {
 		next = next.AddDate(0, 0, 1)
 	}
 	return next
+}
+
+// ExpiringThresholdDays 临期阈值（自然日数，1/2/3）。
+//
+// 2026-10-19 起临期判定统一用**自然日**口径：days 个自然日内到期
+// （次日 00:00 失效算今日，见 provider.ExpireWithinDays）。
+// 由 ExpiringThresholdHours 换算；非整日时向上取整（保守，宁可提前预警）。
+func (c *Config) ExpiringThresholdDays() int {
+	h := c.Schedule.ExpiringThresholdHours
+	if h <= 0 {
+		h = 24
+	}
+	days := h / 24
+	if h%24 != 0 {
+		days++
+	}
+	if days < 1 {
+		days = 1
+	}
+	return days
 }

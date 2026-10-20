@@ -6,70 +6,14 @@ import (
 	"time"
 )
 
-// TestTimestampWithChecksum 校验时间戳算法与官网 JS 逐位一致。
-//
-// 官网算法（chat.ts generateSign）：
-//
-//	A = Date.now().toString()
-//	o = A.split("").map(Number)
-//	i = o.reduce((e,A)=>e+A, 0) - o[t-2]     // 各位和 减去 倒数第二位
-//	a = i % 10
-//	timestamp = A[:t-2] + a + A[t-1:]
-//
-// 本测试独立复算一遍，避免实现与测试同源而失去校验意义。
-func TestTimestampWithChecksum(t *testing.T) {
-	cases := []string{
-		"1790384203102", // 2026-09-26 前后实测样例
-		"1000000000000",
-		"1999999999999",
-		"1700000000001",
-	}
-	for _, ms := range cases {
-		got := timestampWithChecksum(ms)
-
-		// 独立复算
-		digits := make([]int, len(ms))
-		sum := 0
-		for i := 0; i < len(ms); i++ {
-			digits[i] = int(ms[i] - '0')
-			sum += digits[i]
-		}
-		checksum := (sum - digits[len(ms)-2]) % 10
-		if checksum < 0 {
-			checksum += 10
-		}
-		want := ms[:len(ms)-2] + string(rune('0'+checksum)) + ms[len(ms)-1:]
-
-		if got != want {
-			t.Errorf("timestampWithChecksum(%s) = %s, want %s", ms, got, want)
-		}
-		// 不变量：长度不变、首位不变、末位不变、只有倒数第二位可能变
-		if len(got) != len(ms) {
-			t.Errorf("长度改变: %s → %s", ms, got)
-		}
-		if got[0] != ms[0] || got[len(got)-1] != ms[len(ms)-1] {
-			t.Errorf("首/末位被改动: %s → %s", ms, got)
-		}
-		if got[:len(got)-2] != ms[:len(ms)-2] {
-			t.Errorf("前段被改动: %s → %s", ms, got)
-		}
-	}
-}
-
-// TestTimestampWithChecksumKnownValue 锁定一个具体样例的期望值，
-// 防止算法被「自洽地」改错（独立复算也可能一起错）。
-func TestTimestampWithChecksumKnownValue(t *testing.T) {
-	// 1790384203102 各位和 = 1+7+9+0+3+8+4+2+0+3+1+0+2 = 40
-	// 倒数第二位 = 0；checksum = (40-0)%10 = 0 → 该位本就是 0，结果不变
-	if got := timestampWithChecksum("1790384203102"); got != "1790384203102" {
-		t.Errorf("got %s, want 1790384203102", got)
-	}
-
-	// 构造一个必然改变的样例：1790384203192 → 各位和 40+9-0 = 49? 手算如下
-	// 1+7+9+0+3+8+4+2+0+3+1+9+2 = 49；倒数第二位 = 9；checksum = (49-9)%10 = 0
-	// → 结果 1790384203102
-	if got := timestampWithChecksum("1790384203192"); got != "1790384203102" {
-		t.Errorf("got %s, want 1790384203102", got)
+// TestGenerateSignTimestampRaw 校验 X-Timestamp 用原始毫秒值（13 位纯数字）。
+// 旧实现把倒数第二位替换成校验位——PROTOCOL §2 已证该算法对签名结果无影响，
+// IDE 通道迁移时已删（chatglm-cli 实抓全部请求都是原始毫秒）。
+func TestGenerateSignTimestampRaw(t *testing.T) {
+	now := time.UnixMilli(1790384203102)
+	s := generateSign(now)
+	if s.Timestamp != "1790384203102" {
+		t.Errorf("timestamp = %s, want 原始毫秒 1790384203102（不得改写任何位）", s.Timestamp)
 	}
 }
 

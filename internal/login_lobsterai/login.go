@@ -36,6 +36,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"net/http"
 	"os"
@@ -78,6 +79,14 @@ const (
 	extraKeyLatestKeyfrom = lobsterai.ExtraLatestKeyfrom
 	extraKeyUserID        = lobsterai.ExtraUserID
 )
+
+// FlowTTL 暴露本次登录流程的最长存活时间，供调用方（app.pollLogin）对齐等待上限。
+//
+// 为什么要暴露：app 侧有通用登录上限 loginTimeout（5 分钟），比本包的 flowTTL 短。
+// 直接用 5 分钟会在「用户仍在登录页输入账号」时先放弃并 Shutdown 掉回调口，
+// 浏览器/手动回调随后抵达时只能得到连接被拒或「没有进行中的登录流程」——
+// 与 login_codearts 同款实测问题（2026-10-18）。调用方应以较长者为准。
+func FlowTTL() time.Duration { return flowTTL }
 
 // ErrPending 表示授权尚未完成（用户还没在浏览器里登录完）。
 // 与 login_trae / login_qwenwork / login_minimax 同名同义，app.pollLogin 用 errors.Is 判定。
@@ -189,18 +198,31 @@ func NewClient() *http.Client { return &http.Client{Timeout: 30 * time.Second} }
 
 // Start 发起登录：起本机回调 server 并**立即**返回用户需要打开的登录 URL。
 //
-// 生成物（备忘 108–111 行）：
-//   - state = randomUUID()：回调时原样比对；
-//   - uuid = randomUUID()：登录会话的安装 UUID，随凭据持久化；
-//   - firstKeyfrom = latestKeyfrom = 当前毫秒字符串（登录时刻两者相同）。
-func Start(_ *http.Client, statePath string) (string, error) {
-	// 本机回调：127.0.0.1 + 随机空闲端口。**绝不监听 0.0.0.0**（备忘 104 行）：
-	// 监听非环回等于把"收 code 即换 token"的回调口暴露到局域网。
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
+// 回调口只绑 127.0.0.1，redirect_uri 恒为 `http://127.0.0.1:<port>/auth/callback`。
+// 这不是保守，而是上游的硬约束：portal 的回调派发器（ElectronAuth）里有
+//   hostname === "127.0.0.1" && protocol === "http:" && pathname === "/auth/callback" && port
+// 严格判定，**不满足就丢弃 redirect_uri**，改发 `lobsterai://auth/callback?code=…`
+// deep-link（只有装了桌面客户端的机器才认）。2026-10-18 读 portal 前端源码实证，
+// 见 docs/决议项.md R97：把 redirect_uri 改成网关 LAN IP 的做法在上游层面无效。
+func Start(client *http.Client, statePath string) (string, error) {
+	return StartWithPort(client, statePath, 0)
+}
+
+// StartWithPort 同 Start，但允许**固定回调端口**（0 = 每次随机）。
+//
+// 为什么需要固定端口：既然 portal 只认 127.0.0.1，那么「浏览器与网关不同机」时唯一
+// 的自动回调路径就是让浏览器侧也能连到 `127.0.0.1:<port>` —— 即在那台机器上建一条
+// 端口转发（`ssh -L 127.0.0.1:<port>:127.0.0.1:<port> …`）。随机端口没法预先建隧道，
+// 所以允许把端口写进配置（`config.login.lobsterai_callback_port`）固定下来。
+//
+// 固定端口只在**登录流程存活期间**监听（Start 起、Poll 结束/超时关），攻击面与随机
+// 端口一致；state 仍是唯一防伪手段（UUIDv4，原样比对）。
+func StartWithPort(_ *http.Client, statePath string, port int) (string, error) {
+	ln, actualPort, err := listenCallback(port)
 	if err != nil {
 		return "", fmt.Errorf("listen callback: %w", err)
 	}
-	port := ln.Addr().(*net.TCPAddr).Port
+	port = actualPort
 
 	stateVal := randomUUID()
 	now := time.Now()
@@ -224,6 +246,8 @@ func Start(_ *http.Client, statePath string) (string, error) {
 		_ = ln.Close()
 		return "", err
 	}
+	// 取证日志：redirect_uri 是「浏览器登录完要跳回的地址」，出问题第一时间比对它。
+	log.Printf("lobsterai 登录已发起 redirect_uri=%s（portal 应原样跳回此地址）", st.RedirectURI)
 
 	sess := &loginSession{state: st}
 	mux := http.NewServeMux()
@@ -613,6 +637,26 @@ func writeState(path string, st state) error {
 	}
 	raw, _ := json.MarshalIndent(st, "", "  ")
 	return os.WriteFile(path, raw, 0o600)
+}
+
+// listenCallback 在 127.0.0.1 上起回调监听：port>0 时优先用该固定端口，
+// 占用/非法则退回随机端口（并记一行日志，提示隧道可能因此失效）。
+//
+// 只绑环回是刻意的：portal 只接受 127.0.0.1 形态的 redirect_uri（见 Start 的注释），
+// 监听非环回既没用又多暴露一个「收 code 即换 token」的口子。
+func listenCallback(port int) (net.Listener, int, error) {
+	if port > 0 && port <= 65535 {
+		ln, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port))
+		if err == nil {
+			return ln, port, nil
+		}
+		log.Printf("lobsterai 固定回调端口 %d 不可用（%v），本次改用随机端口——若你已建端口转发，请检查占用", port, err)
+	}
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		return nil, 0, err
+	}
+	return ln, ln.Addr().(*net.TCPAddr).Port, nil
 }
 
 // sanitizeFileID 把 uid 里可能出现的文件系统危险字符换成 '_'（同 officeace 的做法）。

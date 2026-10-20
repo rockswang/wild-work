@@ -153,12 +153,9 @@ type ChannelConfig struct {
 	BaseURL string        `json:"base_url"`          // API 基础地址，如 "https://api.stepfun.com/step_plan/v1"
 	APIKey  string        `json:"api_key,omitempty"` // API 密钥（可选）
 	Models  []ModelConfig `json:"models,omitempty"`  // 用户配置的模型列表（配什么，/v1/models 就返回什么）
-	Enabled *bool         `json:"enabled,omitempty"` // 是否启用（默认 true）
-}
-
-// IsEnabled 报告该渠道是否启用（nil 视为 true）。
-func (c ChannelConfig) IsEnabled() bool {
-	return c.Enabled == nil || *c.Enabled
+	// R83 起移除 `enabled` 字段：渠道要么在列表里（启用），要么被删除，
+	// 「停用但保留配置」这个中间态既少用又让面板多一个按钮和一层视觉噪音。
+	// 旧配置里残留的 enabled 字段会被 JSON 解码静默忽略（不影响加载）。
 }
 
 // Validate 校验配置合法性并规整字段。

@@ -10,6 +10,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -571,14 +572,59 @@ type pointsBalanceResp struct {
 	Data pointsBalanceData `json:"data"`
 }
 
+// pointsBill /api/web/points/v1/bills 的单条积分流水（2026-10-20 实测字段）。
+//
+// biz_type 实测四种：`daily_grant`（每日积分发放）/ `daily_expire`（每日积分到期清零）/
+// `desktop`（桌面端 LLM 对话消耗）/ `reward_grant`（活动/补偿发放）。
+// 只有 daily_grant 带 `expire_at`（= 发放日 +6 天 23:59:59，即「7 天有效」），
+// 其余类型无到期字段。
+type pointsBill struct {
+	BizType   string `json:"biz_type"`
+	Points    int64  `json:"points"`
+	GrantAt   string `json:"grant_at"`   // 名义发放时刻（每日积分恒为当天 00:00）
+	ExpireAt  string `json:"expire_at"`  // 该笔额度的失效时刻（仅 daily_grant 有）
+	CreatedAt string `json:"created_at"` // 实际落账时刻（惰性发放，见 checkin.go）
+}
+
+// pointsBillsResp /api/web/points/v1/bills 的响应。
+// 分页用 `paging.limit` / `paging.offset`（`type` 之类参数会 400）；服务端另有
+// 返回条数上限（实测 limit=1000 只回 61 条），故本渠道只取最近一页即可——
+// 每日积分 7 天窗口最多 8 笔在效发放。
+type pointsBillsResp struct {
+	Code int `json:"code"`
+	Data struct {
+		Items []pointsBill `json:"items"`
+	} `json:"data"`
+}
+
+// dailyItemName 每日额度条目的展示名。**必须保持不变**：ledger 的差分键在 Key 为空时
+// 退回 Name（见 ledger.itemKey），改名等于换键 ⇒ 升级瞬间旧键「消失」记 expire、
+// 新键「出现」记 earn，凭空产出一对假流水（R105 的伪键纪律）。
+const dailyItemName = "每日额度"
+
+// dailyGrant 一笔在效的每日积分发放（bills 的 daily_grant 里未到期的那部分）。
+type dailyGrant struct {
+	Points   int64
+	ExpireAt string // RFC3339 精确时刻（上游原样）
+}
+
 // UserResourceDetail 实现 provider.Upstream：拉取积分余额并按上游的池子拆分条目。
 //
 // 端点 `GET {站点根}/api/web/points/v1/balance`（**与推理网关不同前缀**：推理在
 // `/api/web/llm/v2`，积分在 `/api/web/points/v1`）。上游把额度分成四个池：
 // 每日 / 月度 / 奖励 / 充值，另有 `topup_frozen` 标记充值池是否被冻结 —— 冻结时该池
 // 对用户「看得见用不了」，正好对应 `provider.ResourceItem.Usable` 的语义。
+//
+// 基址走 `authBaseURL()`（与签到、refresh 同源）：points 是**站点根**服务，不是推理网关，
+// 用 AuthBase 而不是 Base —— 两者在生产都是 `BaseURL`，但只有前者能在 httptest 里注入。
+//
+// **每日额度额外补一次 bills 查询拿逐笔到期时刻**（R107）：balance 只给聚合值，
+// 不给任何到期信息；而「每日积分 7 天有效、逐日滚动清零」是这个渠道最常见的
+// 余额下降原因。不补到期时刻时，账本会把「过期清零」无条件记成「对话消耗」——
+// 2026-10-20 生产实录：面板显示小浣熊「今日消耗 580」，上游 bills 实为
+// 三账号各一笔 `daily_expire`（-200/-191/-189），当天真实对话请求 0 次。
 func (c *Client) UserResourceDetail(a *auth.Auth) (int64, []provider.ResourceItem, error) {
-	resp, raw, err := c.do(http.MethodGet, BaseURL+EpPointsBalance, a, nil)
+	resp, raw, err := c.do(http.MethodGet, c.authBaseURL()+EpPointsBalance, a, nil)
 	if err != nil {
 		return 0, nil, err
 	}
@@ -601,14 +647,137 @@ func (c *Client) UserResourceDetail(a *auth.Auth) (int64, []provider.ResourceIte
 		return 0, nil, &provider.Error{Kind: kind, Status: resp.StatusCode, Msg: truncate(string(raw), 300)}
 	}
 	remain, items := parsePointsBalance(out.Data)
+	// 逐笔到期是**尽力而为**：bills 查询失败只降级成「无到期信息」（退回旧口径，
+	// 不阻塞余额主流程），绝不因为一个锦上添花的展示维度把积分刷新整个搞挂。
+	if grants, gerr := c.fetchDailyGrants(a); gerr == nil {
+		items = withDailyExpiry(items, grants)
+	} else {
+		log.Printf("raccoon 每日额度到期查询失败（本轮退回无到期口径）uid=%s err=%v", a.UID, gerr)
+	}
 	return remain, items, nil
+}
+
+// fetchDailyGrants 拉取「仍在有效期内」的每日积分发放，按**到期时刻升序**返回。
+//
+// 为什么要按到期升序：上游每日 300 分、7 天有效 ⇒ 池子里同时躺着最多 8 笔不同
+// 到期日的额度，且消耗按**先进先出**（最老的一笔先被花掉，实测：三账号 10-13
+// 那笔各花掉 100/109/111，其后的发放笔笔满额，到期清零额恰好等于老笔的剩余）。
+// 升序即「消耗顺序」，供 withDailyExpiry 做先进先出拆分。
+func (c *Client) fetchDailyGrants(a *auth.Auth) ([]dailyGrant, error) {
+	resp, raw, err := c.do(http.MethodGet, c.authBaseURL()+EpPointsBills+"?paging.limit=50&paging.offset=0", a, nil)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, &provider.Error{
+			Kind: Classify(resp.StatusCode, string(raw)), Status: resp.StatusCode, Msg: truncate(string(raw), 300),
+		}
+	}
+	var out pointsBillsResp
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return nil, fmt.Errorf("raccoon 积分流水解析失败: %w (%s)", err, truncate(string(raw), 200))
+	}
+	if out.Code != 0 {
+		return nil, fmt.Errorf("raccoon 积分流水业务码 %d: %s", out.Code, truncate(string(raw), 200))
+	}
+	now := time.Now()
+	grants := make([]dailyGrant, 0, 8)
+	for _, b := range out.Data.Items {
+		if b.BizType != "daily_grant" || b.Points <= 0 || b.ExpireAt == "" {
+			continue
+		}
+		// 已到期的发放不再参与：它们对应的额度早已被上游清零并从池子里扣掉，
+		// 留在列表里会让「按到期升序」的第一笔永远是过期笔，把今日到期算成 0。
+		if t, ok := provider.ExpireInstant(b.ExpireAt); ok && !now.Before(t) {
+			continue
+		}
+		grants = append(grants, dailyGrant{Points: b.Points, ExpireAt: b.ExpireAt})
+	}
+	sort.Slice(grants, func(i, j int) bool {
+		ti, oki := provider.ExpireInstant(grants[i].ExpireAt)
+		tj, okj := provider.ExpireInstant(grants[j].ExpireAt)
+		if !oki || !okj {
+			return grants[i].ExpireAt < grants[j].ExpireAt
+		}
+		return ti.Before(tj)
+	})
+	return grants, nil
+}
+
+// withDailyExpiry 把聚合的「每日额度」条目换成**逐笔发放**的条目，各带自己的到期时刻。
+//
+// 两个约束同时成立，这是本函数存在的全部理由：
+//
+//  1. **面板要逐笔**：`stats.expiryItems` 是逐条目分桶的，只有拆开才能算出
+//     「今晚 300 到期 / 7 日内 2100 到期」；不拆就只能整池挂一个最早到期日，
+//     把 2100 全报成「今日到期」（虚高 7 倍，属于编造）。
+//  2. **账本要单键**：所有拆分条目共用同一个 Name 且**不设 Key**，`ledger.DiffCredits`
+//     的按 key 聚合（remain/used/total 求和、expire 取首个非空）会把它们合回
+//     「每日额度」一条 —— 与拆分前完全同键同值，升级零假流水；同时聚合后的
+//     Expire 取到的是**最早**那一笔的到期时刻，正好是 `ledger.expired()` 需要的判据
+//     （最早一笔过期 ⇒ 本轮余额下降归因 expire 而非 spend）。
+//
+// 余额拆分口径：池子总额（daily_points）按到期升序逐笔扣减（先进先出），最后一笔
+// 承接全部余量 —— 保证拆分后 Remain 之和恒等于 daily_points（`provider.Summarize`
+// 与 pool 快照据此取值，差一分都会让面板与余额对不上）。
+func withDailyExpiry(items []provider.ResourceItem, grants []dailyGrant) []provider.ResourceItem {
+	idx := -1
+	for i, it := range items {
+		if it.Name == dailyItemName {
+			idx = i
+			break
+		}
+	}
+	if idx < 0 || len(grants) == 0 {
+		return items
+	}
+	daily := items[idx]
+	if daily.Remain <= 0 {
+		return items // 池子已空：没有可拆的余额，也就没有可展示的到期
+	}
+
+	budget := daily.Remain
+	split := make([]provider.ResourceItem, 0, len(grants))
+	for _, g := range grants {
+		take := g.Points
+		if take > budget {
+			take = budget // 池子不够：本笔已被花掉一部分
+		}
+		if take <= 0 {
+			continue
+		}
+		split = append(split, provider.ResourceItem{
+			Name: dailyItemName, Total: take, Remain: take,
+			ExpireAt: g.ExpireAt, Usable: daily.Usable,
+		})
+		budget -= take
+		if budget <= 0 {
+			break
+		}
+	}
+	if len(split) == 0 {
+		return items
+	}
+	if budget > 0 {
+		// 上游口径漂移（池子比 bills 里在效发放之和还大）：余量挂到**最新**那一笔上，
+		// 保证 Remain 之和仍等于 daily_points。宁可到期日略偏，也不让余额对不上。
+		last := &split[len(split)-1]
+		last.Total += budget
+		last.Remain += budget
+	}
+
+	out := make([]provider.ResourceItem, 0, len(items)-1+len(split))
+	out = append(out, items[:idx]...)
+	out = append(out, split...)
+	out = append(out, items[idx+1:]...)
+	return out
 }
 
 // parsePointsBalance 把上游余额结构转成 (可用余额, 明细条目)。
 // 抽成纯函数便于单测（Client 的 baseURL 是常量，不便在测试里换 host）。
 func parsePointsBalance(d pointsBalanceData) (int64, []provider.ResourceItem) {
 	items := []provider.ResourceItem{
-		{Name: "每日额度", Total: d.DailyPoints, Remain: d.DailyPoints, Usable: true},
+		{Name: dailyItemName, Total: d.DailyPoints, Remain: d.DailyPoints, Usable: true},
 		{Name: "奖励积分", Total: d.RewardPoints, Remain: d.RewardPoints, Usable: true},
 		{Name: "充值积分", Total: d.TopupPoints, Remain: d.TopupPoints, Usable: !d.TopupFrozen},
 		{Name: "月度积分", Total: d.MonthlyPoints, Remain: d.MonthlyPoints, Usable: true},

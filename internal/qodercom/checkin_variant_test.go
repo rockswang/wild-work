@@ -15,17 +15,22 @@
 package qodercom
 
 import (
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"wild-work/internal/provider"
 )
 
-// desktopCampaignsPayload 桌面端 main.log 中裁剪出的真实响应（字段顺序与取值原样保留）。
+// desktopCampaignsPayload 桌面端 main.log 中裁剪出的真实响应（字段形状原样保留）。
 // 关键点：claim 状态在**嵌套对象** claimStatus:{status:…} 里，不是扁平字符串。
-const desktopCampaignsPayload = `{
+//
+// ⚠️ 活动窗口用**相对时间**（昨天→明天）而非抓包原值：R95 起签到按活动有效窗口判定，
+// 写死的时间戳过几天就会变成「已结束」→ 本用例会退化成时间炸弹（2026-10-21 实测踩到）。
+var desktopCampaignsPayload = fmt.Sprintf(`{
   "uid": "01a05725-40bb-74e2-8534-858686c422c6",
   "showCampaign": true,
   "claimable": true,
@@ -35,8 +40,8 @@ const desktopCampaignsPayload = `{
       "campaignId": "01a130ef-2c3d-7ee6-a290-90c3207b536d",
       "campaignKey": "act-20261013-119",
       "actionType": "CLAIM_BENEFIT",
-      "startAt": 1792202400,
-      "endAt": 1792288740,
+      "startAt": %d,
+      "endAt": %d,
       "claimStatus": {"status": "CLAIMABLE"},
       "benefit": {"kind": "CREDITS", "amount": 100,
                   "validity": {"mode": "RELATIVE_DAYS", "days": 30}},
@@ -46,13 +51,15 @@ const desktopCampaignsPayload = `{
       "campaignId": "01a05bce-e800-7494-a002-806e4438f483",
       "campaignKey": "act-20260901-493",
       "actionType": "VIEW_DETAILS",
-      "startAt": 1788247200,
-      "endAt": 1793462340,
+      "startAt": %d,
+      "endAt": %d,
       "claimStatus": {"status": "CLAIMED"},
       "placements": [{"type": "POPUP", "campaignUrl": "https://openapi.qoder.sh/growth-page/activity-iframe"}]
     }
   ]
-}`
+}`,
+	time.Now().Add(-24*time.Hour).Unix(), time.Now().Add(24*time.Hour).Unix(),
+	time.Now().Add(-48*time.Hour).Unix(), time.Now().Add(48*time.Hour).Unix())
 
 // desktopClaimOkPayload claim 接口的成功回执（桌面端同族字段形状；benefit 为嵌套对象）。
 const desktopClaimOkPayload = `{"campaignId":"01a130ef-2c3d-7ee6-a290-90c3207b536d","status":"CLAIMED","replayed":false,"benefit":{"kind":"CREDITS","amount":100,"validity":{"mode":"RELATIVE_DAYS","days":30}}}`

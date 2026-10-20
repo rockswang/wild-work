@@ -13,8 +13,8 @@ import (
 	"strings"
 	"time"
 
-	"wild-work/internal/provider"
 	"wild-work/internal/loopguard"
+	"wild-work/internal/provider"
 )
 
 // errEmptyStream 上游返回 200 但没有有效 SSE 数据帧（空流/只有注释/[DONE]）。
@@ -27,6 +27,34 @@ var errEmptyStream = errors.New("upstream stream contained no valid data events"
 // 在流式路径把空流记为失败观测（HTTP 头已发出只能 200，但日志/状态应收敛到
 // upstream_parse 同语义），与客户端断连类错误区分。
 func IsEmptyStreamError(err error) bool { return errors.Is(err, errEmptyStream) }
+
+// sseDataPayload 判断一行 SSE 是否数据帧，并返回载荷。
+//
+// ⚠️ 规矩：**入站** SSE 帧的 `data:` 之后可能有空格、也可能没有 —— 两种都必须认。
+// WHATWG SSE 规范只要求 `data:` 前缀，冒号后的空格是**可选**的，而实际上游两种都在用：
+//   - `data: {...}`（大多数渠道）
+//   - `data:{...}`（LobsterAI 实测如此）
+//
+// 2026-10-18 的事故（LobsterAI 6 账号 6/6 全坏）：本文件原先写成
+// `strings.HasPrefix(line, "data: ")` + `TrimPrefix(line, "data: ")`，只认带空格的形态。
+// 无空格帧于是掉进「其他行」分支原样透传但**不计入有效帧** ⇒ 触发「空流」兜底，
+// 给每个正常回答额外追加一帧 `{"error":{"message":"empty upstream stream"...}}`
+// 并返回 errEmptyStream；Aggregate（非流式）更彻底 —— 一帧都认不出，直接 502。
+// 而 errEmptyStream 会被上层当作「账号连续错误」⇒ **健康账号被冷却**，
+// 于是「6 个账号全坏」。
+//
+// 因此本函数是**入站帧解析的唯一入口**：新增解析点请一律调它，不要自己写 HasPrefix，
+// 否则这个 bug 会以同样的形态再来一次（本仓同类清单/判据散落问题已复发多次）。
+//
+// 返回值 ok=false 表示该行不是数据帧（注释、event:、id:、空行等）。
+func sseDataPayload(line string) (payload string, ok bool) {
+	const prefix = "data:"
+	if !strings.HasPrefix(line, prefix) {
+		return "", false
+	}
+	// 只剥前缀，不乱切：`data:  {}`（多空格）与 `data:{}` 都交给调用方 TrimSpace。
+	return strings.TrimSpace(strings.TrimPrefix(line, prefix)), true
+}
 
 // Aggregate 读取完整 SSE 流，聚合 delta.content 为单个 OpenAI chat.completion 响应。
 // 分片/半行由 bufio.Reader.ReadString 处理；遇到 "data: [DONE]" 结束。
@@ -149,8 +177,7 @@ func Aggregate(r io.Reader) (map[string]any, error) {
 			return nil, err
 		}
 		line = strings.TrimRight(line, "\r\n")
-		if strings.HasPrefix(line, "data: ") {
-			payload := strings.TrimPrefix(line, "data: ")
+		if payload, isData := sseDataPayload(line); isData {
 			if payload == "[DONE]" {
 				// 上游显式结束：停止读取，DONE 之后的任何数据一律忽略。
 				sawDone = true
@@ -671,13 +698,18 @@ readLoop:
 	for {
 		line, err := br.ReadString('\n')
 		trimmed := strings.TrimRight(line, "\r\n")
+		// 用 sseDataPayload 统一认帧：`data: {...}` 与 `data:{...}` 都算数据帧
+		//（2026-10-18 LobsterAI 全坏事故：原先只认带空格的形态，无空格帧被当成
+		//  「其他行」原样透传却不计有效帧 ⇒ 每个正常回答都被追加一帧
+		//  empty upstream stream 并返回 errEmptyStream）。
+		payload, isData := sseDataPayload(trimmed)
 		switch {
-		case strings.HasPrefix(trimmed, "data: [DONE]"):
+		case isData && payload == "[DONE]":
 			// 上游显式结束：停止读取，DONE 之后的任何数据（含垃圾帧）一律不再透传。
 			// [DONE] 统一在循环结束后写出，保证恰好一个。
 			break readLoop
-		case strings.HasPrefix(trimmed, "data: "):
-			n, werr := writeFrame(strings.TrimPrefix(trimmed, "data: "))
+		case isData:
+			n, werr := writeFrame(payload)
 			// EOF 处未以换行收尾且该帧不是合法 JSON → 这行本身是半个帧（被砍断），
 			// 已按原样写出的是残缺数据，必须按截断处理（不补 DONE）。
 			if err == io.EOF && n == 0 && strings.TrimSpace(line) != "" {

@@ -283,16 +283,30 @@ func TestTruncCredits(t *testing.T) {
 	}
 }
 
-// TestExpireDate 验证 UTC+8 墙钟解析（含带偏移与不带偏移两种形态）。
+// TestExpireDate 验证 UTC+8 墙钟解析（含带偏移与不带偏移两种形态），
+// 并锁住「**保留精确时刻**」——这是「N 小时内到期」分桶的前提。
+//
+// 历史：旧版断言返回值是 "2026-09-19"（日期粒度）。改为 RFC3339 后，
+// 面板才能分辨「今晚 00:00 失效」与「明天 23:59:59 失效」
+// （2026-10-19 实测：按日期粒度会把前者误报成「明日到期」）。
 func TestExpireDate(t *testing.T) {
-	if got := expireDate("2026-09-19T00:00:00+08:00"); got != "2026-09-19" {
+	// 带时区偏移：原样保留时刻
+	if got := expireDate("2026-09-19T00:00:00+08:00"); got != "2026-09-19T00:00:00+08:00" {
 		t.Fatalf("RFC3339 = %q", got)
 	}
-	if got := expireDate("2026-09-19T00:00:00"); got != "2026-09-19" {
+	// 无时区后缀：按 UTC+8 墙钟解析，补上 +08:00
+	if got := expireDate("2026-09-19T00:00:00"); got != "2026-09-19T00:00:00+08:00" {
 		t.Fatalf("无时区 = %q", got)
+	}
+	// 上游真实形态（每日奖励）：次日零点失效，时刻必须保留
+	if got := expireDate("2026-10-20T00:00:00+08:00"); got != "2026-10-20T00:00:00+08:00" {
+		t.Fatalf("每日奖励 valid_to = %q", got)
 	}
 	if got := expireDate(""); got != "" {
 		t.Fatalf("空串应返回空, got %q", got)
+	}
+	if got := expireDate("not-a-time"); got != "" {
+		t.Fatalf("不可解析应返回空, got %q", got)
 	}
 }
 

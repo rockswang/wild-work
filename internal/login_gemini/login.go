@@ -362,8 +362,10 @@ func exchange(client *http.Client, st state, code string) (Result, bool, error) 
 	defer resp.Body.Close()
 	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if resp.StatusCode >= 400 {
-		// 错误文案**只透出信封字段**（error / error_description），不回显响应体原文。
-		return Result{}, true, fmt.Errorf("授权码兑换失败（HTTP %d）：%s", resp.StatusCode, oauthErrorText(raw))
+		// 错误文案**只透出信封字段**（error / error_description），不回显响应体原文；
+		// 命中已知上游政策类错误时附一句可行动引导（geminiErrorHint）。
+		env := oauthErrorText(raw)
+		return Result{}, true, fmt.Errorf("授权码兑换失败（HTTP %d）：%s%s", resp.StatusCode, env, geminiErrorHint(env))
 	}
 
 	grant, err := gemini.ParseTokenGrant(raw, "")
@@ -503,6 +505,25 @@ func oauthErrorText(raw []byte) string {
 		return e.ErrorDescription
 	}
 	return e.Error + ": " + e.ErrorDescription
+}
+
+// geminiErrorHint 对上游 OAuth 错误给一句**可行动**的补充引导（issue #167）。
+//
+// 背景：Google 已停用旧 Gemini CLI 的 OAuth client 对个人版 Code Assist 的授权
+// （按 client_id + 账号类型判，改 scope/参数都过不去），错误原文是
+// "This client is no longer supported for Gemini Code Assist for individuals"。
+// 不加引导的话，用户按官方报错提示去装 CLI / 换 env 凭据，只会撞同一堵墙。
+func geminiErrorHint(envelope string) string {
+	l := strings.ToLower(envelope)
+	switch {
+	case strings.Contains(l, "no longer supported"):
+		return "（Google 已停用该 OAuth 客户端对个人版 Code Assist 的授权，属上游政策变更，非本工具或账号问题；组织版账号不受影响。个人号可用 Antigravity 官方 CLI 完成登录后关注后续版本支持）"
+	case strings.Contains(l, "restricted_client"):
+		return "（该 OAuth 客户端未登记所请求的 scope；若已附带“no longer supported”类文案，见上一条引导）"
+	case strings.Contains(l, "access_denied"):
+		return "（你在授权页拒绝了授权；如非本意请重新发起登录）"
+	}
+	return ""
 }
 
 // ---------------------------------------------------------------------------

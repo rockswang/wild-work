@@ -30,10 +30,26 @@ const (
 	// balance 单位是**毫积分**（console 前端 `balance/1e3`），daily_token_* 是 token 数。
 	epWallet = "/api/v1/users/wallet"
 
-	// epWalletCheckin 签到领积分（2026-10-17 取证，见 checkin.go 文件头）：
-	// 路径取自官方桌面端二进制 `monkeycode-desktop.exe` 的明文串，与 epWallet 同域同 Cookie。
-	// ⚠️ 方法（取 POST）与回包字段名未确认，是签名之外本渠道仅剩的推测项。
+	// epWalletCheckin 签到（2026-10-17 实测闭合，见 checkin.go 文件头）：
+	//
+	//	GET  = 查今日是否已签，回 {code:0,data:{checked_in:bool}}；
+	//	POST = 领取，body 必须带 `captcha_token`（由 epCaptchaRedeem 换来），否则 10701。
+	//
+	// 与 epWallet 同域同 Cookie。
 	epWalletCheckin = "/api/v1/users/wallet/checkin"
+
+	// epCaptchaChallenge / epCaptchaRedeem 签到的无感人机验证（Cap.js SHA-256 工作量证明）。
+	//
+	// 这是**公开端点**（`/public/`）；挑战由客户端本地算出来即可，不需要人工看图/拖滑块，
+	// 故本工具能自动完成（求解器见 captcha.go）。
+	//
+	//	POST challenge body={}            → {challenge:{c,s,d},expires,token}
+	//	POST redeem    {token,solutions}  → {success,token,expires}
+	//
+	// ⚠️ 这两个端点的回包**不是控制台信封**（没有 `code` 字段）：
+	// challenge 直接给 challenge/token，redeem 用 `success` 表达结果。
+	epCaptchaChallenge = "/api/v1/public/captcha/challenge"
+	epCaptchaRedeem    = "/api/v1/public/captcha/redeem"
 
 	// epOAuthAuthorize 百智云 OAuth 授权端点（GET，需 baizhi 会话）。
 	// 带上它即等于用户在前端点了一次「同意授权」：302 到 redirect_uri 并附 `code`。

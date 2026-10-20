@@ -149,19 +149,24 @@ const (
 	ScopeCloudPlatform   = "https://www.googleapis.com/auth/cloud-platform"
 	ScopeUserInfoEmail   = "https://www.googleapis.com/auth/userinfo.email"
 	ScopeUserInfoProfile = "https://www.googleapis.com/auth/userinfo.profile"
-	ScopeCCLog           = "https://www.googleapis.com/auth/cclog"
-	ScopeExperiments     = "https://www.googleapis.com/auth/experimentsandconfigs"
+	// ScopeCCLog / ScopeExperiments 已从 Scopes 剔除（issue #167，未登记 scope 必 403）；
+	// 常量保留仅作历史对照，勿加回 Scopes。
+	ScopeCCLog       = "https://www.googleapis.com/auth/cclog"
+	ScopeExperiments = "https://www.googleapis.com/auth/experimentsandconfigs"
 )
 
-// Scopes 六项 scope 逐字照抄（gemini-oauth.ts:59-66）：`cloud-platform` 必需，
-// 后两项是 Cloud Code 自己的通道。
+// Scopes 逐字照抄 CLI 客户端已登记的部分（gemini-oauth.ts:59-66）：`cloud-platform` 必需。
+//
+// ⚠️ 2026-10-19 剔除 `cclog` / `experimentsandconfigs`（issue #167）：这两项是 Cloud Code
+// 自己的内部 scope，旧 CLI 的公开 client 未登记它们 ⇒ 授权页必报 403 restricted_client
+// 「Unregistered scope(s)」。用户实测：收紧后这堵墙消失（后面还撞 client 停用那是另一堵墙，
+// 上游政策问题，见登录错误文案的引导）；而 Cloud Code 端点的鉴权只认 access_token，
+// 不复核 scope 清单，删掉后运行时行为不变。
 var Scopes = []string{
 	ScopeOpenID,
 	ScopeCloudPlatform,
 	ScopeUserInfoEmail,
 	ScopeUserInfoProfile,
-	ScopeCCLog,
-	ScopeExperiments,
 }
 
 // Extra 键名（写进 auth.Auth.Extra 的渠道专有字段）。

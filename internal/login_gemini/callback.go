@@ -9,9 +9,12 @@
 package login_gemini
 
 import (
+	"errors"
 	"fmt"
 	"html"
 	"net/http"
+	"net/url"
+	"strings"
 )
 
 // handleCallback 处理 `GET /oauth-callback?code=…&state=…`。
@@ -70,6 +73,65 @@ func (s *loginSession) sessionState() string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.state.State
+}
+
+// SubmitCallbackURL 手动提交浏览器跳转后的回调地址（远程/局域网面板的粘贴兜底入口）。
+//
+// 与 codearts/lobsterai 的同名函数同构：解析 URL query → 复用 handleCallback 的
+// 同一条校验链（state 逐字比对 → error 透传 → code 先到保留）。
+// 与 HTTP 回调的差异只在「无 w 可写页面」：state 不匹配/缺 code 时仅落 pending.errMsg，
+// 由 Poll 报出可行动错误（与 reject 的语义一致）。兑换路径零分叉。
+func SubmitCallbackURL(raw string) error {
+	sess := currentSession()
+	if sess == nil {
+		return errors.New("没有进行中的登录流程（可能已完成或已超时），请重新发起登录")
+	}
+	q, err := url.ParseQuery(strings.TrimPrefix(strings.TrimSpace(raw), ""))
+	if err != nil {
+		// 完整 URL 形态：Parse 整条后取 query 重试
+		u, uerr := url.Parse(strings.TrimSpace(raw))
+		if uerr != nil {
+			return fmt.Errorf("回调地址无法解析: %w", err)
+		}
+		q = u.Query()
+	}
+	// 1. state 逐字比对（与 handleCallback 同一条规则）
+	got := q.Get("state")
+	if got == "" {
+		m := "回调缺少 state 参数，已拒绝"
+		sess.fail(m)
+		return errors.New(m)
+	}
+	if got != sess.sessionState() {
+		m := "state 不匹配，已拒绝该回调（多半是上一次登录遗留的地址，请用本次登录后跳转的那条）"
+		sess.fail(m)
+		return errors.New(m)
+	}
+	// 2. 用户取消 / 上游报错
+	if e := q.Get("error"); e != "" {
+		desc := firstNonEmpty(q.Get("error_description"), e)
+		sess.fail(desc)
+		return fmt.Errorf("登录失败: %s", desc)
+	}
+	// 3. code 先到保留（与 handleCallback 同款）
+	code := q.Get("code")
+	if code == "" {
+		const m = "回调缺少 code 参数：请复制含 code=… 的整条 URL"
+		sess.fail(m)
+		return errors.New(m)
+	}
+	sess.set(code)
+	return nil
+}
+
+// firstNonEmpty 取第一个非空串。
+func firstNonEmpty(vals ...string) string {
+	for _, v := range vals {
+		if v != "" {
+			return v
+		}
+	}
+	return ""
 }
 
 // reject 对 state 校验失败的回调回 400 并拒绝（不写入任何 pending code）。

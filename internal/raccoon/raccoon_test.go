@@ -541,3 +541,298 @@ func asLoopGuardErr(err error, target **loopguard.Error) bool {
 	}
 	return ok
 }
+
+// ---------------------------------------------------------------------------
+// R107 每日额度逐笔到期（2026-10-20 生产实录驱动）
+// ---------------------------------------------------------------------------
+
+// billsFixture 一段实测形状的积分流水（2026-10-20 抓自 RaccoonAddison）。
+// 三种 biz_type 都在：daily_grant 带 expire_at，daily_expire / desktop 不带。
+const billsFixture = `{"code":0,"message":"success","data":{"items":[
+ {"bill_id":"b1","client_type":"web","event_name":"每日积分发放","biz_type":"daily_grant","points":300,
+  "created_at":"2026-10-20T08:37:00+08:00","grant_at":"2026-10-20T00:00:00+08:00","expire_at":"2026-10-26T23:59:59+08:00"},
+ {"bill_id":"b2","client_type":"web","event_name":"每日积分到期清零","biz_type":"daily_expire","points":-200,
+  "created_at":"2026-10-19T23:59:59+08:00","grant_at":"2026-10-13T00:00:00+08:00","expire_at":"2026-10-19T23:59:59+08:00"},
+ {"bill_id":"b3","client_type":"web","event_name":"每日积分发放","biz_type":"daily_grant","points":300,
+  "created_at":"2026-10-19T08:37:00+08:00","grant_at":"2026-10-19T00:00:00+08:00","expire_at":"2026-10-25T23:59:59+08:00"},
+ {"bill_id":"b4","client_type":"desktop","event_name":"桌面端 LLM 对话消耗","biz_type":"desktop","points":-2,
+  "created_at":"2026-10-18T21:45:05+08:00"},
+ {"bill_id":"b5","client_type":"web","event_name":"每日积分发放","biz_type":"daily_grant","points":300,
+  "created_at":"2026-10-18T00:01:11+08:00","grant_at":"2026-10-18T00:00:00+08:00","expire_at":"2026-10-24T23:59:59+08:00"},
+ {"bill_id":"b6","client_type":"web","event_name":"服务异常补偿积分","biz_type":"reward_grant","points":1500,
+  "created_at":"2026-10-16T05:35:50+08:00"}
+]}}`
+
+// TestFetchDailyGrants 只收未到期的 daily_grant，且按到期时刻升序。
+//
+// 为什么必须升序：上游每日 300 分、7 天有效，消耗按先进先出（最老一笔先花），
+// 升序 = 消耗顺序，withDailyExpiry 的余额拆分依赖它。
+func TestFetchDailyGrants(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != EpPointsBills {
+			t.Errorf("路径不符：%s（应走 %s）", r.URL.Path, EpPointsBills)
+		}
+		if got := r.URL.Query().Get("paging.limit"); got == "" {
+			t.Error("缺少 paging.limit 分页参数（上游缺省 limit 很小）")
+		}
+		_, _ = w.Write([]byte(billsFixture))
+	}))
+	defer srv.Close()
+
+	c := New()
+	c.AuthBase = srv.URL
+	grants, err := c.fetchDailyGrants(&auth.Auth{AccessToken: "at-1", UID: "u1"})
+	if err != nil {
+		t.Fatalf("fetchDailyGrants: %v", err)
+	}
+	if len(grants) != 3 {
+		t.Fatalf("在效发放 = %d, want 3（daily_expire/desktop/reward_grant 都不算）: %+v", len(grants), grants)
+	}
+	for i := 1; i < len(grants); i++ {
+		if grants[i-1].ExpireAt >= grants[i].ExpireAt {
+			t.Fatalf("未按到期升序: %+v", grants)
+		}
+	}
+	if grants[0].Points != 300 {
+		t.Fatalf("金额丢失: %+v", grants[0])
+	}
+}
+
+// TestFetchDailyGrantsDropsExpired 已过期的发放必须剔除（否则「今日到期」恒为 0）。
+func TestFetchDailyGrantsDropsExpired(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"code":0,"data":{"items":[
+		 {"biz_type":"daily_grant","points":300,"expire_at":"2020-01-01T23:59:59+08:00"},
+		 {"biz_type":"daily_grant","points":300,"expire_at":"2099-01-01T23:59:59+08:00"}
+		]}}`))
+	}))
+	defer srv.Close()
+
+	c := New()
+	c.AuthBase = srv.URL
+	grants, err := c.fetchDailyGrants(&auth.Auth{AccessToken: "at-1"})
+	if err != nil {
+		t.Fatalf("fetchDailyGrants: %v", err)
+	}
+	if len(grants) != 1 || grants[0].ExpireAt != "2099-01-01T23:59:59+08:00" {
+		t.Fatalf("已过期发放未被剔除: %+v", grants)
+	}
+}
+
+// TestWithDailyExpiryFIFO 余额按到期升序逐笔扣减（先进先出），余量挂最后一笔。
+//
+// 这是本改动的**口径核心**：拆开后 Remain 之和必须恒等于 daily_points，
+// 否则 pool 快照与面板余额对不上（Summarize 直接求和）。
+func TestWithDailyExpiryFIFO(t *testing.T) {
+	items := parsePointsBalanceOnly(pointsBalanceData{
+		AvailablePoints: 1000, DailyPoints: 500, RewardPoints: 500,
+	})
+	grants := []dailyGrant{
+		{Points: 300, ExpireAt: "2026-10-21T23:59:59+08:00"},
+		{Points: 300, ExpireAt: "2026-10-22T23:59:59+08:00"},
+		{Points: 300, ExpireAt: "2026-10-23T23:59:59+08:00"},
+	}
+	got := withDailyExpiry(items, grants)
+
+	var daily []provider.ResourceItem
+	var sum int64
+	for _, it := range got {
+		if it.Name == dailyItemName {
+			daily = append(daily, it)
+			sum += it.Remain
+		}
+	}
+	if sum != 500 {
+		t.Fatalf("拆分后每日额度合计 = %d, want 500（必须等于 daily_points）", sum)
+	}
+	// 500 分池子 + 三笔 300：前两笔满额 300，最后一笔只剩 0 → 不产生空条目。
+	if len(daily) != 2 {
+		t.Fatalf("拆分条目 = %d, want 2（第三笔余额为 0 应省略）: %+v", len(daily), daily)
+	}
+	if daily[0].Remain != 300 || daily[0].ExpireAt != grants[0].ExpireAt {
+		t.Fatalf("第一笔应按最早到期满额: %+v", daily[0])
+	}
+	if daily[1].Remain != 200 {
+		t.Fatalf("第二笔应承接余量 200: %+v", daily[1])
+	}
+
+	// Summarize 必须仍等于可用余额（拆分对 pool 快照零影响）。
+	usable, _ := provider.Summarize(got)
+	if usable != 1000 {
+		t.Fatalf("Summarize 可用 = %d, want 1000", usable)
+	}
+}
+
+// TestWithDailyExpiryPoolExceedsGrants 上游口径漂移（池子比 bills 在效之和还大）时
+// 余量挂最后一笔，绝不丢余额。
+func TestWithDailyExpiryPoolExceedsGrants(t *testing.T) {
+	items := parsePointsBalanceOnly(pointsBalanceData{DailyPoints: 900})
+	grants := []dailyGrant{
+		{Points: 300, ExpireAt: "2026-10-21T23:59:59+08:00"},
+		{Points: 300, ExpireAt: "2026-10-22T23:59:59+08:00"},
+	}
+	got := withDailyExpiry(items, grants)
+	var sum int64
+	var n int
+	for _, it := range got {
+		if it.Name == dailyItemName {
+			sum += it.Remain
+			n++
+		}
+	}
+	if sum != 900 {
+		t.Fatalf("余量丢失：合计 %d, want 900", sum)
+	}
+	if n != 2 {
+		t.Fatalf("条目数 = %d, want 2", n)
+	}
+}
+
+// TestWithDailyExpirySharesOneLedgerKey 拆分条目必须共用同一个 ledger 差分键。
+//
+// 差分键 = Key（非空优先）else Name。所有拆分条目必须 Key 为空、Name 相同，
+// ledger 的按 key 聚合才会把它们合回「每日额度」一条 —— 与拆分前完全同键同值，
+// 升级零假流水；反之若给每条挂上不同的 Key（如拿到期时刻当 Key），一次刷新就会
+// 产出 N 条独立流水、快照留 N 条，升级瞬间还会凭空产生一批 earn。
+func TestWithDailyExpirySharesOneLedgerKey(t *testing.T) {
+	items := parsePointsBalanceOnly(pointsBalanceData{DailyPoints: 900})
+	grants := []dailyGrant{
+		{Points: 300, ExpireAt: "2026-10-21T23:59:59+08:00"},
+		{Points: 300, ExpireAt: "2026-10-22T23:59:59+08:00"},
+		{Points: 300, ExpireAt: "2026-10-23T23:59:59+08:00"},
+	}
+	got := withDailyExpiry(items, grants)
+	keys := map[string]bool{}
+	for _, it := range got {
+		if it.Name != dailyItemName {
+			continue
+		}
+		if it.Key != "" {
+			t.Fatalf("拆分条目不得设 Key（会拆散 ledger 差分键）: %+v", it)
+		}
+		keys[it.Name] = true
+	}
+	if len(keys) != 1 {
+		t.Fatalf("拆分条目应共用 1 个差分键，实际 %d 个: %v", len(keys), keys)
+	}
+}
+
+// TestWithDailyExpiryNoGrantsUnchanged bills 拿不到发放时原样返回（降级路径）。
+func TestWithDailyExpiryNoGrantsUnchanged(t *testing.T) {
+	items := parsePointsBalanceOnly(pointsBalanceData{DailyPoints: 300})
+	got := withDailyExpiry(items, nil)
+	if len(got) != len(items) {
+		t.Fatalf("无发放数据时不得改动条目: %+v", got)
+	}
+	for i := range got {
+		if got[i] != items[i] {
+			t.Fatalf("条目被改动: %+v", got[i])
+		}
+	}
+}
+
+// TestUserResourceDetailAttachesDailyExpiry 端到端：balance + bills 两次请求，
+// 每日额度条目带上逐笔到期时刻，其余池子不受影响。
+func TestUserResourceDetailAttachesDailyExpiry(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case EpPointsBalance:
+			_, _ = w.Write([]byte(`{"code":0,"message":"success","data":{"available_points":8100,` +
+				`"daily_points":2100,"monthly_points":0,"reward_points":6000,"topup_points":0,"topup_frozen":false}}`))
+		case EpPointsBills:
+			_, _ = w.Write([]byte(billsFixture))
+		default:
+			t.Errorf("意外路径: %s", r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	c := New()
+	c.AuthBase = srv.URL
+	remain, items, err := c.UserResourceDetail(&auth.Auth{AccessToken: "at-1", UID: "u1"})
+	if err != nil {
+		t.Fatalf("UserResourceDetail: %v", err)
+	}
+	if remain != 8100 {
+		t.Fatalf("remain = %d, want 8100", remain)
+	}
+	var dailyCount int
+	var dailySum int64
+	for _, it := range items {
+		if it.Name != dailyItemName {
+			continue
+		}
+		dailyCount++
+		dailySum += it.Remain
+		if it.ExpireAt == "" {
+			t.Fatalf("每日额度条目必须带到期时刻: %+v", it)
+		}
+	}
+	if dailySum != 2100 {
+		t.Fatalf("每日额度合计 = %d, want 2100", dailySum)
+	}
+	if dailyCount != 3 {
+		t.Fatalf("每日额度条目数 = %d, want 3（bills 里三笔在效发放）", dailyCount)
+	}
+	// 奖励积分不受影响（仍是一条聚合条目、无到期时刻）。
+	for _, it := range items {
+		if it.Name == "奖励积分" && (it.Remain != 6000 || it.ExpireAt != "") {
+			t.Fatalf("奖励积分不应被改动: %+v", it)
+		}
+	}
+}
+
+// TestUserResourceDetailBillsFailureDegrades bills 失败不得影响余额主流程。
+func TestUserResourceDetailBillsFailureDegrades(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case EpPointsBalance:
+			_, _ = w.Write([]byte(`{"code":0,"data":{"available_points":300,"daily_points":300}}`))
+		case EpPointsBills:
+			w.WriteHeader(http.StatusInternalServerError)
+			_, _ = w.Write([]byte(`{"code":500}`))
+		}
+	}))
+	defer srv.Close()
+
+	c := New()
+	c.AuthBase = srv.URL
+	remain, items, err := c.UserResourceDetail(&auth.Auth{AccessToken: "at-1", UID: "u1"})
+	if err != nil {
+		t.Fatalf("bills 失败不得让余额查询失败: %v", err)
+	}
+	if remain != 300 {
+		t.Fatalf("remain = %d, want 300", remain)
+	}
+	var found bool
+	for _, it := range items {
+		if it.Name == dailyItemName {
+			found = true
+			if it.Remain != 300 || it.ExpireAt != "" {
+				t.Fatalf("降级后应为原聚合条目（无到期时刻）: %+v", it)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("每日额度条目丢失")
+	}
+}
+
+// TestDailyItemNameStable 条目名是 ledger 差分键（Key 为空时退回 Name），不得改动。
+//
+// 改名 ⇒ 升级瞬间旧键「消失」记 expire、新键「出现」记 earn，凭空一对假流水（R105）。
+func TestDailyItemNameStable(t *testing.T) {
+	if dailyItemName != "每日额度" {
+		t.Fatalf("dailyItemName = %q，改了会换 ledger 差分键并产出假流水", dailyItemName)
+	}
+	items := parsePointsBalanceOnly(pointsBalanceData{DailyPoints: 1})
+	if items[0].Name != dailyItemName || items[0].Key != "" {
+		t.Fatalf("每日额度条目必须用稳定 Name 且不设 Key（否则拆分条目会被账本当多条）: %+v", items[0])
+	}
+}
+
+// parsePointsBalanceOnly 只取条目（忽略余额），测试可读性辅助。
+func parsePointsBalanceOnly(d pointsBalanceData) []provider.ResourceItem {
+	_, items := parsePointsBalance(d)
+	return items
+}

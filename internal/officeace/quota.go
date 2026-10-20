@@ -89,7 +89,7 @@ func (c *Client) subscriptionRemain(ac *Account) (int64, []provider.ResourceItem
 			exp := ""
 			if q.ExpiredTime != "" {
 				if t, ok := parseISO(q.ExpiredTime); ok {
-					exp = time.UnixMilli(t).In(expireLoc).Format("2006-01-02")
+					exp = time.UnixMilli(t).In(expireLoc).Format(time.RFC3339)
 				}
 			}
 			items = append(items, provider.ResourceItem{
@@ -113,7 +113,7 @@ func (c *Client) subscriptionRemain(ac *Account) (int64, []provider.ResourceItem
 		used += cv
 		exp := ""
 		if t, ok := parseISO(b.ExpiredTime); ok {
-			exp = time.UnixMilli(t).In(expireLoc).Format("2006-01-02")
+			exp = time.UnixMilli(t).In(expireLoc).Format(time.RFC3339)
 		}
 		items = append(items, provider.ResourceItem{
 			Name:     firstNonEmpty(b.ActivityName, "奖励"),
@@ -154,6 +154,11 @@ func (c *Client) fetchSubscription(ac *Account) (*subscription, error) {
 
 // gatewayBase 解析账号专属网关（**裸 host**）：配置里没有就读 client-permission-validate。
 // 返回前一律过 bareGateway：额度/签到端点直接拼 `/v1/subscription`，不得带 `/v2`（#152）。
+//
+// 合并 upstream/master 的说明：本函数原用 `gatewayRootOf`，与上游 `bareGateway` 是同一归一的
+// 两个名字（上游 issue #152 独立修掉了同一处缺陷）。合并时统一取上游名 `bareGateway`，
+// 并把本地版更严的「退化输入不产出空 base / 大小写不敏感」守卫并进该函数（见 account.go）。
+// 数据面由 `Account.dataBase()` 反向补 `/v2`。
 func (c *Client) gatewayBase(ac *Account) (string, error) {
 	if ac.BaseURL != "" {
 		return bareGateway(ac.BaseURL), nil
@@ -161,7 +166,7 @@ func (c *Client) gatewayBase(ac *Account) (string, error) {
 	// 无网关凭据时尝试用临时凭据问控制面。
 	base, _, err := c.clientPermissionValidate(ac)
 	if err != nil || base == "" {
-		return defaultGateway, nil
+		return bareGateway(defaultGateway), nil
 	}
 	return bareGateway(base), nil
 }

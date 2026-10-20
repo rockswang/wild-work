@@ -81,9 +81,13 @@ type Status struct {
 	LastCheckinMsg string            `json:"last_checkin_msg,omitempty"`
 	// SessionDead 登录态失效（401/登录已失效）：挑号跳过 + 面板「需重新登录」徽标（#134）。
 	// 与 Disabled（用户手动停用）分离，避免机器状态混入用户控制项。
-	SessionDead       bool      `json:"session_dead,omitempty"`
-	SessionDeadReason string    `json:"session_dead_reason,omitempty"`
-	SessionDeadAt     time.Time `json:"session_dead_at,omitempty"`
+	SessionDead       bool   `json:"session_dead,omitempty"`
+	SessionDeadReason string `json:"session_dead_reason,omitempty"`
+	// SessionDeadAt 标记**首次**进入失效态的时刻，是「重登后自动清除」的时间锚
+	// （clearReloggedLocked 比较 auth 文件 mtime 与它）。已标记时不得刷新成 now，
+	// 否则重登后再一次陈旧凭证失败就会把锚顶到文件之后 ⇒ 永不清除（#134 死锁）。
+	// 导出到 Status 只有一个用途：让上述约束可被回归测试直接断言。
+	SessionDeadAt time.Time `json:"session_dead_at,omitempty"`
 }
 
 // modelCool 模型级冷却记录：该账号在单个模型上的限流/不可用。
@@ -418,7 +422,11 @@ func (p *Pool) ReenableIfCredits(uid string, remain, expiring, unusable int64) {
 func (p *Pool) RecordCheckin(uid string, ok bool, msg string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if e, ok := p.byUID[uid]; ok {
+	// ⚠️ 这里的第二个返回值**不能**命名为 ok：那会遮蔽同名参数 ok bool（issue #157），
+	// 使 e.lastCheckinOK 恒写 true、`if ok` 恒成立（每次都清掉 session_dead）、
+	// 且 `else if sessionDeadLike(msg)` 成为死代码 ⇒ 失效账号永远不显示「需重新登录」。
+	// 全仓同名遮蔽仅此一处（其余 `if e, ok := ...` 所在函数没有名为 ok 的参数）。
+	if e, found := p.byUID[uid]; found {
 		e.lastCheckinOK = ok
 		e.lastCheckinAt = time.Now()
 		e.lastCheckinMsg = msg
@@ -428,10 +436,16 @@ func (p *Pool) RecordCheckin(uid string, ok bool, msg string) {
 			e.sessionDeadReason = ""
 			e.sessionDeadAt = time.Time{}
 		} else if sessionDeadLike(msg) {
-			// 401/登录失效形态：标记待重登（面板徽标 + 重新登录入口）
+			// 401/登录失效形态：标记待重登（面板徽标 + 重新登录入口）。
+			// sessionDeadAt 只在「首次进入失效态」时写：它是重登后自动清除的时间锚
+			// （clearReloggedLocked 比较 auth 文件 mtime），若每次失败都刷新成 now，
+			// 重登后再来一次陈旧凭证的失败就会把锚推到文件之后 ⇒ 永不清除（#134 死锁）。
+			// 与 MarkSessionDead 同口径。
+			if !e.sessionDead {
+				e.sessionDeadAt = time.Now()
+			}
 			e.sessionDead = true
 			e.sessionDeadReason = msg
-			e.sessionDeadAt = time.Now()
 		}
 	}
 	p.saveLocked()
@@ -449,18 +463,30 @@ func sessionDeadLike(msg string) bool {
 // MarkSessionDead 标记账号登录态失效（401/登录已失效）：挑号阶段跳过、面板显示
 // 「需重新登录」徽标与一键重新登录入口（#134）。与 Disable（用户手动停用）分离，
 // 避免机器状态混入用户控制项后用户看不出该做什么。
+//
+// 已标记时**也要更新原因**（issue #157 附带瑕疵）：失效原因会演进
+// （如从 `refresh: xxx` 变成上游 `12153:refresh token is invalid`），旧实现直接 return
+// 会让面板 tooltip 永远显示首次的旧原因。但 `sessionDeadAt` **不刷新**——它是
+// 「重登后自动清除」的时间锚（clearReloggedLocked 比较 auth 文件 mtime 与它）：
+// 若反复刷新成 now，用户重登后再被陈旧内存凭证标一次，就会变成「文件比标记旧」
+// 而永不清除，重回路 #134 的死锁。
 func (p *Pool) MarkSessionDead(uid, reason string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	e, ok := p.byUID[uid]
-	if !ok || e.sessionDead {
+	if !ok {
 		return
 	}
+	if !e.sessionDead {
+		e.sessionDeadAt = time.Now()
+	}
+	changed := !e.sessionDead || e.sessionDeadReason != reason
 	e.sessionDead = true
 	e.sessionDeadReason = reason
-	e.sessionDeadAt = time.Now()
 	p.saveLocked()
-	log.Printf("session dead marked uid=%s reason=%s", uid, reason)
+	if changed {
+		log.Printf("session dead marked uid=%s reason=%s", uid, reason)
+	}
 }
 
 // ClearSessionDead 清除登录态失效标记（重新登录成功/签到或请求成功后回到可用态）。

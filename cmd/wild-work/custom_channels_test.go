@@ -10,27 +10,20 @@ import (
 
 func TestBuildCustomRuntimes(t *testing.T) {
 	stateDir := t.TempDir()
-	enabled := true
-	disabled := false
 
+	// R83 起 ChannelConfig 没有 enabled 字段：列表里的渠道一律装配。
 	channels := []custom.ChannelConfig{
 		{
 			Name:    "stepfun",
 			BaseURL: "https://api.stepfun.com/step_plan/v1",
 			APIKey:  "key-step",
 			Models:  []custom.ModelConfig{{ID: "step-5-preview"}},
-			Enabled: &enabled,
-		},
-		{
-			Name:    "offchan",
-			BaseURL: "http://127.0.0.1:8000/v1",
-			Enabled: &disabled,
 		},
 	}
 
 	sRts, aRts, names := buildCustomRuntimes(channels, stateDir)
 	if len(sRts) != 1 || len(aRts) != 1 || len(names) != 1 {
-		t.Fatalf("expected 1 enabled custom runtime, got s=%d, a=%d, names=%v", len(sRts), len(aRts), names)
+		t.Fatalf("expected 1 custom runtime, got s=%d, a=%d, names=%v", len(sRts), len(aRts), names)
 	}
 
 	k := provider.Kind("stepfun")

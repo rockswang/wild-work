@@ -54,9 +54,17 @@ func writeFakeCLIPackage(t *testing.T, dir string) {
 
 // TestCLIRootsIncludesWindowsNpxCache Windows 的 npx 缓存位置必须进候选表。
 //
-// 实测证据：本机 `~/.npm` 目录**不存在**，而 `%LOCALAPPDATA%\npm-cache\_npx` 存在。
+// 实测证据（2026-10-17）：本机 `~/.npm` 目录**不存在**，而 `%LOCALAPPDATA%\npm-cache\_npx` 存在。
 // 旧代码只查 `~/.npm/_npx` ⇒ Windows 上「npx 跑过的 CLI」这条来源等于白写。
+//
+// ⚠️ **只在 Windows 跑**（issue #160 附带发现）：`cliRoots()` 里这条路径带
+// `runtime.GOOS == "windows"` 门控（非 Windows 上根本不该出现，见
+// TestCLIRootsWindowsOnlyPositions），所以在 Linux/macOS 上本用例**恒红** —— 那不是缺陷，
+// 是用例没自洽。这里改为非 Windows 直接 skip，两边语义一致。
 func TestCLIRootsIncludesWindowsNpxCache(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("Windows 专属路径：非 Windows 上 cliRoots 故意不返回 npm-cache（见 TestCLIRootsWindowsOnlyPositions）")
+	}
 	localApp := t.TempDir()
 	t.Setenv("LOCALAPPDATA", localApp)
 	t.Setenv("APPDATA", t.TempDir())

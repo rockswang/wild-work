@@ -15,6 +15,8 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/http/cookiejar"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -51,6 +53,9 @@ type Client struct {
 
 	Base string
 
+	// jarURL jar 注入业务 cookie 的目标 URL（与 Base 同源；NewWithBase 覆盖时同步更新）。
+	jarURL *url.URL
+
 	// mu 保护 accessToken 缓存（多账号并发刷新）。
 	mu sync.Mutex
 	// accessTokens 按 refresh_token 缓存 access_token，避免同一账号并发重复刷新。
@@ -65,6 +70,11 @@ type cachedToken struct {
 }
 
 // New 生产默认客户端。
+//
+// HTTP 与 StreamHTTP **共享同一个 cookie jar**：清言走阿里云 WAF，POST 类接口依赖
+// acw_tc/cdn_sec_tc 链路（首次请求由响应 Set-Cookie 下发，后续请求必须带回）。
+// 显式拼 Cookie 头会覆盖 jar 导致 WAF cookie 丢失 → 持续 40012，故业务 cookie
+// （chatglm_token 等）也走 jar 注入（见 syncCookies），绝不手写 Cookie 头。
 func New() *Client {
 	dialer := &net.Dialer{Timeout: 10 * time.Second, KeepAlive: 15 * time.Second}
 	tr := &http.Transport{
@@ -76,12 +86,18 @@ func New() *Client {
 		IdleConnTimeout:       30 * time.Second,
 		ResponseHeaderTimeout: requestTimeout,
 	}
+	jar, err := cookiejar.New(nil)
+	if err != nil { // cookiejar.New 只在 options 非法时报错，nil options 恒成功
+		panic("glm: 初始化 cookie jar 失败: " + err.Error())
+	}
+	base, _ := url.Parse(Base)
 	return &Client{
-		HTTP: &http.Client{Timeout: requestTimeout, Transport: tr},
-		// 流式 client：**共用同一 Transport**（复用连接池），但不设 Client.Timeout。
-		StreamHTTP:   &http.Client{Transport: tr},
+		HTTP: &http.Client{Timeout: requestTimeout, Transport: tr, Jar: jar},
+		// 流式 client：**共用同一 Transport（连接池）与同一 jar**，但不设 Client.Timeout。
+		StreamHTTP:   &http.Client{Transport: tr, Jar: jar},
 		IdleTimeout:  idle.DefaultTimeout, // 流中空闲监控兜底（见 internal/idle）
 		Base:         Base,
+		jarURL:       base,
 		accessTokens: map[string]cachedToken{},
 	}
 }
@@ -90,6 +106,9 @@ func New() *Client {
 func NewWithBase(base string) *Client {
 	c := New()
 	c.Base = base
+	if u, err := url.Parse(base); err == nil {
+		c.jarURL = u // jar 的 cookie 作用域跟随测试基址（httptest server）
+	}
 	return c
 }
 
@@ -125,17 +144,41 @@ func (e *envelope) errText() string {
 
 // signedDo 发一个带签名头的请求并返回原始响应。
 // body 为 nil 表示无请求体。accept 传 SSE 用于对话流接口。
+// token 是 access_token（refresh 交换也走这里，Authorization=refresh 是唯一例外 [实证]）。
 func (c *Client) signedDo(ctx context.Context, method, path, token, accept string, body []byte) (*http.Response, error) {
 	var rdr io.Reader
 	if body != nil {
 		rdr = bytes.NewReader(body)
 	}
+	c.syncCookies(token)
 	req, err := http.NewRequestWithContext(ctx, method, c.base()+path, rdr)
 	if err != nil {
 		return nil, err
 	}
-	applySignedHeaders(req, token, accept)
+	for k, v := range ideHeaders(token, accept, jwtDeviceID(token)) {
+		req.Header.Set(k, v)
+	}
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json;charset=UTF-8")
+	}
 	return c.HTTP.Do(req)
+}
+
+// syncCookies 把业务 cookie 写进 jar（每次请求前调用，幂等）。
+// 实证（PROTOCOL §1.1）：access 同时放在 Authorization 与 chatglm_token cookie，
+// 二者逐字节相同；chatglm_user_id 是账号主键。WAF cookie 由 jar 随响应自动回带。
+// token 为空时跳过（不清 jar —— 保留已拿到的 WAF cookie）。
+func (c *Client) syncCookies(token string) {
+	if token == "" || c.jarURL == nil || c.HTTP.Jar == nil {
+		return
+	}
+	ck := []*http.Cookie{
+		{Name: "chatglm_token", Value: token, Domain: "chatglm.cn", Path: "/"},
+	}
+	if uid := jwtUID(token); uid != "" {
+		ck = append(ck, &http.Cookie{Name: "chatglm_user_id", Value: uid, Domain: "chatglm.cn", Path: "/"})
+	}
+	c.HTTP.Jar.SetCookies(c.jarURL, ck) // cookiejar.SetCookies 只在 URL 非法时报错，此处恒成功
 }
 
 // doJSON 发请求并把信封解成 result。
@@ -418,15 +461,11 @@ func (c *Client) refresh(ctx context.Context, refreshToken string) (refreshResul
 	}, nil
 }
 
-// jwtExpiry 解出 access_token 的 JWT payload 里的 exp（Unix 秒）。
-// 非 JWT / 无 exp / 解析失败时返回 0。
-//
-// 不校验签名：用途仅是从本地凭证自身的 payload 读出自报到期时刻。
-// 清言的 access_token 实测是标准 JWT（3 段），exp 可信。
-func jwtExpiry(token string) int64 {
+// jwtPayload 解 JWT payload（不验签，仅本地读字段）。非 JWT 返回 nil。
+func jwtPayload(token string) map[string]any {
 	parts := strings.Split(token, ".")
 	if len(parts) < 2 {
-		return 0
+		return nil
 	}
 	p := parts[1]
 	if r := len(p) % 4; r != 0 {
@@ -434,15 +473,46 @@ func jwtExpiry(token string) int64 {
 	}
 	raw, err := base64.URLEncoding.DecodeString(p)
 	if err != nil {
-		return 0
+		return nil
 	}
-	var payload struct {
-		Exp int64 `json:"exp"`
-	}
+	var payload map[string]any
 	if json.Unmarshal(raw, &payload) != nil {
-		return 0
+		return nil
 	}
-	return payload.Exp
+	return payload
+}
+
+// jwtExpiry 解出 token 的 JWT payload 里的 exp（Unix 秒）。
+// 非 JWT / 无 exp / 解析失败时返回 0。
+//
+// 不校验签名：用途仅是从本地凭证自身的 payload 读出自报到期时刻。
+// 清言的 access_token 实测是标准 JWT（3 段），exp 可信。
+func jwtExpiry(token string) int64 {
+	if p := jwtPayload(token); p != nil {
+		if v, ok := p["exp"].(float64); ok {
+			return int64(v)
+		}
+	}
+	return 0
+}
+
+// jwtDeviceID 取 JWT payload 的 device_id（IDE 客户端的 X-Device-Id 与 UA DeviceId 段用）。
+// refresh_token 与 access_token 的 payload 都带 device_id，两者皆可。
+func jwtDeviceID(token string) string {
+	if p := jwtPayload(token); p != nil {
+		s, _ := p["device_id"].(string)
+		return s
+	}
+	return ""
+}
+
+// jwtUID 取 JWT payload 的 uid（账号主键，cookie chatglm_user_id 用）。
+func jwtUID(token string) string {
+	if p := jwtPayload(token); p != nil {
+		s, _ := p["uid"].(string)
+		return s
+	}
+	return ""
 }
 
 // acquireToken 返回可用的 access_token。
@@ -613,8 +683,10 @@ func (c *Client) Classify(status int, body string) provider.ErrKind {
 //
 // 判据顺序（对齐 wild-work 不变量 15：429 必须优先于余额类判据）：
 //   - 40102 / 401 → ErrSessionDead（可 refresh 自愈，调度器会重试）
+//   - 40012 → ErrSoftRate（阿里云 WAF 瞬时拒绝；IDE 链路实测不出现，出现即软冷却换号）
 //   - 429 → ErrSoftRate
 //   - 403 → ErrWafBlock（WAF 拦截页，账号软冷却）
+//   - glm_unsupported_conversation → ErrBadParams（本包拒绝的不支持形态，透传不罚号）
 //   - 5xx → ErrServer
 //   - 其余 4xx → ErrClient
 func Classify(status int, body string) provider.ErrKind {
@@ -622,10 +694,16 @@ func Classify(status int, body string) provider.ErrKind {
 	switch {
 	case status == http.StatusUnauthorized || strings.Contains(body, "40102"):
 		return provider.ErrSessionDead
+	case strings.Contains(body, "40012"):
+		return provider.ErrSoftRate
 	case status == http.StatusTooManyRequests:
 		return provider.ErrSoftRate
 	case status == http.StatusForbidden:
 		return provider.ErrWafBlock
+	case strings.Contains(lower, "glm_unsupported_conversation"):
+		// ChatStream 本地拒绝（不支持多轮/tool_calls）构造的 400 错误体：
+		// 请求形态问题，与账号健康无关，handler 对 ErrBadParams 原文透传。
+		return provider.ErrBadParams
 	case status >= 500:
 		return provider.ErrServer
 	case status >= 400:

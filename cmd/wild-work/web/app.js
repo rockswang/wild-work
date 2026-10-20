@@ -1169,6 +1169,13 @@ async function startLogin(channel, accountLabel) {
     }
     $("loginOverlay").classList.remove("hidden");
     $("btnCopyUrl").dataset.url = url;
+    // 只给链接、不跑流程的渠道（GLM：凭据靠用户从 Cookie 取出后粘贴）：
+    // 后端在响应里下发 needs_poll=false，此时**不得**启轮询 —— 轮询读到 login_busy=false
+    // 会立刻提示「登录完成，正在同步账号…」，而实际什么都没发生（H9 假成功）。
+    if (r.needs_poll === false) {
+      $("loginMsg").textContent = `请在上面的链接里登录后，从浏览器 Cookie 取出凭据并粘贴到下方完成添加（${chLabel(channel)} 无编程式登录）。`;
+      return;
+    }
     startLoginPoll();
   } catch (e) {
     toast(e.message);

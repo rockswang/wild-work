@@ -90,36 +90,41 @@ func TestLoomyCheckinWiring(t *testing.T) {
 		t.Error("❌ app.go 未调用 firstCheckinLoomy —— Loomy 登录成功后不做首次领取")
 	}
 
-	// ⑥ CancelLogin 里每个渠道的关闭分支必须**平铺在函数体同一层**（1 个 Tab）。
-	//    本轮真实踩到：Loomy 的 Shutdown 被误插进 Raccoon 的 if 块内部 ⇒ 只有取消
-	//    小浣熊登录时才会执行，取消 Loomy 时引导页不关（端口/页面残留）。编译与
-	//    「日志看起来正常」都发现不了，只有看缩进/嵌套层级才看得出来，故静态锁死。
-	assertCancelLoginFlat(t, string(appSrc))
+	// ⑥ 取消登录时必须释放各渠道占用的本机资源。
+	//    本轮真实踩到（改造前）：Loomy 的 Shutdown 被误插进 Raccoon 的 if 块内部 ⇒ 只有
+	//    取消小浣熊登录时才会执行，取消 Loomy 时引导页不关（端口/页面残留）。编译与
+	//    「日志看起来正常」都发现不了。
+	//    2026-10-18 收表后，CancelLogin 不再有逐渠道 if（统一查 loginFlows 的 Shutdown），
+	//    这类「插错嵌套层级」缺陷结构上已不可能发生；断言改为直接验证表内容。
+	assertLoginShutdownWired(t, string(appSrc))
 }
 
-// assertCancelLoginFlat 断言 CancelLogin 内所有 `if kind == provider.X {` 都在函数体一级。
-func assertCancelLoginFlat(t *testing.T, src string) {
+// assertLoginShutdownWired 断言「取消登录时会释放本机资源」的渠道都在表里登记了 Shutdown。
+//
+// 改造前用「CancelLogin 里 if 的缩进层级」来判断是否漏关（因为那时是 6 个平铺 if，
+// 插错一层就漏关）。收表后该结构消失，等价的不变式变成：凡是 start 时会占用本机资源
+// （浏览器 / 127.0.0.1 回调监听）的渠道，其 loginFlow.Shutdown 必须非 nil。
+func assertLoginShutdownWired(t *testing.T, src string) {
 	t.Helper()
-	start := strings.Index(src, "func (a *App) CancelLogin()")
-	if start < 0 {
-		t.Fatal("未找到 CancelLogin")
+	if !strings.Contains(src, "a.shutdownLoginFlow(") {
+		t.Fatal("❌ CancelLogin/pollLogin 未调用 shutdownLoginFlow —— 取消登录时不释放资源")
 	}
-	rest := src[start:]
-	// 函数体到下一个顶层 func 为止（够用：CancelLogin 之后紧跟另一个 func）。
-	if i := strings.Index(rest[1:], "\nfunc "); i > 0 {
-		rest = rest[:i+1]
-	}
-	// 注意 `\s*$`：工作区是 CRLF，行尾有 `\r`，写成 `\{$` 会一个都匹配不到
-	//（这个断言本身踩过一次，故留注释）。
-	re := regexp.MustCompile(`(?m)^(\t*)if kind == provider\.\w+ \{\s*$`)
-	matches := re.FindAllStringSubmatch(rest, -1)
-	if len(matches) == 0 {
-		t.Fatal("CancelLogin 里没找到任何 `if kind == provider.X {` —— 结构变了，请更新本断言")
-	}
-	for _, m := range matches {
-		if len(m[1]) != 1 {
-			t.Errorf("❌ CancelLogin 里有分支缩进 %d 个 Tab（应为 1）—— "+
-				"它被嵌进了别的渠道的 if 块里，只有那个渠道取消时才会跑", len(m[1]))
+	// 已知占用本机资源的渠道清单（新增此类渠道时必须同时登记 Shutdown）。
+	for _, k := range []provider.Kind{
+		provider.Raccoon,   // 独立 profile 的浏览器
+		provider.Loomy,     // 127.0.0.1 登录引导页
+		provider.LobsterAI, // 127.0.0.1 回调监听
+		provider.Gemini,    // loopback OAuth 监听
+		provider.CodeArts,  // PKCE 回调监听
+		provider.QwenWork,  // 本机回调 server
+	} {
+		f, ok := loginFlows[k]
+		if !ok {
+			t.Errorf("❌ loginFlows 未登记 provider.%s", k)
+			continue
+		}
+		if f.Shutdown == nil {
+			t.Errorf("❌ provider.%s 的 loginFlow 没有 Shutdown —— 取消登录时它占用的本机资源不会被释放", k)
 		}
 	}
 }

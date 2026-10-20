@@ -325,38 +325,45 @@ func TestResolveAssistant(t *testing.T) {
 	}
 }
 
-// TestBuildGLMMessages 校验 OpenAI → 清言消息合并。
-func TestBuildGLMMessages(t *testing.T) {
-	msgs := []any{
+// TestExtractSingleUserPrompt 校验 OpenAI → glm 单条 user 提问的提取语义（2026-10-20 简化决议）：
+// 忽略 system；assistant/多 user 直接报错；非文本段剥离。
+func TestExtractSingleUserPrompt(t *testing.T) {
+	// ✅ 单 user + 忽略 system + 剥离 image_url
+	prompt, err := extractSingleUserPrompt([]any{
 		map[string]any{"role": "system", "content": "你是助手"},
-		map[string]any{"role": "user", "content": "你好"},
-		map[string]any{"role": "assistant", "content": "你好呀"},
 		map[string]any{"role": "user", "content": []any{
-			map[string]any{"type": "text", "text": "继续"},
+			map[string]any{"type": "text", "text": "你好"},
 			map[string]any{"type": "image_url", "image_url": map[string]any{"url": "http://x"}},
 		}},
-	}
-	out, err := buildGLMMessages(msgs)
+	})
 	if err != nil {
-		t.Fatalf("buildGLMMessages: %v", err)
+		t.Fatalf("extractSingleUserPrompt: %v", err)
 	}
-	if len(out) != 1 {
-		t.Fatalf("消息数 = %d, want 1（全部合并为一条）", len(out))
+	if prompt != "你好" {
+		t.Errorf("prompt = %q, want %q（system 忽略、图像段剥离）", prompt, "你好")
 	}
-	text := out[0].Content[0].Text
-	for _, want := range []string{"<|sytstem|>", "<|user|>", "<|assistant|>", "你是助手", "你好", "继续"} {
-		if !strings.Contains(text, want) {
-			t.Errorf("合并文本缺少 %q: %q", want, text)
-		}
-	}
-	if strings.Contains(text, "http://x") {
-		t.Error("图像段不应进入文本")
-	}
-}
 
-// TestBuildGLMMessagesEmpty 空消息必须报错而非发出空请求。
-func TestBuildGLMMessagesEmpty(t *testing.T) {
-	if _, err := buildGLMMessages(nil); err == nil {
+	// ❌ assistant 段落报错（多轮/tool_calls 历史都不接受）
+	if _, err := extractSingleUserPrompt([]any{
+		map[string]any{"role": "user", "content": "你好"},
+		map[string]any{"role": "assistant", "content": "你好呀"},
+	}); err == nil {
+		t.Error("assistant 段落应报错")
+	}
+
+	// ❌ 多个 user 段落报错
+	if _, err := extractSingleUserPrompt([]any{
+		map[string]any{"role": "user", "content": "第一问"},
+		map[string]any{"role": "user", "content": "第二问"},
+	}); err == nil {
+		t.Error("多个 user 段落应报错")
+	}
+
+	// ❌ 无 user 消息报错
+	if _, err := extractSingleUserPrompt([]any{map[string]any{"role": "system", "content": "x"}}); err == nil {
+		t.Error("无 user 消息应报错")
+	}
+	if _, err := extractSingleUserPrompt(nil); err == nil {
 		t.Error("空消息应报错")
 	}
 }

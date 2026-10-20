@@ -36,8 +36,19 @@ type Runtime struct {
 	// NoCooldownOnServerError 声明该渠道的上游 5xx 属于网关/基础设施抖动
 	// （账号本身健康），不应计入账号错误触发冷却。
 	// WorkBuddy 国际版开启（其 openresty 网关实测间歇性 502/503/504）。
-	// 其余渠道保持 false，行为不变。
+	//
+	// ⚠️ 2026-10-18 起本字段**不再决定计数行为**（5xx 已默认不计数，见
+	// CountServerErrorAsAccountFault），仅保留作渠道差异的文档标注。
 	NoCooldownOnServerError bool
+
+	// CountServerErrorAsAccountFault 显式要求「本渠道的上游 5xx 计入账号错误」。
+	//
+	// 默认 false（5xx 不计入账号错误）：5xx 的语义是服务端故障，与客户端凭据健康无关。
+	// 曾经的默认行为是「计入」，导致一次上游 500 风暴把整池健康账号打成
+	// consecutive errors 冷却 10 分钟，整条渠道 503（2026-10-18 lobsterai 实测）。
+	//
+	// 仅当某渠道**确实用 5xx 表达账号级封禁/欠费**时才置 true —— 当前无一渠道如此。
+	CountServerErrorAsAccountFault bool
 
 	// SingleAccount 声明该渠道只有唯一一个、且**无法人工恢复**的账号（当前仅 oczen 匿名）。
 	// 语义：任何账号级惩罚（冷却/计数/禁用）都等价于「整条渠道下线」，故一律不适用——
@@ -223,6 +234,8 @@ func NewHandler(cfg Config) *Handler {
 	}
 	h := &Handler{cfg: cfg, mux: http.NewServeMux(), sticky: make(map[string]*stickyEntry), ledger: cfg.Ledger, stats: cfg.Stats, fallbacks: cfg.ModelFallbacks, efforts: cfg.ReasoningEfforts}
 	h.mux.HandleFunc("POST /v1/chat/completions", h.withAuth(h.chatCompletions))
+	h.mux.HandleFunc("POST /v1/images/generations", h.withAuth(h.imagesGenerations))
+	h.mux.HandleFunc("POST /v1/images/edits", h.withAuth(h.imagesEdits))
 	h.mux.HandleFunc("GET /v1/models", h.withAuth(h.models))
 	h.mux.HandleFunc("GET /status", h.withAuth(h.status))
 	h.mux.HandleFunc("GET /healthz", h.healthz)
@@ -280,10 +293,19 @@ func (h *Handler) pickWithSticky(rt *Runtime, model string) *auth.Auth {
 			status, ok := rt.Pool.Status(stickyUID)
 			// 模型级冷却同样参与判定：A 在 flash 上被限流时，flash 的粘性记录必须失效，
 			// 否则会一直粘着打不通的账号；luna 的粘性记录独立，不受影响。
-			if ok && !status.Cooling && !status.Disabled && !modelCooling(status, model) {
+			// ⚠️ 2026-10-18 补 SessionDead：本判据曾只查 Cooling/Disabled/模型级冷却，
+			// 而 `healthy()`（pool.go:103）明确把 sessionDead 也算不健康。
+			// 粘性路由直接调 AuthByUID、**绕过了 healthy()**，于是登录态已失效的账号
+			// 仍被粘住 ⇒ 每个请求都白打一次必 401 的上游探测。
+			// （MonkeyCode 实测：全日志 16 条 session_dead 401，且一次刷新都没发起。）
+			if ok && !status.Cooling && !status.Disabled && !status.SessionDead && !modelCooling(status, model) {
 				log.Printf("sticky route platform=%s model=%s uid=%s count=%d/%d",
 					rt.Kind, model, stickyUID, stickyCount, stickyMaxReqs)
 				return acct
+			}
+			if ok && status.SessionDead {
+				log.Printf("sticky route skipped platform=%s uid=%s reason=session_dead",
+					rt.Kind, stickyUID)
 			}
 		}
 	}
@@ -331,31 +353,6 @@ func (h *Handler) evictStickyLocked() {
 	for i := 0; i < len(all)-maxStickyEntries; i++ {
 		delete(h.sticky, all[i].key)
 	}
-}
-
-// recoverSession 遇上游 ErrSessionDead 时先试一次 token refresh（不变量 19）。
-//
-// 为什么不能在 handler 里直接 Disable：本地 expiresAt 与上游真实状态可能不同步——
-// 同一账号在另一实例/官方客户端刷新过（refresh token 轮换）但本进程未落盘时，
-// 本地看起来完全健康，上游却已拒绝旧 access token。此时 refresh 一步就能救回，
-// 直接 Disable 会把一个完全正常的账号永久停掉（需人工重登）。
-// 只有 refresh 也失败（会话真被吊销，如 invalid_grant）才回到 Disable 路径。
-//
-// 成功必须 SaveAtomic：refresh token 会轮换，不落盘则下次启动重回死锁（不变量 20）。
-func (h *Handler) recoverSession(rt *Runtime, acct *auth.Auth, respBody []byte) bool {
-	if acct == nil || acct.RefreshTokenValue() == "" {
-		return false
-	}
-	log.Printf("session dead, refreshing platform=%s uid=%s body=%s", rt.Kind, acct.UID, truncateBody(respBody))
-	if err := rt.Upstream.RefreshToken(acct); err != nil {
-		log.Printf("session dead refresh failed platform=%s uid=%s err=%v", rt.Kind, acct.UID, err)
-		return false
-	}
-	if serr := acct.SaveAtomic(); serr != nil {
-		log.Printf("session dead refresh save failed platform=%s uid=%s err=%v", rt.Kind, acct.UID, serr)
-	}
-	log.Printf("session dead recovered platform=%s uid=%s expires_at=%d", rt.Kind, acct.UID, acct.ExpiresAt)
-	return true
 }
 
 // stickySuccess 粘性路由成功：递增请求计数并刷新最近使用时间。
@@ -722,7 +719,8 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	// dispModel=写进响应的模型名（无降级=客户端请求名，保持官方「回填请求名」语义；降级=备胎全路径，
 	// agent 读 chunk.model / resp.model 即可感知实际执行模型）。
 	var fbApplied string
-	fbID, primaryAvail := h.pickModelFallback(rt, model)
+	// skipSameChannel=false：入口降级不限制渠道（见请求内重入点的理由）。
+	fbID, primaryAvail := h.pickModelFallback(rt, model, false)
 	// 口径说明：降级期间 ledger/stats 的 token 流水按**实际执行模型**记账
 	// （statRow.Model、AddUsage(acctModel)、ledgerModelOf(acctModel)）——谁实际工作、
 	// 谁实际消耗 token/积分，就记在谁名下（2026-10-16 口径变更，推翻原「按客户端
@@ -806,15 +804,32 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		if res.done {
 			return
 		}
-		// 候选耗尽待透传（res.lastStatus>0）：方案 B 判定——只对积分耗尽
-		// （ErrHardCredit：账号刚进 12h 硬冷却，本渠道容量已翻 false，此刻
-		// pickModelFallback 必然命中规则或返回空）；仅重入一次（防备胎再降备胎
-		// 死循环）；单账号渠道豁免（透传是惩罚豁免不变量的设计约束）；此刻未写过
-		// 任何字节（轮转失败路径天然成立——所有写出都发生在成功流式/非流式分支
-		// 内），降级头可安全补发；无规则/备胎无容量 → fb2 为空，维持原样透传，
-		// 与现状一致。
-		if fbAttempt == 0 && res.lastKind == provider.ErrHardCredit && !rt.SingleAccount {
-			if fb2, _ := h.pickModelFallback(rt, model); fb2 != "" {
+		// 候选耗尽待透传（res.lastStatus>0）：方案 B 判定——对两类「本渠道确实
+		// 顶不住」的错误就地换模型：
+		//   ① ErrHardCredit（积分耗尽）：账号刚进 12h 硬冷却，本渠道容量已翻 false；
+		//   ② ErrSoftRate（模型饱和）：14003「Model busy」/6004「usage exceeds
+		//      frequency limit」——上游明确按模型限额并建议「switch to the other
+		//      models」，本渠道全部账号对该模型都在模型级冷却，轮转已无可选号。
+		// 为什么 ② 必须纳入（2026-10-17 生产实录）：14003 被 Classify 判软限流后
+		// 只冷「账号×模型」60s，而请求内降级原先只认 ErrHardCredit ⇒ 饱和时段的
+		// **第一个**请求必然把 429 原样抛给客户端，第二个请求才由入口降级链顶上
+		// （app.log 20:46:00 吃 429、20:46:01 降级成功，同一分钟后续 8 个请求全绿）。
+		// 账号级 429 也会因此换模型：比让客户端直接失败更友好，代价是可能多烧
+		// 备胎额度——已由用户裁决接受。
+		// 仅重入一次（防备胎再降备胎死循环）；单账号渠道豁免（透传是惩罚豁免
+		// 不变量的设计约束）；此刻未写过任何字节（轮转失败路径天然成立——所有
+		// 写出都发生在成功流式/非流式分支内），降级头可安全补发；无规则/备胎无
+		// 容量 → fb2 为空，维持原样透传，与现状一致。
+		if fbAttempt == 0 && fallbackWorthy(res.lastKind) && !rt.SingleAccount {
+			// 请求内重入只跨渠道（skipSameChannel=true）：同渠道兄弟模型走的是同一批
+			// 账号，若本轮 429 其实是账号级限流（traework/qwenwork/qodercn/qodercom
+			// 等渠道把任意 429 都归 ErrSoftRate），再打一遍同一批账号必然二次撞墙；
+			// 且该账号第二个模型也撞墙后，pool 会把「模型级冷却」升级为「账号级冷却」
+			// ——冷却时长取已有条目的最晚到期时刻（不延长），变的是粒度：可用容量从
+			// 「1 个模型格子」缩到「0，整号对所有模型下线」。
+			// 入口降级不设此限：那里「该模型已全冷」是既有事实，换同渠道兄弟模型
+			// 正是降级链配置的本意（上游配额按模型计，模型 A 冷不代表模型 B 冷）。
+			if fb2, _ := h.pickModelFallback(rt, model, true); fb2 != "" {
 				if rt2, m2, err2 := h.runtimeForModel(fb2); err2 == nil {
 					nb, err3 := rewriteModel(body, m2)
 					if err3 == nil {
@@ -845,12 +860,25 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 
 // rotationResult：serveRotation 的判定结果。done=true=响应已完整写回（成功/请求级
 // 错误/耗尽诊断引导），调用方直接收尾；done=false 且 lastStatus>0=候选耗尽待透传，
-// 由调用方决定原样透传还是按降级链请求内重入（方案 B，只认 ErrHardCredit）。
+// 由调用方决定原样透传还是按降级链请求内重入（fallbackWorthy 判定）。
 type rotationResult struct {
 	done       bool
 	lastKind   provider.ErrKind
 	lastStatus int
 	lastBody   []byte
+}
+
+// fallbackWorthy 报告「轮转耗尽后是否值得就地换模型」。
+//
+// 只认两类「本渠道对该模型已无承载能力」的错误：
+//   - ErrHardCredit：积分耗尽 → 账号进 12h 硬冷却，本渠道容量已翻 false；
+//   - ErrSoftRate：模型饱和（14003 Model busy / 6004 usage exceeds frequency
+//     limit）→ 全部账号对该模型都在模型级冷却，轮转已无号可选。
+//
+// 其余错误不换模型：内容类/请求类错误换模型必然复现（换模型只是白烧备胎额度），
+// 5xx/登录态问题换模型也治不了本，原样透传让客户端与运维看到真实原因。
+func fallbackWorthy(kind provider.ErrKind) bool {
+	return kind == provider.ErrHardCredit || kind == provider.ErrSoftRate
 }
 
 // serveRotation：chatCompletions 的轮转选号 + 上游交互 + 耗尽出口段（原代码整体
@@ -976,18 +1004,8 @@ func (h *Handler) serveRotation(
 					log.Printf("account cooldown platform=%s uid=%s model=%s", rt.Kind, acct.UID, model)
 				}
 			case provider.ErrSessionDead:
-				// 先试一次 refresh：本地 token 可能只是在别处被轮换（不变量 19）。
-				// 成功 ⇒ 解除本轮的「已尝试」标记并重试本号（单号渠道若不清标记，
-				// pick 会直接空手而归 → 白变 503），且不施加任何标记。
-				// 失败 ⇒ 上游已吊销会话（invalid_grant 之类），才落 SessionDead 标记
-				// （R76：标记而非 Disable，与用户手动停用分离、重登后按 mtime 自动清除）。
-				if h.recoverSession(rt, acct, respBody) {
-					delete(tried, acct.UID)
-					lastErr = fmt.Errorf("upstream %s (http %d): 已刷新 token，重试本号", kind, status)
-					lastStatus = 0 // 不再透传这条已自愈的响应
-					lastBody = nil
-					continue
-				}
+				// 登录态失效不再混入「停用」：标记 SessionDead（挑号跳过 + 面板徽标 +
+				// 重新登录入口），与用户手动停用（Disable）分离（#134）。
 				rt.Pool.MarkSessionDead(acct.UID, truncateBody(respBody))
 				log.Printf("session dead marked platform=%s uid=%s", rt.Kind, acct.UID)
 			case provider.ErrNotFound:
@@ -1007,6 +1025,13 @@ func (h *Handler) serveRotation(
 			case provider.ErrModelBlocked:
 				// 11102 该后端无此模型：兑现 ErrKind 注释承诺的「(账号,模型) 负缓存避让」。
 				// 此前落到账号级软冷却 —— 一个模型不存在就把账号整体下线，与该语义不符。
+				//
+				// ⚠️ 2026-10-18 修正：本 case 原先与 ErrWafBlock/ErrAccountFault 合并，
+				// 走 Pool.Cooldown(uid) **冻结整个账号**。后果是「一个模型在上游不存在」
+				// 会拖垮同一账号下的所有模型：officeace 里 glm-5.3-flash 上游回 404，
+				// 三个账号接连被 model_blocked 冻结 60s，整条渠道 503。
+				// 现在只冻这一个 (账号,模型)；本仓**不做**「≥2 模型同时冷即升级整号」，
+				// 模型级不连坐是硬约束（见 pool.CooldownModel 注释）。
 				rt.Pool.CooldownModel(acct.UID, model, pool.CoolSoft, h.cfg.SoftCooldown, kind.String())
 				transparentError(w, status, respBody)
 				return
@@ -1025,13 +1050,28 @@ func (h *Handler) serveRotation(
 				// 仅轮转以兼容「同模型不同账号权益差异」场景；候选耗尽后透传最后
 				// 错误（与上游分类器注释「BadParams：不罚号但仍轮转」对齐）。
 			case provider.ErrServer:
-				if rt.NoCooldownOnServerError {
-					// 该渠道声明 5xx 为上游网关抖动（账号本身健康），
-					// 不计入账号错误，避免一夜抖动把所有账号冷却。
-					log.Printf("upstream server error platform=%s uid=%s status=%d（不计入账号错误）",
+				// 上游 5xx = 服务端故障，与账号健康无关 ⇒ **不计入账号错误**。
+				//
+				// ⚠️ 2026-10-18 翻转（原先只有声明 NoCooldownOnServerError 的渠道豁免）：
+				// 实测事故（lobsterai）—— 上游对带 developer 角色的请求返回 500，
+				// ErrServer 可轮换 ⇒ 一次客户端请求打 3 个账号各 +1 errCount，
+				// 而 err_threshold 默认 3 ⇒ **重试一次就把三个健康账号全冷却 10 分钟**，
+				// 期间整条渠道 503。账号本身完全健康（积分/签到/session 全正常）。
+				//
+				// 判据：5xx 的语义就是「服务端出问题了」，记到客户端凭据头上既不合因果，
+				// 也会把一次上游故障放大成整条渠道下线。轮转保留（ErrServer 仍 Rotatable），
+				// 「换个账号重试」的机会还在，只是不再拿 5xx 惩罚账号。
+				//
+				// 逃生门：NoCooldownOnServerError 字段保留，但语义不变（仍表示「不豁免」），
+				// 仅用于审计/文档层面标注渠道差异；真正的计数开关由 CountServerErrorAsAccountFault
+				// 单独表达，当前无一渠道开启。
+				if rt.CountServerErrorAsAccountFault {
+					rt.Pool.NoteError(acct.UID, h.cfg.ErrThreshold, h.cfg.ErrCooldown)
+					log.Printf("upstream server error platform=%s uid=%s status=%d（渠道显式要求计入账号错误）",
 						rt.Kind, acct.UID, status)
 				} else {
-					rt.Pool.NoteError(acct.UID, h.cfg.ErrThreshold, h.cfg.ErrCooldown)
+					log.Printf("upstream server error platform=%s uid=%s status=%d（不计入账号错误）",
+						rt.Kind, acct.UID, status)
 				}
 			default:
 				rt.Pool.NoteError(acct.UID, h.cfg.ErrThreshold, h.cfg.ErrCooldown)
@@ -1052,6 +1092,12 @@ func (h *Handler) serveRotation(
 			return
 		}
 		defer rc.Close()
+		// 轮转内换号成功：清掉前面 status>=400 分支写进统计行的状态码。
+		// 否则「A 号 429、B 号成功」的请求会在运行统计/请求日志里记成 429——
+		// 出口 defer 只在 Status==0 时补 200，而该字段一旦被写就不会自愈。
+		// 模型饱和（14003/6004）是多账号渠道的高频形态，统计失真会让面板看不出
+		// 降级是否生效，故与请求内降级路径的 statRow.Status 清零同源处理。
+		statRow.Status = 0
 		rt.Pool.NoteSuccess(acct.UID)
 		h.stickySuccess(rt, model)
 		if stream {
@@ -1213,24 +1259,44 @@ func (h *Handler) serveRotation(
 	// 渠道没有可用账号：区分「未绑定账号」与「全部冷却/禁用」，给出可操作的引导。
 	// 客户端（如 Claude Code/Codex）只看到这条错误，必须足以让用户知道去面板做什么。
 	sts := rt.Pool.List()
-	var bound, disabled, cooling int
+	var bound, disabled, cooling, sessionDead, modelAvail int
 	var earliest time.Time // 全池对该模型最早的解冻时刻（账号级与模型级冷却取最小）
 	nowTs := time.Now()
 	for _, s := range sts {
 		if s.Disabled {
 			disabled++
-		} else if s.Cooling {
+			continue
+		}
+		// ⚠️ 2026-10-18 补 sessionDead：登录态失效的账号原先**被计入 bound（可用账号）**，
+		// 于是 503 文案说「其余余额耗尽或出错」，把「需要重新登录」这个唯一可行动的
+		// 结论彻底掩盖掉（MonkeyCode 实测：用户看到的是"余额耗尽"，实际要重登）。
+		// pool.healthy() 早已把 sessionDead 视为不健康（pool.go:103），此处统计口径对齐它。
+		if s.SessionDead {
+			sessionDead++
+			continue
+		}
+		if s.Cooling {
 			cooling++
-		} else {
-			bound++
+			if s.Until.After(nowTs) && (earliest.IsZero() || s.Until.Before(earliest)) {
+				earliest = s.Until
+			}
+			continue
 		}
-		if s.Cooling && s.Until.After(nowTs) && (earliest.IsZero() || s.Until.Before(earliest)) {
-			earliest = s.Until
-		}
+		bound++
+		// 模型级冷却：既参与「最早解冻时刻」，也决定「该模型是否还有账号可用」——
+		// 账号健康但请求模型在全部账号上都被限流时，文案要指路「换模型」而不是「重登」。
+		cooled := false
 		for _, mc := range s.ModelCooling {
+			if mc.Model != model {
+				continue
+			}
+			cooled = true
 			if mc.Until.After(nowTs) && (earliest.IsZero() || mc.Until.Before(earliest)) {
 				earliest = mc.Until
 			}
+		}
+		if !cooled {
+			modelAvail++
 		}
 	}
 	if len(sts) == 0 {
@@ -1243,6 +1309,14 @@ func (h *Handler) serveRotation(
 		writeOpenAIError(w, http.StatusServiceUnavailable, "no_healthy_account",
 			fmt.Sprintf("渠道 %s 尚未绑定账号：请在面板「账号管理」中添加 %s 账号（或把模型改为已接入渠道，如 workbuddy/glm-5.2）",
 				rt.Kind, rt.Kind))
+		return
+	}
+	// 账号均健康、但请求模型在全部账号上都处于模型级限流冷却：
+	// 明确告知解冻时间，避免误以为账号故障去重登（2026-09-23 全池 6004 事故的教训）。
+	if bound > 0 && modelAvail == 0 {
+		writeOpenAIError(w, http.StatusServiceUnavailable, "no_healthy_account",
+			fmt.Sprintf("渠道 %s 的 %d 个账号均健康，但模型 %s 已在全部账号上限流冷却：最早约 %s 解冻（到点自动恢复，无需重新登录），也可先切换其他模型",
+				rt.Kind, bound, model, formatUnfreeze(earliest)))
 		return
 	}
 	if bound == 0 {
@@ -1263,13 +1337,18 @@ func (h *Handler) serveRotation(
 		if cooling > 0 && !earliest.IsZero() {
 			hint = fmt.Sprintf("最早约 %s 解冻（多为限流冷却，到点自动恢复；若长时间未恢复再检查登录态）", formatUnfreeze(earliest))
 		}
+		// 登录态失效优先于限流文案：这是唯一「用户自己动手就能恢复」的原因，
+		// 被限流文案盖住会让人白等（2026-10-18 MonkeyCode 实测的误导）。
+		if sessionDead > 0 && !noLoginChannel(rt.Kind) && !keyPasteChannel(rt.Kind) {
+			hint = fmt.Sprintf("%d 个账号登录态已失效，需重新登录后才能恢复", sessionDead)
+		}
 		writeOpenAIError(w, http.StatusServiceUnavailable, "no_healthy_account",
-			fmt.Sprintf("渠道 %s 的 %d 个账号当前全部不可用（禁用 %d / 冷却 %d）：可在面板查看原因；%s",
-				rt.Kind, len(sts), disabled, cooling, hint))
+			fmt.Sprintf("渠道 %s 的 %d 个账号当前全部不可用（禁用 %d / 冷却 %d / 登录态失效 %d）：可在面板查看原因；%s",
+				rt.Kind, len(sts), disabled, cooling, sessionDead, hint))
 		return
 	}
-	msg := fmt.Sprintf("渠道 %s 暂无可用账号（共 %d 个：禁用 %d / 冷却 %d；其余余额耗尽或出错）",
-		rt.Kind, len(sts), disabled, cooling)
+	msg := fmt.Sprintf("渠道 %s 暂无可用账号（共 %d 个：禁用 %d / 冷却 %d / 登录态失效 %d；其余余额耗尽或出错）",
+		rt.Kind, len(sts), disabled, cooling, sessionDead)
 	// 这一支最需要日志：调用方只看到 503，而账号并非禁用/冷却，原因全在 lastErr 里
 	// （2026-09-23 验收时 405a1c 的瞬时 503 因无日志而查不到任何线索，只能靠复测反推）。
 	if lastErr != nil {
@@ -1514,12 +1593,17 @@ func modelHasCapacity(rt *Runtime, model string) bool {
 // 备胎允许跨渠道（To 为 "channel/model" 全路径，经 runtimeForModel 解析）——
 // 整渠道全灭时正需要跨渠道备胎顶上，而非直接 503。
 //
+// skipSameChannel=true：跳过与当前渠道相同的备胎候选（仍会继续往链后找跨渠道的）。
+// 只给「请求内重入」用——那里 429 可能只是账号级限流，同渠道兄弟模型共享同一批
+// 账号，重打一遍会二次撞墙，并可能把冷却粒度从模型级升级为账号级；入口降级传 false
+// （入口已知「该模型在本渠道全冷」，换同渠道兄弟模型正是链配置的本意）。
+//
 // 第二返回值 primaryAvail = 「原模型此刻有可用账号」，与降级与否无关，只给恢复探针用：
 // 旧实现「未降级就算恢复」会把两种情形谎报成已恢复——① 原模型仍全冷但备胎也没容量，
 // ② 整渠道无健康账号。仅面板事件记账受影响，但谎报会令「持续时长」失真。
 // 未配置规则时不做探测（守住「正常路由零开销」）：此时不会新增事件，
 // 代价是删规则后残留的进行中事件不会自动关闭（环形 200 条自然淘汰，重启即清）。
-func (h *Handler) pickModelFallback(rt *Runtime, model string) (string, bool) {
+func (h *Handler) pickModelFallback(rt *Runtime, model string, skipSameChannel bool) (string, bool) {
 	h.fbMu.RLock()
 	rules := h.fallbacks
 	h.fbMu.RUnlock()
@@ -1529,8 +1613,8 @@ func (h *Handler) pickModelFallback(rt *Runtime, model string) (string, bool) {
 	if modelHasCapacity(rt, model) {
 		return "", true // 未全冷：走原路由，并告知探针「容量已在」
 	}
-	// 未全冷之外（模型全冷 / 整渠道全灭）都继续往下遍历规则找备胎；
-	// 链路里落在同渠道的备胎会被 modelHasCapacity 自然跳过。
+	// 未全冷之外（模型全冷 / 整渠道全灭）都继续往下遍历规则找备胎：
+	// 链内无容量的候选由 modelHasCapacity 跳过；同渠道候选是否跳过由入参决定。
 	for _, rule := range rules {
 		// 规则里的 from 与请求模型都要按同一套 ID 解析（R59：cline 的 `cline-free/x`
 		// 与旧写法 `cline/cline-free/x` 必须都能命中同一条规则）。
@@ -1545,6 +1629,11 @@ func (h *Handler) pickModelFallback(rt *Runtime, model string) (string, bool) {
 			}
 			rt2, m2, err := h.runtimeForModel(to)
 			if err != nil || rt2 == nil {
+				continue
+			}
+			if skipSameChannel && rt2.Kind == rt.Kind {
+				// 同渠道备胎共享同一批账号：请求内 429 可能只是账号级限流，
+				// 重打一遍必然二次撞墙（详见调用点注释）。继续往链后找跨渠道候选。
 				continue
 			}
 			if modelHasCapacity(rt2, m2) {

@@ -260,9 +260,22 @@ func (k ErrKind) Rotatable() bool {
 // 同一个"这个模型正忙、换一个试试"的语义，只是措辞不同。生产实测（state v4）：
 // 14003 落在账号级冷却、6004 落在模型级冷却，而 14003 会在两个账号 18~48s 内相继
 // 触发——账号级既救不了当前模型，还把该账号其它可用模型一起拖死。
+//
+// 2026-10-17 再补 14003 的**第三种措辞**（workbuddyai uid=e840f08f… 实录）：
+//
+//	"displayMsg":{"en":"Model busy. Please switch models or retry later", …},
+//	"displayTips":{"en":"This model is currently saturated. … Please switch to another model …"}
+//
+// 前两条 marker 都命中不了它（"switch to the other models" 要求 the other 连写），
+// 于是同一类饱和限流在不同上游文案下被判成账号级——这正是「靠文案判据」的固有脆性，
+// 但 6004/14003 没有结构化「scope」字段可用，只能把已取证的措辞全部收进来。
 var modelScopedSoftRateMarkers = []string{
 	"switch to the other models",
 	"less busy model",
+	"switch models",
+	"switch to another model",
+	"model busy",
+	"换模型",
 }
 
 // IsModelScopedSoftRate 判定软限流（ErrSoftRate）是否只作用于当前模型。
@@ -621,6 +634,41 @@ func ExpireInstant(expireAt string) (time.Time, bool) {
 	return time.Time{}, false
 }
 
+// ExpireDate 返回 ExpireAt 的**日期部分**（UTC+8 墙钟，"YYYY-MM-DD"）。
+//
+// 用途：**生成 ledger 伪键**。伪键必须只含日期、不能含时刻——伪键是账本差分的
+// 身份标识，一改就会让旧键全部「消失」、新键全部「出现」，升级瞬间凭空产出一批
+// expire + earn 流水（净额守恒但会把「今日作废」刷成虚高）。
+// 典型误用（2026-10-19 方案评审中发现）：把 ExpireAt 从 "2026-10-25" 改成
+// "2026-10-25T23:59:59+08:00" 后，workbuddy 的 "包名|到期日" 伪键跟着变，
+// 单个账号 28 个包 ⇒ 56 条假流水。
+//
+// 因此渠道侧必须**分开两个函数**：值用精确时刻（供剩余小时计算），
+// 键用本函数取日期前缀（保证账本稳定）。
+func ExpireDate(expireAt string) string {
+	t, ok := ExpireInstant(expireAt)
+	if !ok {
+		return ""
+	}
+	return t.In(expireLoc).Format("2006-01-02")
+}
+
+// ExpireIn 返回距失效还剩多久（负数 = 已过期）。ok=false 表示无到期信息。
+// 这是面板「N 小时内到期」分桶与「最近临期」列表的唯一判据：
+// 直接用 ExpireInstant 减当前时刻，**不做日期取整**。
+//
+// 为何不能用日期差（2026-10-19 用户实测纠正）：上游给的是精确时刻，且两种形态
+// 都真实存在——qwenwork 每日奖励 valid_to = "...T00:00:00+08:00"（次日零点失效），
+// traework 每月登录积分 expire_time = "...23:59:59"（当日末失效）。按日期桶
+// 展示会把「今晚 5.7 小时后就没」误报成「明日到期，还有一整天」。
+func ExpireIn(expireAt string, now time.Time) (time.Duration, bool) {
+	t, ok := ExpireInstant(expireAt)
+	if !ok {
+		return 0, false
+	}
+	return t.Sub(now), true
+}
+
 // expireAnchor 临期判定的**锚点**：日期粒度取该日 00:00（不是次日），RFC3339 取精确时刻。
 //
 // 与 ExpireInstant 只差日期粒度这一档，是为了保持 ExpiringWithin 的既有口径不变：
@@ -639,6 +687,103 @@ func expireAnchor(expireAt string) (time.Time, bool) {
 		return t.In(expireLoc), true
 	}
 	return time.Time{}, false
+}
+
+// ExpireBucket 自然日分档：把「到期时刻」归入今日 / 明日 / 7 日内三个桶。
+//
+// 口径（2026-10-19 用户明确定义）：**按精确时刻算，不按日期字符串比**，
+// 桶的边界是**自然日**，且**次日 00:00:00 算今日到期**。
+//
+// 为什么次日零点要归今日：上游很多包的到期时刻就是次日零点——
+// qwenwork 每日奖励 valid_to = "...T00:00:00+08:00"、traework 每日签到
+// expire_time = "次日 00:00:03~07"（几秒是上游时钟抖动）。从用户视角
+// 「今晚 24:00 就没了」是今天必须处理的事；归到「明日」会让人以为还有一整天
+// （2026-10-19 实测：415 分被误报成「明日到期」，实际只剩 5.7 小时）。
+//
+// 实现：先给失效时刻减去 grace 宽限，再取**日期**分档。等价于
+// 「凌晨 grace 内失效的包算前一天」。grace 取 5 分钟：实测上游抖动最大 7 秒，
+// 5 分钟足够覆盖时钟偏差，又不会把「凌晨 0:10 失效」这种真正的次日包误归今日。
+const expireMidnightGrace = 5 * time.Minute
+const (
+	BucketNone     = iota // 无到期信息，或已失效
+	BucketToday           // 今日到期（含次日零点）
+	BucketTomorrow        // 明日到期
+	Bucket7d              // 7 日内到期
+)
+
+// expireDayOf 返回失效时刻所属的**自然日**（已扣除零点宽限）。
+// 次日 00:00:03 这类会归到前一天；返回 ok=false 表示无到期信息。
+func expireDayOf(expireAt string, now time.Time) (time.Time, bool) {
+	t, ok := ExpireInstant(expireAt)
+	if !ok {
+		return time.Time{}, false
+	}
+	t = t.In(expireLoc).Add(-expireMidnightGrace)
+	if !t.After(now.In(expireLoc)) { // 已失效
+		return time.Time{}, false
+	}
+	y, m, d := t.Date()
+	return time.Date(y, m, d, 0, 0, 0, 0, expireLoc), true
+}
+
+// ExpireBucketOf 返回 expireAt 属于哪个自然日桶（见 BucketToday 等常量）。
+// now 由调用方传入，保证一次快照内所有条目用同一时刻判定（避免跨界抖动）。
+func ExpireBucketOf(expireAt string, now time.Time) int {
+	day, ok := expireDayOf(expireAt, now)
+	if !ok {
+		return BucketNone
+	}
+	y, m, d := now.In(expireLoc).Date()
+	today := time.Date(y, m, d, 0, 0, 0, 0, expireLoc)
+	switch {
+	case day.Equal(today):
+		return BucketToday
+	case day.Equal(today.AddDate(0, 0, 1)):
+		return BucketTomorrow
+	case !day.After(today.AddDate(0, 0, 6)):
+		return Bucket7d
+	}
+	return BucketNone
+}
+
+// ExpireWithinDays 报告 expireAt 是否在 days 个自然日内到期。
+//
+// 「N 个自然日」= 从今天起算的 N 天，今天算第 1 天：
+//   - days=1 → 只含今天（今晚 24:00 失效的都在内，见零点宽限）
+//   - days=2 → 今天 + 明天
+//   - days=3 → 今天 + 明天 + 后天
+//
+// 这是调度器「临期优先消耗」与设置项「临期阈值」的判据。与旧 ExpiringWithin
+// （时长口径）的差别：旧实现用「到期锚点 < now + days×24h」，days=1 时会把
+// 「明天 23:59 失效」也算进来（不足 48h），阈值随当天时刻漂移（早上 8 点设的
+// 24h 窗口和晚上 8 点设的覆盖不同日期）。自然日口径回答的才是调度器真正要问的
+// 问题：「今天该优先消耗谁」。
+func ExpireWithinDays(expireAt string, now time.Time, days int) bool {
+	day, ok := expireDayOf(expireAt, now)
+	if !ok {
+		return false
+	}
+	if days < 1 {
+		days = 1
+	}
+	y, m, d := now.In(expireLoc).Date()
+	limit := time.Date(y, m, d, 0, 0, 0, 0, expireLoc).AddDate(0, 0, days-1)
+	return !day.After(limit)
+}
+
+// ExpiringWithinDays 统计 days 个自然日内到期的**可消耗**积分小计。
+// 调度器临期优先消耗的判据（替代旧的时长口径 ExpiringWithin）。
+func ExpiringWithinDays(items []ResourceItem, days int, now time.Time) int64 {
+	var expiring int64
+	for _, it := range items {
+		if !it.Usable || it.InfoOnly || it.ExpireAt == "" {
+			continue
+		}
+		if ExpireWithinDays(it.ExpireAt, now, days) {
+			expiring += it.Remain
+		}
+	}
+	return expiring
 }
 
 // ExpiringWithin 统计 horizon 时长内到期的**可消耗**积分小计（临期额度）。

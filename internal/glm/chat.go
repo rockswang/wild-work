@@ -94,57 +94,44 @@ type glmContentItem struct {
 	Text string `json:"text"`
 }
 
-// buildGLMMessages 把 OpenAI messages 转成清言的单条 user 消息。
+// extractSingleUserPrompt 从 OpenAI messages 提取唯一一条 user 提问。
 //
-// 为什么合并成一条：清言服务端无状态，多轮必须由客户端携带全量上下文。
-// 参考实现（GLM-Free-API messagesPrepare）也是把全部历史合并进一条 user 消息，
-// 并用 <|user|>/<|assistant|> 标记角色边界（这是清言网页版自身的做法）。
+// glm 渠道的对话语义（2026-10-20 简化，用户决议）：**仅支持一来一回的简单对话**——
+//   - system 段落：忽略（下游 agent 的系统提示词不透传）；
+//   - assistant 段落：**不支持**（报错）——多轮上下文与 tool_calls 都靠它携带，
+//     而 glm 通道不支持 tool_calls、也不再拼历史；
+//   - 多个 user 段落：**不支持**（报错）；
+//   - 唯一 user 的非文本段（image_url 等）忽略，只取 text 拼接。
 //
-// 已剥离图像等非文本内容（主对话 content 只收 text）。
-func buildGLMMessages(msgs []any) ([]glmMessage, error) {
-	var sb strings.Builder
+// 报错形态：ChatStream 会把它转成 400 + OpenAI error JSON（code=glm_unsupported_conversation），
+// handler 对 ErrBadParams 原文透传不罚号，客户端能直接看到原因。
+func extractSingleUserPrompt(msgs []any) (string, error) {
+	prompt := ""
+	users := 0
 	for _, raw := range msgs {
 		m, ok := raw.(map[string]any)
 		if !ok {
 			continue
 		}
 		role, _ := m["role"].(string)
-		text := extractText(m["content"])
-		if text == "" {
-			continue
-		}
 		switch role {
 		case "system":
-			sb.WriteString("<|sytstem|>\n")
+			continue // 忽略 system 段落
 		case "assistant":
-			sb.WriteString("<|assistant|>\n")
+			return "", fmt.Errorf("glm 渠道不支持多轮对话（不接受 assistant 段落，含 tool_calls 历史）")
 		case "user":
-			sb.WriteString("<|user|>\n")
-		default:
-			sb.WriteString("<|user|>\n")
+			users++
+			if users > 1 {
+				return "", fmt.Errorf("glm 渠道不支持多轮对话（只接受单个 user 段落，收到 %d 个）", users)
+			}
+			prompt = strings.TrimSpace(extractText(m["content"]))
 		}
-		sb.WriteString(text)
-		sb.WriteString("\n")
 	}
-	if sb.Len() == 0 {
-		return nil, fmt.Errorf("glm: 请求没有可用的文本消息")
+	if users == 0 || prompt == "" {
+		return "", fmt.Errorf("glm 渠道需要恰好一条含文本的 user 消息")
 	}
-	sb.WriteString("<|assistant|>\n")
-
-	// 去掉 Markdown 图片链接与临时路径，避免模型产生幻觉（参考实现同款清理）
-	content := mdImageRe.ReplaceAllString(sb.String(), "")
-	content = tmpPathRe.ReplaceAllString(content, "")
-
-	return []glmMessage{{
-		Role:    "user",
-		Content: []glmContentItem{{Type: "text", Text: content}},
-	}}, nil
+	return prompt, nil
 }
-
-var (
-	mdImageRe = regexp.MustCompile(`!\[.+\]\(.+\)`)
-	tmpPathRe = regexp.MustCompile(`/mnt/data/.+`)
-)
 
 // extractText 从 OpenAI content 提取纯文本（content 可能是字符串或分段数组）。
 func extractText(v any) string {
@@ -171,10 +158,24 @@ func extractText(v any) string {
 	return ""
 }
 
-// glmChatRequest 清言对话请求体。
+// openAIUnsupportedBody 构造「不支持多轮/消息形态」的 400 错误体（OpenAI error 形状）。
+// code=glm_unsupported_conversation 供 glm.Classify 识别为 ErrBadParams（透传不罚号）。
+func openAIUnsupportedBody(msg string) []byte {
+	b, _ := json.Marshal(map[string]any{
+		"error": map[string]any{
+			"message": msg,
+			"type":    "invalid_request_error",
+			"code":    "glm_unsupported_conversation",
+		},
+	})
+	return b
+}
+
+// glmChatRequest 清言（IDE 通道）对话请求体。
+// 字段形状对齐 chatglm-cli ChatBody（抓包 sid 356/480 [实证]）。
 type glmChatRequest struct {
 	AssistantID    string       `json:"assistant_id"`
-	ConversationID string       `json:"conversation_id"`
+	ConversationID string       `json:"conversation_id"` // 恒空串：每次新会话，不续接
 	ProjectID      string       `json:"project_id"`
 	ChatType       string       `json:"chat_type"`
 	Messages       []glmMessage `json:"messages"`
@@ -185,29 +186,25 @@ type glmChatMeta struct {
 	Channel          string     `json:"channel"`
 	ChatMode         string     `json:"chat_mode,omitempty"`
 	DraftID          string     `json:"draft_id"`
+	Cogview          glmCogview `json:"cogview"`
 	IfPlusModel      bool       `json:"if_plus_model"`
 	InputQuestionTyp string     `json:"input_question_type"`
 	IsNetworking     bool       `json:"is_networking"`
 	IsTest           bool       `json:"is_test"`
 	Platform         string     `json:"platform"`
 	QuoteLogID       string     `json:"quote_log_id"`
-	Cogview          glmCogview `json:"cogview"`
+	SelectedModel    string     `json:"selected_model"`
 }
 
 type glmCogview struct {
-	RmLabelWatermark bool `json:"rm_label_watermark"`
+	RmLabelWatermark bool   `json:"rm_label_watermark"`
+	// AspectRatio 生图比例（1:1/3:4/4:3/9:16/16:9）；对话路径不设（omitempty 不出现）。
+	AspectRatio string `json:"aspect_ratio,omitempty"`
 }
 
 // ChatStream 把客户端 OpenAI 请求转成清言格式并转发，返回上游 SSE 流。
 func (c *Client) ChatStream(a *auth.Auth, body []byte) (io.ReadCloser, int, []byte, error) {
-	ctx := context.Background()
-
-	token, err := c.acquireToken(ctx, a)
-	if err != nil {
-		return nil, 0, nil, err
-	}
-
-	// 解析客户端请求
+	// 解析客户端请求（消息校验在拿 token 之前 —— 请求形态问题不应触发刷新/发上游）
 	var req struct {
 		Model    string `json:"model"`
 		Messages []any  `json:"messages"`
@@ -216,42 +213,65 @@ func (c *Client) ChatStream(a *auth.Auth, body []byte) (io.ReadCloser, int, []by
 		return nil, 0, nil, fmt.Errorf("glm: 解析请求体失败: %w", err)
 	}
 
-	msgs, err := buildGLMMessages(req.Messages)
+	// 提取唯一 user 提问；不支持多轮/tool_calls（见函数注释，报错即 400 透传）。
+	prompt, err := extractSingleUserPrompt(req.Messages)
 	if err != nil {
-		return nil, 0, nil, err
+		return nil, http.StatusBadRequest, openAIUnsupportedBody(err.Error()), nil
 	}
 	assistantID, chatMode := resolveAssistant(req.Model)
 
+	// meta 字段逐项对齐 chatglm-cli ChatBody [实证]：
+	//   - rm_label_watermark:true 去水印（2026-10-16 A/B 实证 false 产物带「清言·AI生成」角标）；
+	//   - if_plus_model:false（IDE 实抓形态，plus_model_available 由服务端回填）；
+	//   - platform 写 pc 与 win 指纹的不一致服务端不校验 [实证 10-15]。
 	out := glmChatRequest{
 		AssistantID:    assistantID,
 		ConversationID: "",
 		ProjectID:      "",
 		ChatType:       "user_chat",
-		Messages:       msgs,
+		Messages: []glmMessage{{
+			Role:    "user",
+			Content: []glmContentItem{{Type: "text", Text: prompt}},
+		}},
 		MetaData: glmChatMeta{
 			Channel:          "",
 			ChatMode:         chatMode,
 			DraftID:          "",
-			IfPlusModel:      true,
+			Cogview:          glmCogview{RmLabelWatermark: true},
+			IfPlusModel:      false,
 			InputQuestionTyp: "xxxx",
 			IsNetworking:     true,
 			IsTest:           false,
 			Platform:         "pc",
 			QuoteLogID:       "",
-			Cogview:          glmCogview{RmLabelWatermark: false},
+			SelectedModel:    chatModelOf(req.Model),
 		},
 	}
 	payload, err := json.Marshal(out)
 	if err != nil {
 		return nil, 0, nil, err
 	}
+	return c.postStream(a, payload)
+}
 
-	// 对话接口必须声明接受 SSE
+// postStream 发 SSE 请求到 EpChat（拿 token、IDE 指纹、cookie jar、StreamHTTP）。
+// 对话与生图共用（生图 = 同端点换 assistant_id + cogview 参数）。
+func (c *Client) postStream(a *auth.Auth, payload []byte) (io.ReadCloser, int, []byte, error) {
+	ctx := context.Background()
+	token, err := c.acquireToken(ctx, a)
+	if err != nil {
+		return nil, 0, nil, err
+	}
+
+	// 对话接口必须声明接受 SSE；IDE 指纹头（device_id 从 access JWT 解出）。
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, c.base()+EpChat, bytes.NewReader(payload))
 	if err != nil {
 		return nil, 0, nil, err
 	}
-	applySignedHeaders(httpReq, token, "text/event-stream")
+	c.syncCookies(token)
+	for k, v := range ideHeaders(token, "text/event-stream", jwtDeviceID(token)) {
+		httpReq.Header.Set(k, v)
+	}
 
 	// ⚠️ 流式请求必须用 StreamHTTP（**无 Client.Timeout**）。
 	// 用带 Timeout 的 HTTP 会让长回答在超时点被强制掐断、且无终止帧
@@ -290,8 +310,11 @@ func (c *Client) ChatStream(a *auth.Auth, body []byte) (io.ReadCloser, int, []by
 	return idle.Monitor(resp.Body, c.IdleTimeout, cancel), resp.StatusCode, nil, nil
 }
 
-// DeleteConversation 删除上游会话，避免在本人的清言对话列表里留痕。
-// 尽力而为：失败只记日志，不影响主流程。
+// DeleteConversation 删除上游会话（2026-10-20 换 bulk_delete：IDE 通道实证有效；
+// 旧 WEB 端点 backend-api/assistant/conversation/delete 未在 IDE 通道验证，弃用）。
+// ⚠️ bulk_delete 的 assistant_id 必须与会话所属 agent 一致，否则上游**静默无效**
+// [实证 chatglm-cli]：保活/主对话会话传 DefaultAssistantID，生图会话传 DrawingAssistantID。
+// 尽力而为语义由调用方把握（保活路径失败只记日志）。
 func (c *Client) DeleteConversation(a *auth.Auth, conversationID, assistantID string) error {
 	if conversationID == "" {
 		return nil
@@ -304,9 +327,9 @@ func (c *Client) DeleteConversation(a *auth.Auth, conversationID, assistantID st
 		return err
 	}
 	body, _ := json.Marshal(map[string]any{
-		"assistant_id":    assistantID,
-		"conversation_id": conversationID,
+		"conversation_ids": []string{conversationID},
+		"assistant_id":     assistantID,
 	})
-	_, err = c.doJSON(context.Background(), http.MethodPost, EpDeleteConv, token, json.RawMessage(body))
+	_, err = c.doJSON(context.Background(), http.MethodPost, EpBulkDelete, token, json.RawMessage(body))
 	return err
 }

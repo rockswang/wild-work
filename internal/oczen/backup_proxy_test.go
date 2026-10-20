@@ -307,6 +307,12 @@ func TestOczenIsRegionBlocked(t *testing.T) {
 		{http.StatusTooManyRequests, regionBody, false},               // 限流不是地域
 		{http.StatusInternalServerError, regionBody, false},           // 5xx 不重放
 		{http.StatusForbidden, `{"error":"access forbidden"}`, false}, // 宽文案不得触发重放
+		// 出口 IP 级封禁（FreeTierError）：换出口 IP 可解 ⇒ 必须触发备用重放。
+		// 2026-10-19 实盘：多节点命中此文案，换美国出口后同一实现 200。
+		{http.StatusForbidden, `{"type":"error","error":{"type":"FreeTierError","message":"OpenCode's free models aren't available from your current network because we've detected abusive traffic from this IP address. This isn't related to your account."}}`, true},
+		// 客户端伪装不完整（can only be used from within OpenCode）：与 IP 无关，
+		// 换出口无效，**不得**触发备用重放（否则每发都白走一次代理）。
+		{http.StatusForbidden, `{"type":"error","error":{"type":"FreeTierError","message":"OpenCode's free tier can only be used from within OpenCode. Download it at https://opencode.ai and keep building."}}`, false},
 	}
 	for _, c := range cases {
 		if got := IsRegionBlocked(c.status, c.body); got != c.want {

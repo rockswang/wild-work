@@ -2,6 +2,7 @@ package ledger
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -467,5 +468,49 @@ func TestQueryEntriesTimeSorted(t *testing.T) {
 	}
 	if st.Credit.Entries[0].Ts > st.Credit.Entries[1].Ts {
 		t.Fatalf("entries 未按时间升序：%d > %d", st.Credit.Entries[0].Ts, st.Credit.Entries[1].Ts)
+	}
+}
+
+// TestQueryByDayFixedAxis 横轴必须是**整窗固定刻度**（R98）。
+//
+// 旧实现 days=1 只枚举到 `now.Hour()`、days>1 只枚举「有过流水的日期」，
+// 于是横轴长度随当前时刻/数据稀疏度变化：今天 11 点看就只有 00:00~11:00，
+// 图表右端一路收缩，刻度本身也在变（无法横向比较）。
+// 现在一律补齐空桶：days=1 ⇒ 24 个小时桶；days=7 ⇒ 窗口内每天一个。
+func TestQueryByDayFixedAxis(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "ledger")
+	l, _ := New(dir)
+	defer l.Close()
+
+	now := time.Now()
+	// 只在今天 05:00 落一条流水：其余 23 个小时桶必须仍然出现在横轴上（值为 0）
+	ts := time.Date(now.Year(), now.Month(), now.Day(), 5, 0, 0, 0, now.Location()).Unix()
+	l.AppendUsage(UsageEntry{Ts: ts, Ch: "workbuddy", UID: "u1", Model: "m1", PT: 100, CT: 10})
+	l.Flush()
+
+	st := l.Query(1, nil)
+	if len(st.Token.ByDay) != 24 {
+		t.Fatalf("days=1 横轴应为 24 个小时桶，got %d", len(st.Token.ByDay))
+	}
+	for i, d := range st.Token.ByDay {
+		if want := fmt.Sprintf("%02d:00", i); d.Date != want {
+			t.Fatalf("by_day[%d].date=%s want %s", i, d.Date, want)
+		}
+	}
+	if st.Token.ByDay[5].Total != 110 {
+		t.Errorf("05:00 桶 total=%d want 110", st.Token.ByDay[5].Total)
+	}
+	if st.Token.ByDay[23].Total != 0 {
+		t.Errorf("23:00 空桶 total=%d want 0（未来时刻也要有刻度）", st.Token.ByDay[23].Total)
+	}
+
+	// days=7：窗口内 7 天全在，且不含无流水的缺日
+	st7 := l.Query(7, nil)
+	if len(st7.Token.ByDay) != 7 {
+		t.Fatalf("days=7 横轴应为 7 天，got %d", len(st7.Token.ByDay))
+	}
+	wantLast := now.Format("01-02")
+	if got := st7.Token.ByDay[6].Date; got != wantLast {
+		t.Errorf("最后一天=%s want %s（今天）", got, wantLast)
 	}
 }

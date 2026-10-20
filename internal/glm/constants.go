@@ -53,8 +53,14 @@ const (
 	EpMemberInfo = "/chatglm/member-api/member/member_info"
 	// EpChat 对话（SSE）。
 	EpChat = "/chatglm/backend-api/assistant/stream"
-	// EpDeleteConv 删除会话（避免在用户会话列表里留痕）。
-	EpDeleteConv = "/chatglm/backend-api/assistant/conversation/delete"
+	// EpBulkDelete 删除会话（bulk 接口，单删也走 bulk）。
+	// 2026-10-20 从旧 WEB 端点 backend-api/assistant/conversation/delete 迁移：
+	// IDE 通道实测 bulk_delete 有效且 agent_id 必须匹配（否则静默无效）。
+	EpBulkDelete = "/chatglm/mainchat-api/conversation/bulk_delete"
+	// EpImageReference 参考图生图（智能编辑）：单图接口、image_url 必须是上游可达的
+	// 公网 URL；输出比例强制跟随输入图；同步长请求 17~22s。多张参考图由调用方先
+	// 客户端拼版（internal/imgutil）+ 图床托管。
+	EpImageReference = "/chatglm/drawing-api/v1/image/reference"
 
 	// EpCheckinInfo 签到状态（打卡天数 / 今日是否已签 / 抽奖次数）。
 	EpCheckinInfo = "/chatglm/activity-api/activity/daily/check_in_info"
@@ -82,13 +88,13 @@ const (
 // 不带签名 → 400 bad request（签名层拒绝）。两者响应不同即证明签名通过。
 const SIGN_SECRET = "8a1317a7468aa3ad86e997d08f3f31cb"
 
-// userAgent 伪装 Edge 143（与清言网页版实测一致）。
-const userAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
-	"(KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36 Edg/143.0.0.0"
-
 // DefaultAssistantID 清言主对话（ChatGLM）的 assistant_id。
 // 来源：网页版主包常量，与 GLM-Free-API / Chat2API 的 DEFAULT_ASSISTANT_ID 一致。
 const DefaultAssistantID = "65940acff94777010aa6b796"
+
+// DrawingAssistantID AI画图智能体（生图 = 对话通道换 agent + cogview 参数）。
+// 来源与 DefaultAssistantID 同（主包常量表），chatglm-cli 实测可用。
+const DrawingAssistantID = "65a232c082ff90a2ad2f15e2"
 
 // 超时。
 const (

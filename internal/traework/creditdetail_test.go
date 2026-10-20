@@ -93,8 +93,8 @@ func TestUserResourceDetailMarksUsableAndExpiry(t *testing.T) {
 	if len(month) != 1 || month[0].remain != 460 || !month[0].usable {
 		t.Errorf("每月登录积分应为 460 且可用: %+v", month)
 	}
-	if month[0].expire != "2026-09-30" {
-		t.Errorf("每月登录积分到期日=%q want 2026-09-30", month[0].expire)
+	if month[0].expire != "2026-09-30T23:59:59+08:00" {
+		t.Errorf("每月登录积分到期时刻=%q want 2026-09-30T23:59:59+08:00（保留时分秒）", month[0].expire)
 	}
 	// 同名「每日签到」按判据区分可用性：208(可用150) / 209(可用200，已通用) / ep=1(不可用300)
 	checkins := byName["每日签到"]

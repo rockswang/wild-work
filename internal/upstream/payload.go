@@ -153,6 +153,16 @@ func positiveInt64(v any) (int64, bool) {
 //
 // 只认 developer 这一个值：其余 role（system/user/assistant/tool/任意未知值）一律原样保留，
 // 不合并、不重排、不删除任何消息（上游对多 system 的行为尚未实测，合并会引入新变量）。
+func NormalizeRoles(obj map[string]any) {
+	normalizeRoles(obj)
+}
+
+// normalizeRoles 是 NormalizeRoles 的实现体（保留原签名供包内 PrepareBody 调用）。
+//
+// 2026-10-18 导出 NormalizeRoles 的原因：本仓此前有 10 处渠道各自复制了这段逻辑，
+// 而 officeace 漏做 ⇒ DSH 一发 developer 角色就必 400 ModelArts.81001
+// （role 白名单不含 developer）。凡「不走 upstream.PrepareBody」的渠道，
+// 请直接调 NormalizeRoles，不要再复制第 11 份。
 func normalizeRoles(obj map[string]any) {
 	msgs, ok := obj["messages"].([]any)
 	if !ok {

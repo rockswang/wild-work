@@ -1,20 +1,19 @@
-// sign.go 智谱清言私有接口的签名与请求头构造。
+// sign.go 智谱清言 IDE(Electron) 客户端指纹与签名。
 //
-// 清言网页版所有私有接口都要求一组签名头，缺一即 400 bad request(40001)：
+// 2026-10-20 从 WEB 指纹迁移到 IDE 指纹（协议依据 chatglm-cli/internal/glm，全部 [实证]）：
+//   - WEB 通道受阿里云 WAF「头组合指纹」对抗，实测成功率低；
+//   - IDE 主对话链路实测 100% 通过，**不需要 refer__991、不做退避重试**；
+//   - WAF 校验的是「头组合指纹」，必须逐头照抄 IDE 客户端，禁止按直觉增删：
+//     X-App-Platform=win / X-App-Version=2.0.6 / X-App-fr=default / X-Exp-Groups 必带 /
+//     Electron UA（品牌段 `????` 是客户端自己写坏的，抓包原样保留，勿"修正"）/
+//     无 Referer / sec-ch-ua 是 Chromium 150。
 //
-//	X-Timestamp  毫秒时间戳，但倒数第二位被替换成校验位
-//	X-Nonce      32 位随机 hex
-//	X-Sign       md5("<timestamp>-<nonce>-<SIGN_SECRET>")
-//	X-Device-Id  设备标识（参考实现每请求随机，实测可行）
-//	X-Request-Id 请求标识
+// 签名算法（[实证] PROTOCOL §2，6/6 复算命中）：
 //
-// 时间戳算法（复刻官网 JS，勿改）：
-//
-//	取 Date.now() 的十进制字符串 A，令 t = len(A)；
-//	校验位 = (A 各位数字之和 - A[t-2]) % 10；
-//	结果 = A[:t-2] + 校验位 + A[t-1:]
-//
-// 即把倒数第二位数字替换为校验位，最后一位保持不变。
+//	X-Sign = md5(X-Timestamp + "-" + X-Nonce + "-" + SIGN_SECRET)   小写 hex
+//	X-Timestamp = 13 位毫秒原值（旧实现的「倒数第二位校验位」算法对签名结果无影响，已删）
+//	X-Nonce = 32 位小写 hex
+//	X-Device-Id 与 access_token JWT payload 的 device_id 一致（IDE 客户端行为）。
 package glm
 
 import (
@@ -22,8 +21,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
-	"net/http"
-	"strconv"
+	"strings"
 	"time"
 )
 
@@ -34,39 +32,15 @@ type Sign struct {
 	Sign      string
 }
 
-// generateSign 按官网算法生成签名。now 由调用方传入以便测试。
+// generateSign 按上游算法生成签名。now 由调用方传入以便测试。
 func generateSign(now time.Time) Sign {
-	ms := strconv.FormatInt(now.UnixMilli(), 10)
-	ts := timestampWithChecksum(ms)
+	ts := fmt.Sprintf("%d", now.UnixMilli())
 	nonce := randomHex(32)
 	return Sign{
 		Timestamp: ts,
 		Nonce:     nonce,
 		Sign:      md5Hex(ts + "-" + nonce + "-" + SIGN_SECRET),
 	}
-}
-
-// timestampWithChecksum 复刻官网时间戳算法：把倒数第二位替换为校验位。
-// 输入短于 2 位时原样返回（实际不会发生，毫秒时间戳恒为 13 位）。
-func timestampWithChecksum(ms string) string {
-	n := len(ms)
-	if n < 2 {
-		return ms
-	}
-	sum := 0
-	for i := 0; i < n; i++ {
-		c := ms[i]
-		if c < '0' || c > '9' {
-			return ms // 非纯数字，放弃改写（防御性）
-		}
-		sum += int(c - '0')
-	}
-	second := int(ms[n-2] - '0')
-	checksum := (sum - second) % 10
-	if checksum < 0 {
-		checksum += 10
-	}
-	return ms[:n-2] + strconv.Itoa(checksum) + ms[n-1:]
 }
 
 // md5Hex 返回小写 hex 的 MD5。
@@ -86,53 +60,84 @@ func randomHex(n int) string {
 	return hex.EncodeToString(buf)[:n]
 }
 
-// applyCommonHeaders 注入清言私有接口要求的伪装头。
-// 与参考实现（GLM-Free-API / Chat2API）的 FAKE_HEADERS 对齐：
-// 缺 Origin/Referer/App-Name 会被网关判为异常客户端。
-func applyCommonHeaders(req *http.Request, accept string) {
-	h := req.Header
-	h.Set("Content-Type", "application/json")
-	if accept == "" {
-		accept = "application/json, text/plain, */*"
+// ── IDE 指纹常量（逐头照抄 chatglm-cli/internal/glm/constants.go，勿改）────
+
+const (
+	idePlatform = "win"   // IDE 是 win（WEB 是 pc）
+	ideVersion  = "2.0.6" // IDE 客户端版本
+	ideFR       = "default"
+	// ideUA 的 Electron UA：中文品牌段被客户端自己写坏成 ????（抓包原样保留）。
+	// {device_id} 占位符在发请求时替换；device_id 为空时整段 DeviceId/ 移除。
+	ideUA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
+		"(KHTML, like Gecko) ????/2.0.6 Chrome/150.0.7871.250 Electron/43.6.0 " +
+		"Safari/537.36 Platform/ChatGLM_Win; AppVersion/2.0.6;DeviceId/{device_id};RefreshId/1790641614338"
+	ideSecChUA = `"Not;A=Brand";v="8", "Chromium";v="150"`
+	// ideExpGroups 服务端不校验取值但必须存在（WAF 指纹）[实证 PROTOCOL §2]。
+	ideExpGroups = "na_android_config:exp:NA,na_4o_config:exp:4o_A,tts_config:exp:tts_config_a," +
+		"na_glm4plus_config:exp:open,mainchat_server_app:exp:A,mobile_history_daycheck:exp:a," +
+		"desktop_toolbar:exp:A,chat_drawing_server:exp:A,drawing_server_cogview:exp:cogview4," +
+		"app_welcome_v2:exp:A,chat_drawing_streamv2:exp:A,mainchat_rm_fc:exp:add," +
+		"mainchat_dr:exp:open,chat_auto_entrance:exp:A,drawing_server_hi_dream:control:A," +
+		"homepage_square:exp:close,assistant_recommend_prompt:exp:3,app_home_regular_user:exp:A," +
+		"mainchat_moe:exp:300,assistant_greet_user:exp:greet_user," +
+		"app_welcome_personalize:exp:A,assistant_model_exp_group:exp:glm4.5,ai_wallet:exp:ai_wallet_enable"
+)
+
+// ideHeaders 组装一次请求的完整头（**不含 Cookie**：Cookie 一律交给 cookie jar，
+// 显式 Cookie 头会覆盖 jar，使服务端下发的 WAF cookie（acw_tc/cdn_sec_tc）无法带回
+// → 持续 40012 [实证 chatglm-cli PROTOCOL §1.4]）。
+// deviceID 为空时 UA 的 DeviceId/ 段与 X-Device-Id 头都不发（仍可用，但建议总是传）。
+func ideHeaders(token, accept, deviceID string) map[string]string {
+	s := generateSign(time.Now())
+	ua := strings.Replace(ideUA, "{device_id}", deviceID, 1)
+	if deviceID == "" {
+		ua = strings.Replace(ua, "DeviceId/{device_id}", "DeviceId/", 1)
 	}
-	h.Set("Accept", accept)
-	h.Set("Accept-Language", "zh-CN,zh;q=0.9,en;q=0.8")
-	h.Set("App-Name", "chatglm")
-	h.Set("Cache-Control", "no-cache")
-	h.Set("Pragma", "no-cache")
-	h.Set("Origin", Origin)
-	h.Set("Referer", Origin+"/main/alltoolsdetail")
-	h.Set("User-Agent", userAgent)
-	h.Set("X-App-Fr", "browser_extension")
-	h.Set("X-App-Platform", "pc")
-	h.Set("X-App-Version", "0.0.1")
-	h.Set("X-Device-Brand", "")
-	h.Set("X-Device-Model", "")
-	h.Set("X-Lang", "zh")
-	// Edge 143 的客户端提示头，与 UA 保持一致。
-	h.Set("Sec-Ch-Ua", `"Microsoft Edge";v="143", "Chromium";v="143", "Not A(Brand";v="24"`)
-	h.Set("Sec-Ch-Ua-Mobile", "?0")
-	h.Set("Sec-Ch-Ua-Platform", `"Windows"`)
-	h.Set("Sec-Fetch-Dest", "empty")
-	h.Set("Sec-Fetch-Mode", "cors")
-	h.Set("Sec-Fetch-Site", "same-origin")
-	h.Set("Priority", "u=1, i")
+	h := map[string]string{
+		"Accept":          accept,
+		"Accept-Encoding": "gzip, deflate", // Go stdlib 只能解 gzip/deflate；上游不压缩 SSE [实证]
+		"Accept-Language": "zh-CN",
+		"App-Name":        "chatglm",
+		"Origin":          "https://chatglm.cn",
+		"User-Agent":      ua,
+		// 业务伪装头
+		"X-App-Platform": idePlatform,
+		"X-App-Version":  ideVersion,
+		"X-App-fr":       ideFR,
+		"X-Lang":         "zh",
+		"X-Device-Model": "",
+		"X-Device-Brand": "",
+		"X-Exp-Groups":   ideExpGroups,
+		// 浏览器客户端提示（IDE 是 Electron/Chromium 150）
+		"sec-ch-ua":          ideSecChUA,
+		"sec-ch-ua-mobile":   "?0",
+		"sec-ch-ua-platform": `"Windows"`,
+		"Sec-Fetch-Dest":     "empty",
+		"Sec-Fetch-Mode":     "cors",
+		"Sec-Fetch-Site":     "same-origin",
+		// 签名三件套
+		"X-Timestamp": s.Timestamp,
+		"X-Nonce":     s.Nonce,
+		"X-Sign":      s.Sign,
+	}
+	if token != "" {
+		h["Authorization"] = "Bearer " + token
+	}
+	if deviceID != "" {
+		h["X-Device-Id"] = deviceID // 与 JWT.device_id 一致 [实证 PROTOCOL §1.2]
+	}
+	h["X-Request-Id"] = randomHex(32)
+	return h
 }
 
-// applySignedHeaders 注入签名头。token 非空时同时带 Authorization。
-// accept 传 SSE 时表示对话流接口（需 text/event-stream）。
-func applySignedHeaders(req *http.Request, token, accept string) {
-	applyCommonHeaders(req, accept)
-	s := generateSign(time.Now())
-	req.Header.Set("X-Device-Id", randomHex(32))
-	req.Header.Set("X-Request-Id", randomHex(32))
-	req.Header.Set("X-Nonce", s.Nonce)
-	req.Header.Set("X-Sign", s.Sign)
-	req.Header.Set("X-Timestamp", s.Timestamp)
-	if token != "" {
-		req.Header.Set("Authorization", "Bearer "+token)
-	}
-}
+// chatModelOf 对话体的 selected_model 取值。
+//
+// 实测（2026-10-20 probe + chatglm-cli 全部线上请求）：selected_model 恒定
+// "glm-5.3-flash" 即可，服务端不接受客户端选版本（三种 chat_mode 上报同一 moe_53f，
+// R33）；模型名的 `:moe_53f` 后缀只是展示用途，不进 selected_model。
+const chatModel = "glm-5.3-flash"
+
+func chatModelOf(_ string) string { return chatModel }
 
 // eventDate 返回清言签到接口要求的 event_date（UTC+8 当天，YYYY-MM-DD）。
 // 对应官网 JS：

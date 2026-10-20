@@ -626,8 +626,8 @@ func TestCreditSummary(t *testing.T) {
 	if items[2].Name != "new_user" {
 		t.Errorf("无 label 应回退 type：%q", items[2].Name)
 	}
-	if items[0].ExpireAt != "2026-10-31" || items[2].ExpireAt != "2026-12-31" {
-		t.Errorf("到期时间未归一到 YYYY-MM-DD（UTC+8）：%q / %q", items[0].ExpireAt, items[2].ExpireAt)
+	if !strings.HasPrefix(items[0].ExpireAt, "2026-10-31T") || !strings.HasPrefix(items[2].ExpireAt, "2026-12-31T") {
+		t.Errorf("到期时刻未保留时分秒（RFC3339/UTC+8）：%q / %q", items[0].ExpireAt, items[2].ExpireAt)
 	}
 	if !items[0].Usable {
 		t.Errorf("积分包必须标 Usable=true")
@@ -1226,12 +1226,18 @@ func TestActivityPaths(t *testing.T) {
 	}
 }
 
+// TestDateOfISO 守门：归一结果必须是**保留时分秒的 RFC3339**（UTC+8）。
+//
+// 历史（2026-10-19 变更）：旧版截到日期粒度（"2026-10-31"），面板按日期分桶，
+// 今晚 00:00 失效的包会被误报成「明日到期」。现在保留精确时刻。
+// 同时锁住时区语义：无时区后缀的串按 **UTC+8 墙钟**解析（旧实现用 time.Parse
+// 按 UTC 解析，"2026-10-31 12:00:00" 会变成 20:00+08:00，偏 8 小时）。
 func TestDateOfISO(t *testing.T) {
 	cases := map[string]string{
-		"2026-10-31T23:59:59+08:00": "2026-10-31",
-		"2026-11-01T00:00:00Z":      "2026-11-01", // UTC 零点 = 北京 08:00
-		"2026-10-31":                "2026-10-31",
-		"2026-10-31 12:00:00":       "2026-10-31",
+		"2026-10-31T23:59:59+08:00": "2026-10-31T23:59:59+08:00",
+		"2026-11-01T00:00:00Z":      "2026-11-01T08:00:00+08:00", // UTC 零点 = 北京 08:00
+		"2026-10-31":                "2026-10-31T00:00:00+08:00",
+		"2026-10-31 12:00:00":       "2026-10-31T12:00:00+08:00", // 不得按 UTC 解析成 20:00
 		"":                          "",
 		"not-a-date":                "",
 	}

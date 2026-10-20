@@ -463,14 +463,17 @@ func (c *Client) UserResourceDetail(a *auth.Auth) (int64, []provider.ResourceIte
 	return remain, items, nil
 }
 
-// balanceExpireAt 把 Unix 秒转成 provider.ResourceItem.ExpireAt 约定的**日期串**
-// （UTC+8 墙钟，YYYY-MM-DD）；上游未下发时返回空串——前端据此隐藏「有效期」列，
+// balanceExpireAt 把 Unix 秒转成 provider.ResourceItem.ExpireAt 的 **RFC3339 精确时刻**
+// （UTC+8 墙钟）；上游未下发时返回空串——前端据此隐藏「有效期」列，
 // 不得用零值时间冒充「永不过期」（AGENTS.md 不变量 18）。
+//
+// 历史：旧实现返回 "YYYY-MM-DD"，丢了时分秒。面板按「N 小时内到期」分桶需要精确时刻
+// （2026-10-19 实测）。注：zcode 的 ledger 伪键用 PlanID（不含日期），故零抖动。
 func balanceExpireAt(sec int64) string {
 	if sec <= 0 {
 		return ""
 	}
-	return time.Unix(sec, 0).In(softRateResetLoc).Format("2006-01-02")
+	return time.Unix(sec, 0).In(softRateResetLoc).Format(time.RFC3339)
 }
 
 // softRateResetLoc 本渠道的墙钟口径（UTC+8），与全仓其它渠道一致

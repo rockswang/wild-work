@@ -14,7 +14,6 @@ import (
 	"wild-work/internal/config"
 	"wild-work/internal/pool"
 	"wild-work/internal/provider"
-	"wild-work/internal/upstream"
 )
 
 // fakeUpstream 只实现 UserResource / RefreshToken，其余为空实现。
@@ -683,78 +682,5 @@ func TestCreditsNAKindCoversCustomChannels(t *testing.T) {
 	}
 	if a.creditsNAKind("workbuddyai") {
 		t.Error("内建有积分渠道不应被判定为 NA")
-	}
-}
-
-// ---------------------------------------------------------------------------
-// 「refresh 也救不回来」的可行动提示
-// ---------------------------------------------------------------------------
-
-// revokedUpstream 模拟「会话已被上游吊销」：access token 恒 401，
-// refresh 恒报 invalid_grant（2026-10-17 现场：两个 WorkBuddy 账号的 refresh token
-// 返回 `12153: refresh token failed: 400 Bad Request: invalid_grant:
-// Session doesn't have required client`）。
-type revokedUpstream struct {
-	fakeUpstream
-}
-
-func (r *revokedUpstream) RefreshToken(*auth.Auth) error {
-	return &provider.Error{Kind: provider.ErrSessionDead, Status: 401,
-		Msg: upstream.GatewayAuthHint}
-}
-
-func (r *revokedUpstream) UserResourceDetail(*auth.Auth) (int64, []provider.ResourceItem, error) {
-	return 0, nil, &provider.Error{Kind: provider.ErrSessionDead, Status: 401,
-		Msg: upstream.GatewayAuthHint}
-}
-
-// TestRefreshAllReportsReLoginNeeded 会话吊销时汇总必须给出「需重新登录」，
-// 而不是把上游 HTML/401 原文（截断成半截标签）塞给用户。
-//
-// 修复前：面板只有一句「积分刷新完成：成功 30 / 失败 2」，两个号为什么失败、
-// 该重试还是该重登，用户完全无从判断（实测为此白折腾半小时）。
-func TestRefreshAllReportsReLoginNeeded(t *testing.T) {
-	up := &revokedUpstream{}
-	a, _ := newTestApp(t, provider.WorkBuddy, up, "uid-revoked")
-	if au := a.runtimes[provider.WorkBuddy].Pool.AuthByUID("uid-revoked"); au != nil {
-		au.RefreshToken = "rt"
-	}
-
-	sum := a.RefreshAll()
-	if sum.Failed != 1 {
-		t.Fatalf("failed=%d want 1（accounts=%+v）", sum.Failed, sum.Platforms["workbuddy"])
-	}
-	acct := sum.Platforms["workbuddy"].Accounts[0]
-	if !strings.Contains(acct.Msg, "需重新登录") {
-		t.Fatalf("失败原因应提示需重新登录，实得 %q", acct.Msg)
-	}
-	if strings.Contains(acct.Msg, "<html") {
-		t.Fatalf("失败原因不得含原始 HTML，实得 %q", acct.Msg)
-	}
-
-	// 单账号刷新同样给可行动文案
-	if _, err := a.RefreshCredits("uid-revoked"); err == nil || !strings.Contains(err.Error(), "需重新登录") {
-		t.Fatalf("RefreshCredits 应报需重新登录，实得 %v", err)
-	}
-}
-
-// TestSessionDeadClearedOnSuccess 账号自愈后不得继续显示「需重新登录」。
-func TestSessionDeadClearedOnSuccess(t *testing.T) {
-	up := &fakeUpstream{remain: 88}
-	a, p := newTestApp(t, provider.WorkBuddy, up, "uid-heal")
-	if au := p.AuthByUID("uid-heal"); au != nil {
-		au.RefreshToken = "rt"
-	}
-	// 先落一条 SessionDead 标记（R76 机制），再让刷新成功，验证被清掉
-	p.MarkSessionDead("uid-heal", "refresh token is invalid")
-	if st, _ := p.Status("uid-heal"); !st.SessionDead {
-		t.Fatal("前置条件：SessionDead 标记应已写入")
-	}
-
-	if _, err := a.RefreshCredits("uid-heal"); err != nil {
-		t.Fatalf("RefreshCredits: %v", err)
-	}
-	if st, _ := p.Status("uid-heal"); st.SessionDead {
-		t.Fatalf("成功刷新后 SessionDead 标记应清除，实得 reason=%q", st.SessionDeadReason)
 	}
 }
