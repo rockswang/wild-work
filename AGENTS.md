@@ -118,7 +118,7 @@
 | R80 | **档位注入走上游 efforts 映射，能力表只做校验/展示**：注入 = `config.ReasoningEfforts`（`*` 通配，`handler.applyEffort`）；`internal/reasoning` 保留为能力表（`Clamp`/`Listing`）供渠道校验与面板展示 |
 | R81 | **DeepSeek 思考开关与多轮回填**（`internal/upstream/thinking.go`）：客户端表达思考意图时补 `thinking.type` + 默认档；每条 assistant 消息回填 `reasoning_content`（字符串），否则上游按「不思考」应答 |
 | R82 | **loomy 流式路径必须识别「HTTP 200 + 业务错误体」**：整段非 SSE 时补 error 帧、**不补 `[DONE]`**、不计成功；单号渠道流内登录态失效**不硬禁用**（走 SessionDead 标记；实测 100002 会自愈，硬禁用 = 整渠道下线） |
-| R107 | **Qoder 三渠道（qoder/qodercn/qodercom）流式必须剥壳识别信封内嵌 `statusCodeValue>=400`**：上游把排队/限流拒绝（`10605`/`RESOURCE_LIMIT`，带 `retryAfterSeconds`）塞在 HTTP 200 的 SSE 信封里，`parseNestedSSE` 原先只解 `body` → 要么空等到空闲看门狗误报 `truncated`，要么被收尾 `[DONE]` 伪造成空成功流；现补结构化 error 帧（含 `retry_after_seconds`）、**不补 `[DONE]`**，`RESOURCE_LIMIT`/`10605` 归 `ErrSoftRate` |
+| R107 | **Qoder 三渠道（qoder/qodercn/qodercom）流式必须剥壳识别信封内嵌 `statusCodeValue>=400`**：上游把失败塞在 HTTP 200 的 SSE 信封里，实测有**两种形态**——内嵌 403 + `10605`/`RESOURCE_LIMIT`（带 `retryAfterSeconds`）与内嵌 429 + 纯文本 rate limit，原先 `parseNestedSSE` 只解 `body` → 两种同形地表现为「连续无字节被空闲看门狗掐成 truncated」，上游若发完即断连更被收尾 `[DONE]` 伪造成空成功流；现补结构化 error 帧（含 `retry_after_seconds`）、**不补 `[DONE]`**，两类均归 `ErrSoftRate`（2026-10-21 压测实证：被拒请求 0.4s 返回，修前 90.7s 白等） |
 
 > ⚠️ **R71 附带的实测纪律**（也是 §0.1 的来源）：上游校验的是**头族齐全**而非单点
 > （只补 `X-Conversation-ID` 仍被拒）；且 `X-Conversation-ID` 的**取值形态不被校验**
