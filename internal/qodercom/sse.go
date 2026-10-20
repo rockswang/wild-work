@@ -6,10 +6,12 @@ package qodercom
 import (
 	"bufio"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
+	"regexp"
 	"strings"
 	"time"
 
@@ -18,6 +20,7 @@ import (
 )
 
 // parseNestedSSE 逐行解析嵌套 SSE，每个有效 chunk 调 onChunk。
+//   - 信封 statusCodeValue >= 400 → 返回 *sseError（上游以 HTTP 200 包裹业务失败，R107）
 //   - body == "[DONE]" → 正常结束
 //   - "event:finish" 行 → 忽略
 //   - body 二次 unmarshal 失败 → 跳过该行（不致命）
@@ -29,6 +32,124 @@ import (
 //
 // 注意：本渠道的 [DONE] 在 envelope 内部（body=="[DONE]"），**不是**客户端可见的
 // data: [DONE] 帧，故它只用于停止解析，不能拿来抑制调用方的收尾帧。
+// sseError 是「HTTP 200 + 信封内嵌 statusCodeValue>=400」形态的流内业务错误。
+//
+// Qoder 上游把排队/限流拒绝塞在 SSE 信封里下发（2026-10-21 抓包实证）：
+//
+//	data:{"headers":{...},"body":"{\"code\":\"403\",\"message\":\"{\\\"code\\\":\\\"10605\\\","
+//	"...\\\"subCode\\\":\\\"RESOURCE_LIMIT\\\"}\"}","statusCodeValue":403,"statusCode":"FORBIDDEN"}
+//
+// 修复前信封只解 body：该帧的 body 是合法 JSON（但没有 choices），于是被当普通 chunk
+// 原样透传，客户端既看不懂也收不到失败信号。两种表现都坏——
+//   - 上游保持连接：连续无字节，90s 后被空闲看门狗掐成「upstream stream truncated」，
+//     错误原因（限流/排队）在日志与客户端两侧都看不见；
+//   - 上游发完即断连：parseNestedSSE 正常返回 nil，收尾补一个 data:[DONE]，
+//     **失败被包装成「空内容的成功流」**。
+//
+// 现在：判出 statusCodeValue>=400 立刻返回本错误，调用方补一帧带原因的 SSE error
+// 并**不补 [DONE]**（R36，同 loomy/officeace 口径），handler 据 Kind() 决定惩罚。
+type sseError struct {
+	status     int
+	msg        string
+	retryAfter int // 上游 retryAfterSeconds / waitTime；0 = 上游未声明
+}
+
+func (e *sseError) Error() string { return fmt.Sprintf("upstream %d: %s", e.status, e.msg) }
+
+// Kind 复用与 HTTP 路径同一套 Classify，使 server 层不必 import 本渠道包。
+func (e *sseError) Kind() provider.ErrKind { return Classify(e.status, e.msg) }
+
+var _ provider.StreamErrorClassifier = (*sseError)(nil)
+
+// envelope Qoder 系 SSE 的外层信封。body 是**字符串**（内层 JSON 文本），
+// 与 internal/qwenwork 的 json.RawMessage 形状不同，不能照抄那边的写法。
+type envelope struct {
+	Body            string `json:"body"`
+	StatusCodeValue int    `json:"statusCodeValue"`
+	StatusCode      string `json:"statusCode"`
+}
+
+// errText 提取上游错误文案；非错误信封返回空串。
+// body 形如 {"code":"403","message":"<再嵌一层的 JSON 文本>"}，文案取 message 原文
+// （内层 10605/RESOURCE_LIMIT 等结构化字段随之带出，不做二次解析）。
+func (e *envelope) errText() string {
+	if e.StatusCodeValue < 400 {
+		return ""
+	}
+	var withMsg struct {
+		Code    string `json:"code"`
+		Message string `json:"message"`
+	}
+	if json.Unmarshal([]byte(e.Body), &withMsg) == nil && withMsg.Message != "" {
+		return withMsg.Message
+	}
+	return truncate(e.Body, 300)
+}
+
+// retryAfterRe 从错误文案里取建议退避秒数。上游在同一处既给 retryAfterSeconds 也给
+// waitTime，取前者、回落后者；只匹配十进制整数。
+//
+// 必须容忍键名两侧的反斜杠：该字段在原始信封 body 里被逐层转义，解出一层后仍带反斜杠。
+// 只匹配裸 "retryAfterSeconds" 的正则会静默失配 → retry_after_seconds 不下发，
+// 客户端只能盲重试。
+var (
+	retryAfterRe = regexp.MustCompile(`\\*"retryAfterSeconds\\*"\s*:\s*(\d+)`)
+	waitTimeRe   = regexp.MustCompile(`\\*"waitTime\\*"\s*:\s*(\d+)`)
+)
+
+// maxRetryAfter 退避时长的合理上限：超了按未声明处理——宁可少给一个提示，
+// 不可给一个错的等待时长。
+const maxRetryAfter = 3600
+
+func parseRetryAfter(s string) int {
+	for _, re := range []*regexp.Regexp{retryAfterRe, waitTimeRe} {
+		if m := re.FindStringSubmatch(s); m != nil {
+			var n int
+			if _, err := fmt.Sscanf(m[1], "%d", &n); err == nil && n > 0 && n <= maxRetryAfter {
+				return n
+			}
+		}
+	}
+	return 0
+}
+
+// streamErrorCode 给出出口 error 帧的 code，便于客户端/日志分原因。
+func streamErrorCode(k provider.ErrKind) string {
+	switch k {
+	case provider.ErrSoftRate:
+		return "upstream_rate_limited"
+	case provider.ErrSessionDead:
+		return "upstream_session_dead"
+	default:
+		return "upstream_business_error"
+	}
+}
+
+// writeStreamErrorFrame 把流内业务错误写成一帧 SSE error（调用方**不得**再补 [DONE]）。
+// retry_after_seconds 只在上游声明了退避时长时输出——上游没给就不编造。
+func writeStreamErrorFrame(w io.Writer, e *sseError) {
+	errObj := map[string]any{
+		"message": truncate(e.msg, 300),
+		"type":    "upstream_error",
+		"code":    streamErrorCode(e.Kind()),
+	}
+	if e.retryAfter > 0 {
+		errObj["retry_after_seconds"] = e.retryAfter
+	}
+	frame, merr := json.Marshal(map[string]any{"error": errObj})
+	if merr != nil {
+		// 纯字符串/整数 map，序列化不会失败；真失败也要保证客户端拿到一帧原因。
+		frame = []byte(`{"error":{"message":"upstream business error","type":"upstream_error","code":"upstream_business_error"}}`)
+	}
+	if _, werr := w.Write(append(append([]byte("data: "), frame...), []byte("\n\n")...)); werr != nil {
+		log.Printf("qodercom stream error frame write failed: %v", werr)
+		return
+	}
+	if fl, ok := w.(interface{ Flush() }); ok {
+		fl.Flush()
+	}
+}
+
 func parseNestedSSE(r io.Reader, onChunk func(map[string]any) error, truncated *bool) error {
 	set := func() {
 		if truncated != nil {
@@ -45,10 +166,20 @@ func parseNestedSSE(r io.Reader, onChunk func(map[string]any) error, truncated *
 		line = strings.TrimRight(line, "\r\n")
 		if strings.HasPrefix(line, "data:") {
 			payload := strings.TrimPrefix(line, "data:")
-			var env struct {
-				Body string `json:"body"`
-			}
+			var env envelope
 			outerOK := json.Unmarshal([]byte(payload), &env) == nil
+			// 剥壳判错（R107）：上游把排队/限流拒绝放在 200 连接里下发，
+			// statusCodeValue>=400 即失败。必须在此拦下——继续走 onChunk 的话，
+			// 客户端收到一帧没有 choices 的伪 chunk，之后要么空等到空闲看门狗
+			// （90s 后误报 truncated），要么被收尾 [DONE] 伪造成空成功流。
+			if outerOK && env.StatusCodeValue >= 400 {
+				msg := env.errText()
+				if msg == "" {
+					msg = truncate(env.Body, 300)
+				}
+				// 退避秒数在原始 Body 与解出的 msg 里都可能出现（转义层级不同），两处都扫。
+				return &sseError{status: env.StatusCodeValue, msg: msg, retryAfter: parseRetryAfter(env.Body + "\n" + msg)}
+			}
 			innerOK := false
 			if outerOK && env.Body != "" {
 				if env.Body == "[DONE]" {
@@ -288,6 +419,17 @@ func streamAsOpenAI(w io.Writer, r io.Reader, model string, flush func()) (map[s
 			flush()
 		}
 		return usage, provider.TruncationError(err)
+	}
+	// 流内业务错误（信封内嵌 statusCodeValue>=400，R107）：补一帧带原因的 SSE error
+	// 并**不补 [DONE]**（R36）——补了就把失败伪装成正常结束，客户端会拿着空结果继续走，
+	// 网关侧还把它记成一条成功流水。原因与退避时长一并结构化传出，重试交回客户端。
+	var sErr *sseError
+	if errors.As(err, &sErr) {
+		writeStreamErrorFrame(w, sErr)
+		if flush != nil {
+			flush()
+		}
+		return usage, sErr
 	}
 	if err != nil {
 		return usage, err

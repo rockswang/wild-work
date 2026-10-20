@@ -584,6 +584,16 @@ func Classify(status int, body string) provider.ErrKind {
 	if status == http.StatusTooManyRequests {
 		return provider.ErrSoftRate
 	}
+	// 上游以 HTTP 200 包裹的排队/限流拒绝：内嵌 403 + subCode:RESOURCE_LIMIT
+	// （业务码 10605，带 retryAfterSeconds/waitTime/serviceAvailable:false）。
+	// 必须排在「403 且 body 为空 → ErrWafBlock」与 4xx 兜底之前，否则落 ErrClient
+	// ——既不罚账号也不进流错误分类，客户端只看到一条被空闲看门狗掐成的截断流（R107）。
+	// 10605 走 provider.CodeMarker 而非裸 Contains：错误文本里的 trace_id/requestId
+	// 常含五位数字，裸匹配会把无关失败误判成限流（与 11115 同一教训）。
+	if strings.Contains(body, "RESOURCE_LIMIT") ||
+		(strings.Contains(body, "serviceAvailable") && provider.CodeMarker(lower, "10605")) {
+		return provider.ErrSoftRate
+	}
 	for _, m := range hardMarkers {
 		if strings.Contains(lower, strings.ToLower(m)) || strings.Contains(body, m) {
 			return provider.ErrHardCredit
