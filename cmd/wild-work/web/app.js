@@ -1328,25 +1328,20 @@ async function toggleAutostart() {
   } catch (e) { toast(e.message); loadState(); }
 }
 
-// ---------- 设置弹层（统一配置：监听/API-Key/签到/自启/模型路由/渠道代理） ----------
-// PROXY_CHANNELS 渠道上游代理列表（顺序与面板渠道序一致；旧 qoder 已下线不提供代理配置）。
-// ⚠️ 必须覆盖全部已接渠道：SetProxies 是**整份替换** cfg.Proxies，此处漏掉的渠道
-// 在面板保存时会被静默清空（手改 config.json 配的代理会丢）。raccoon/loomy/monkeycode/
-// traecode 曾因漏登记而丢失代理配置（2026-09-24 补）。
-const PROXY_CHANNELS = ["oczen", "workbuddy", "workbuddyai", "qodercn", "qodercom", "traework", "traecode", "qwenwork", "glm", "raccoon", "loomy", "monkeycode"];
-// 代理行的渠道名同样复用 chLabel（原 PROXY_HINT 是第三份副本，已删除）。
-
-// renderProxyList 按当前 state.proxies 渲染每渠道一个输入行。
-function renderProxyList() {
-  const proxies = state.proxies || {};
-  $("proxyList").innerHTML = PROXY_CHANNELS.map((ch) => {
-    const val = proxies[ch] || "";
-    return `<div class="row proxy-row">
-      <label class="lbl wide" title="${esc(chLabel(ch))}">${esc(chLabel(ch))}</label>
-      <input class="input grow proxy-input" data-ch="${ch}" value="${esc(val)}" spellcheck="false" placeholder="如 socks5://127.0.0.1:1080（留空直连）">
-    </div>`;
-  }).join("");
-  $("proxyErr").textContent = "";
+// ---------- 设置弹层（统一配置：监听/API-Key/签到/自启/模型路由/备用上游通道） ----------
+// renderBackupProxy 回显「备用上游通道」（决议 R57）。
+//
+// 它取代了旧的「每渠道上游代理」（cfg.proxies，整份替换、漏登记渠道即静默清空）：
+// 现在只有一个**全局**地址，且默认不参与任何请求——全部渠道照常直连，只有渠道自己
+// 判定「这次请求被上游按地区拒绝」时才在同一次请求内取用它重放一次
+// （当前取用方：cline 区域限制模型、oczen RegionError，见 internal/backuplink）。
+// 后端启动时会把旧配置里的 proxies 段一次性迁移到本字段，故前端不必再兼容旧形态。
+function renderBackupProxy() {
+  $("backupProxyInput").value = state.backup_proxy || "";
+  $("backupProxyState").textContent = state.backup_proxy_active
+    ? "已启用：仅在上游按地区拒绝时按需取用，常规请求仍直连。"
+    : "未启用：所有请求直连，上游地区拒绝将原样透传给客户端。";
+  $("backupProxyErr").textContent = "";
 }
 
 // selectedHost 当前下拉框（+自定义输入）选定的监听主机名。
@@ -1406,8 +1401,8 @@ function openSettings() {
   $("mapEditor").classList.add("hidden");
   $("mapErr").textContent = "";
   renderMapPresets(channels);
-  // 渠道代理 + oczen 自定义 key
-  renderProxyList();
+  // 备用上游通道 + oczen 自定义 key
+  renderBackupProxy();
   $("oczenKeyInput").value = state.oczen_api_key || ""; // 回显脱敏值；未改动则原样回传，后端按脱敏值识别为「未变」
   $("oczenKeyInput").dataset.touched = "";
   // 自动签到 + 开机自启 + 临期阈值
@@ -1421,22 +1416,18 @@ function closeSettings() {
   $("settingsOverlay").classList.add("hidden");
 }
 
-// validateProxies 收集代理输入并做本地形态校验，返回 {proxies, err}。
-function validateProxies() {
-  const proxies = {};
-  for (const inp of document.querySelectorAll(".proxy-input")) {
-    const ch = inp.dataset.ch;
-    const v = inp.value.trim();
-    if (!v) continue;
-    let u;
-    try { u = new URL(v); } catch { return [null, `渠道 ${ch} 代理地址无效：${v}`]; }
-    if (!["http:", "https:", "socks5:"].includes(u.protocol)) {
-      return [null, `渠道 ${ch} 代理协议不支持（仅 http/https/socks5）：${v}`];
-    }
-    if (!u.hostname) return [null, `渠道 ${ch} 代理缺少主机名：${v}`];
-    proxies[ch] = v;
+// validateBackupProxy 校验备用上游通道地址，返回 [值, 错误]。空串合法（= 关闭）。
+// 判据与后端 backuplink.Parse 同口径：http/https/socks5 + 必须有 host。
+function validateBackupProxy() {
+  const v = $("backupProxyInput").value.trim();
+  if (!v) return ["", ""];
+  let u;
+  try { u = new URL(v); } catch { return [null, `备用通道地址无效：${v}`]; }
+  if (!["http:", "https:", "socks5:"].includes(u.protocol)) {
+    return [null, `备用通道协议不支持（仅 http/https/socks5）：${v}`];
   }
-  return [proxies, ""];
+  if (!u.hostname) return [null, `备用通道缺少主机名：${v}`];
+  return [v, ""];
 }
 
 // testOczenKey 「测试」按钮：用输入框当前的候选 key（含脱敏值/空）调后端实测。
@@ -1448,7 +1439,7 @@ async function testOczenKey() {
   btn.disabled = true;
   const old = btn.textContent;
   btn.textContent = "测试中…";
-  $("proxyErr").textContent = "";
+  $("backupProxyErr").textContent = "";
   try {
     let k = $("oczenKeyInput").value.trim();
     if (k.includes("…")) k = ""; // 脱敏形态 = 未改动，用当前配置值测
@@ -1487,10 +1478,10 @@ async function saveSettings() {
     } catch (e) { toast(e.message); closeSettings(); showLogin("管理密码已变更，请重新登录"); return; }
   }
 
-  // 2) 代理（先本地校验，失败阻断保存）+ oczen key（仅在用户改动过时提交，避免把脱敏回显值存回）
-  const [proxies, perr] = validateProxies();
-  if (perr) { $("proxyErr").textContent = perr; toast(perr); return; }
-  const body = { proxies };
+  // 2) 备用上游通道（先本地校验，失败阻断保存）+ oczen key（仅在用户改动过时提交，避免把脱敏回显值存回）
+  const [backupProxy, perr] = validateBackupProxy();
+  if (perr) { $("backupProxyErr").textContent = perr; toast(perr); return; }
+  const body = { proxy: backupProxy };
   const kIn = $("oczenKeyInput");
   if (kIn.dataset.touched === "1") {
     let k = kIn.value.trim();
@@ -1499,7 +1490,7 @@ async function saveSettings() {
     if (k !== undefined) body.oczen_api_key = k; // undefined 时不携带字段 = 不改动；空串 = 清除回匿名
   }
   try {
-    await api("/api/config/proxies", body);
+    await api("/api/config/proxy", body);
   } catch (e) { toast(e.message); return; }
 
   // 3) 模型映射：优先读编辑器；编辑器从未展开过则用原值（保证「只改监听/渠道不碰映射」）

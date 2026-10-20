@@ -312,6 +312,11 @@ Cline（`cline-free/*`）、华为云果办 OfficeAce（`officeace/*`）；
 > ⚠️ **本地构建是日常约束**：任何代码变更后都要重新构建 `dist/wild-work.exe`（见 §2 第 0 条）。
 > CI 不生成该文件，且 `dist/` 不入版本控制。
 > 标准流程：`go build -tags devdump ./... && go vet -tags devdump ./... && go test -tags devdump ./...` 全绿后再构建。
+> 前端（`cmd/wild-work/web`）另需 `node --check cmd/wild-work/web/app.js && node scripts/ui-static-check.mjs`。
+> 其中 `internal/app/frontend_routes_test.go` 把「app.js 里出现的每个 `/api/…` 字面量」与后端路由注册逐条比对：
+> 端点被改名/删除而前端没跟上即失败。本仓 web 三件套自维护（B 决策），上游改端点不会连带改它——
+> R57 把「每渠道代理」换成单一 `POST /api/config/proxy` 后，面板仍调已删除的 `POST /api/config/proxies`，
+> 保存静默失败到 2026-10-21 才发现；上游 R100 的 `GET /api/stats` 在合并中被吞也是同类（面板 404）。
 > **默认构建统一带 `-tags devdump`**（含 CI 与发版）：取证能力常态编入，运行期由 `WILDWORK_DUMP_DIR` 控制（未设置时零开销）。
 > 本机设过 `WILDWORK_DUMP_DIR`（常驻实例取证用）时，跑测试要显式清空它——
 > 测试进程会继承该变量，把 fixture 请求也 dump 进同一目录（见 §5）：`WILDWORK_DUMP_DIR= go test -tags devdump ./...`。

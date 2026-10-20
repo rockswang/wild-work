@@ -271,7 +271,7 @@
   </div>
 </div>
 
-<!-- 设置弹层（统一配置入口：监听/API-Key/模型路由/渠道代理） -->
+<!-- 设置弹层（统一配置入口：监听/API-Key/模型路由/备用上游通道） -->
 <div class="overlay hidden" id="settingsOverlay">
   <div class="modal modal-wide">
     <div class="modal-title">设置</div>
@@ -360,18 +360,22 @@
         </div>
       </div>
 
-      <!-- 单渠道上游代理 -->
+      <!-- 备用上游通道（R57：单一地址，仅上游按地区拒绝时按需取用） -->
       <div class="cfg-section">
-        <div class="cfg-heading">渠道上游代理</div>
-        <div class="hint" style="margin:0 0 8px">给指定渠道的上游请求单独配置代理（http/https/socks5），留空 = 直连。典型用途：OpenCodeZen 的区域限制模型需要经代理访问。</div>
-        <div class="hint" style="margin:0 0 8px">OC Zen Key 留空 = 匿名凭证；填入 sk-… 自定义 key 可解锁独立配额与付费模型。</div>
-        <div id="proxyList" class="proxy-list"></div>
-        <div class="row" style="margin-top:8px">
+        <div class="cfg-heading">备用上游通道</div>
+        <div class="hint" style="margin:0 0 8px">单一代理地址（http/https/socks5），留空 = 关闭。它<b>不参与常规请求</b>：全部渠道照常直连，只有渠道判定「这次请求被上游按地区拒绝」时才在同一次请求内用它重放一次。当前取用方：cline（区域限制模型）、OpenCodeZen（RegionError）。</div>
+        <div class="row">
+          <label class="lbl wide" title="备用上游通道代理地址">备用通道</label>
+          <input id="backupProxyInput" class="input grow proxy-mono" spellcheck="false" placeholder="如 socks5://127.0.0.1:1080（留空 = 关闭，全部直连）">
+        </div>
+        <div class="hint" id="backupProxyState" style="margin-top:6px"></div>
+        <div class="hint" style="margin:10px 0 8px">OC Zen Key 留空 = 匿名凭证；填入 sk-… 自定义 key 可解锁独立配额与付费模型。</div>
+        <div class="row">
           <label class="lbl wide" title="OpenCodeZen 自定义 API key">OC Zen Key</label>
           <input id="oczenKeyInput" class="input grow" spellcheck="false" placeholder="留空 = 匿名凭证 public（sk-… 可解锁独立配额/付费模型）">
           <button class="btn small" id="btnOczenTest">测试</button>
         </div>
-        <div class="hint" id="proxyErr" style="color:var(--danger)"></div>
+        <div class="hint" id="backupProxyErr" style="color:var(--danger)"></div>
       </div>
 
     </div>
@@ -414,9 +418,10 @@
         （点击可复制，完整模型名为 <code>前缀 + 模型名</code>）：</p>
       <p class="prefix-list" id="helpPrefixes"></p>
       <p>也支持裸名（走「设置 → 模型路由」的 <code>默认渠道</code> / <code>映射表</code> 配置）。</p>
-      <p>5. 账号显示名可点击卡片上的名字直接修改；顶栏齿轮进入统一设置（监听 / API-Key / 模型路由 / 渠道上游代理）。</p>
-      <p>6. 渠道上游代理：给单个渠道的上游请求配置独立代理（http/https/socks5），留空即直连；
-        OpenCodeZen 的区域限制模型需经代理访问时可在此配置。</p>
+      <p>5. 账号显示名可点击卡片上的名字直接修改；顶栏齿轮进入统一设置（监听 / API-Key / 模型路由 / 备用上游通道）。</p>
+      <p>6. 备用上游通道：一个全局代理地址（http/https/socks5），留空即关闭。它<b>不影响常规请求</b>——
+        所有渠道照常直连，只有上游按地区拒绝时（cline 区域限制模型、OpenCodeZen 的 RegionError）
+        才由该渠道在同一次请求内取用它重放一次。</p>
       <p>7. 积分会随聊天消耗实时变化，"全部刷新积分"可即时获取最新余额。</p>
       <p>8. 日志文件位于 exe 目录下 <code>data/app.log</code>，可从托盘菜单"查看日志"打开。</p>
       <p>9. 退出程序：右键托盘图标选择"退出"。</p>

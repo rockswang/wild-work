@@ -457,9 +457,8 @@ body {
 .lbl.wide { width: 90px; flex-shrink: 0; white-space: nowrap; }
 
 /* 配置行列表（备用上游通道 / 模型降级链共用） */
-.proxy-list { display: flex; flex-direction: column; gap: 6px; }
-.proxy-row { margin-bottom: 0; }
-.proxy-row .input { font-family: ui-monospace, Consolas, monospace; font-size: 12px; }
+/* 备用上游通道的地址输入框：等宽字体便于比对 host:port */
+.proxy-mono { font-family: ui-monospace, Consolas, monospace; font-size: 12px; }
 
 /* 自定义渠道层级卡片（R64） */
 .custom-channels-list { display: flex; flex-direction: column; gap: 8px; }
