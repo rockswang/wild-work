@@ -45,7 +45,7 @@
 
 ---
 
-## 1. 决议项索引（R1–R115）
+## 1. 决议项索引（R1–R116）
 
 **全文（含证据链、反例、已知限制）见 [`docs/决议项.md`](docs/决议项.md)** —— 改动相关代码前必读对应条目。
 
@@ -147,6 +147,7 @@
 | R113 | **工具结果（tool / function_call_output / tool_result）里的图片必须走 vision 通道，不得 stringify 成 base64 文本**（2026-10-21，issue #174）：Codex 的 `view_image` 把截图以 `input_image` 块放进 `function_call_output`，旧 `stringifyOutput` 取不到文本块后回退 `json.Marshal`，整张 PNG 的 base64 变成一条超长**文本**消息——实测 1.6MB base64 ≈ 146 万 token，把 1M 上下文的 `deepseek-v4.1-flash` 直接打成 `prompt is too long: 1596603 tokens > 1048576 maximum`；同一张图按 vision 只花约 1K token（差 1500 倍）。且 Codex 本地 token 计数**不含** base64，它认为才 130K、远未到 950K 压缩阈值，于是每轮原样重放、会话彻底报废（`/compact` 也救不了，压缩本身同样超限）。修法：`internal/gateway` 用 `toolContentValue` 取代 `stringifyOutput`，`input_image`/`image_url`/Anthropic `image{source}` 一律转成 Chat 的 `image_url` 内容块（`role:"tool"` 的 `content` 用数组，`detail` 透传）；纯文本仍返回 string（零行为变化，兼容只认 string 的上游）；只有图片时补 `[image]` 文本占位（剥离非 text 块的渠道如 codearts 不至于拿到空 content）。**实测**：上游 Chat 接口接受 tool 消息带图片数组（同图 146 万 → 1009 token，回复内容正确识别截图）。测试：`internal/gateway/tool_image_test.go` 7 例（图片转块/detail 透传/纯文本保 string/纯图补占位/图文混合/对象兜底/Anthropic tool_result/20 万字符不算文本） |
 | R114 | **入站请求体上限 32MiB → 128MiB（可配），且转发前把内联图片缩到长边 1568px / JPEG 重编码**（2026-10-21，issue #176）：R113 只解决了「图片被 stringify 成 base64 文本」的 token 爆炸，**字节**这一维没解决——无状态客户端（Codex）每轮把整段历史原样重放，一个会话累积 12 张 2048px 截图 = 33.01MiB base64（文本仅 0.43MiB），请求体 33.44MiB 撞 32MiB 硬限回 `413 Payload Too Large`，会话报废。两道闸：① `server.MaxRequestBody` 改为可变 + 默认 128MiB，可用 `config.json` 的 `server.max_request_body_mb` 调整（钳 8~1024）；② 新增 `internal/gateway/imageslim.go` 的 `imageURLBlock`/`slimDataURLImage`，`/v1/responses` 的用户附图、`function_call_output`、Anthropic `image` 块三处入口统一在**转发前**把 data URL 图片降采样到长边 ≤1568 并按需重编码 JPEG q85（带 alpha 走 PNG），按 payload sha256 缓存（历史重放免重复解码）。实测同一会话：入站 33.48MiB → 转发上游 4.03MiB（8.3x），12 张图 33.01→2.86MiB；真实上游单发 3 张截图 200/input_tokens=655，回复逐张准确描述画面（连底部「WASD移动」小字都读对）。**只动 data URL**：http(s) 直链不下载不改写；解码失败/像素超 5000 万/体积没变小一律原样返回 |
 | R115 | **DSH（DeepSeek Harness）身份句必须脱敏，否则上游按「system 消息开头逐字前缀」回 400 code=11-128**（2026-10-21，PR #178） | 上游对 `system` 消息做**开头逐字前缀**匹配：只要 system 以 `You are an AI agent powered by DeepSeek Harness` 开头（句号可有可无）即回 `HTTP 400 {"code":11-128,"msg":"Illegal API invocation from an unapproved channel"}`。**单发 A/B 实测矩阵**（同渠道同模型，遵守 §0.1 最小请求数）：该句放 user role → 200；两句 user → 200；system 放第二句 / 前面加 `Intro line.\n\n` / 截成 `powered by DeepSeek Harness.` / 截成 `AI agent powered by DeepSeek Harness.` / 写成 `powered by DeepSeek.` → 全 200；只有「system 开头 + 完整第一句」→ 400。判据是**逐字前缀**，不是关键词、不是语义审核。**修法**：`internal/sanitize`（`PrepareBody` 真实调用入口）与 `internal/upstream`（参考项目平移的平行实现）两份脱敏表各补一条 —— 特征串 `You are an AI agent powered by DeepSeek Harness` + 最小改写「在 `DeepSeek Harness` 前插冠词 the」。选插冠词而非 `built on`（换实词）、全角空格（NFKC 会折叠回普通空格，抗归一化差）：语义扰动最小、改动可见可 review、不依赖不可见字符。**两份表必须同步**：`internal/upstream/payload.go:15` 的 `PrepareBody` 是 `sanitize.Messages(prepareBodyInner(src))`，`internal/sanitize` 才是生产路径（`internal/workbuddyai/wb_utils.go:22` 同款），`internal/upstream/sanitize.go` 的 `sanitizeMessages` 由 `prepareBodyInner` 内部调用，漏一处等于没修。**回归**：`internal/upstream/sanitize_test.go` 的 `TestSanitizeLiteralByteExact` 逐字节快照同步（`sanitizeFeatures` 7→8 项、`sanitizeRewrites` 5→6 对、头注释同改）+ 3 个新用例（`TestDSHIdentityRewritten` 改写生效且后缀保留 / `TestPrepareBodySanitizesDSHSystem` 经真实调用链落到 system content / `TestDSHVariantNotTouched` 三个措辞相近变体不得被误改）。PR 原提交未跑单测（快照当场变红） |
+| R116 | **/v1/models 模型元数据对齐 OpenRouter 原生推理网关规范，移除冗长思考强度档位列表**（2026-10-21，用户决议）：`buildModelEntry` 补齐 `supported_parameters` 标准参数声明，`reasoning` 对象补齐 `mandatory`，彻底移除 `supported_efforts` 冗长数组；修复原生 R1 等无档位思考模型识别；完整档位与倍率继续由 `GET /api/fees` 供应 |
 
 > ⚠️ **R71 附带的实测纪律**（也是 §0.1 的来源）：上游校验的是**头族齐全**而非单点
 > （只补 `X-Conversation-ID` 仍被拒）；且 `X-Conversation-ID` 的**取值形态不被校验**
@@ -414,7 +415,7 @@ bash scripts/probe-dump.sh summarize                # 汇总各渠道 usage 字�
 | [README.md](README.md) | 用户文档 |
 | [DEVELOPMENT.md](DEVELOPMENT.md) | 开发者文档（面向 AI Agent） |
 | [AGENTS.md](AGENTS.md) | **本文件**：纪律 + 决议索引 + 关键不变量 + 构建发版 |
-| [docs/决议项.md](docs/决议项.md) | **R1–R115 决议全文**（证据链、反例、已知限制） |
+| [docs/决议项.md](docs/决议项.md) | **R1–R116 决议全文**（证据链、反例、已知限制） |
 | [docs/渠道接入备忘.md](docs/渠道接入备忘.md) | 各渠道协议要点、凭据模型、已知限制与踩坑 |
 | [docs/接口参考.md](docs/接口参考.md) | 面板区块规划 + 管理 API 全量清单 |
 | [docs/模型降级链定义.md](docs/模型降级链定义.md) | **模型降级链的唯一权威定义**：三维归因、错误类型全量归属、两条触发路径、三条硬规则、已知限制（R94） |

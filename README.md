@@ -129,6 +129,16 @@ wild-work 的 `/v1/models` 端点返回当前所有可用模型。在终端中�
 curl -s -H "Authorization: Bearer WildWorkAPI" http://127.0.0.1:7863/v1/models
 ```
 
+返回结构对齐 **OpenRouter / llama.cpp** 原生推理网关标准规范，主流客户端（Cline、Codex、LobeChat、Cherry Studio 等）可开箱即用原生识别模型能力：
+- **`supported_parameters`**：标准声明模型支持的控制参数（如 `tools`、`tool_choice`、`reasoning`、`include_reasoning`、`reasoning_effort` 等）；
+- **`reasoning`**：原生推理对象，包含 `mandatory`（是否强制开启思考）、`default_effort`（默认档位，若上游有声明）、`can_disable_thinking`（是否可关闭思考）；精简输出，不向下游客户端发送冗长的非标档位数组；
+- **`architecture`**：多模态输入模态声明（`input_modalities: ["text", "image"]` 等）；
+- **`context_length` / `max_output_tokens`**：上下文容量与最大生成 token 限制。
+
+> 💡 **查询倍率与积分明细**：
+> - 如需查询上游申报的**各模型积分倍率与完整思考档位明细**，请调用管理接口 `GET /api/fees`；
+> - 如需查询各账号当前**可用积分余额与配额明细**，请调用 `GET /api/state` 或 `POST /api/account/resource_detail`。
+
 ### 2. 配置 Pi（models.json）
 
 Pi 不支持自动拉取模型列表，需要手动编辑 `~/.pi/agent/models.json`（Windows 路径 `C:\Users\<用户名>\.pi\agent\models.json`），在 `providers` 中加入 wild-work 配置：
