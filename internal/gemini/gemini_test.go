@@ -767,6 +767,67 @@ func TestStaticModelsAndNoCheckin(t *testing.T) {
 	var _ provider.Upstream = (*Client)(nil)
 }
 
+// TestFetchModelsDynamicAndFallback 测试从上游动态拉取模型列表与过滤规则
+func TestFetchModelsDynamicAndFallback(t *testing.T) {
+	fakeJSON := `{
+		"models": {
+			"gemini-3.8-flash": {"displayName": "Gemini 3.8 Flash Upstream"},
+			"gemini-new-exp": {"displayName": "Gemini Next Exp"},
+			"chat_debug_internal": {"displayName": "Internal Debug", "isInternal": true},
+			"imagen-3-generate": {"displayName": "Imagen 3"},
+			"tab_flash_lite_preview": {"displayName": "Code Tab Completion"}
+		}
+	}`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == EpFetchAvailableModels {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, fakeJSON)
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer srv.Close()
+
+	c := NewWithBase(srv.URL)
+	a := testAuth()
+	models, err := c.FetchModels(a)
+	if err != nil {
+		t.Fatalf("FetchModels failed: %v", err)
+	}
+
+	modelMap := map[string]provider.ModelInfo{}
+	for _, m := range models {
+		modelMap[m.ID] = m
+	}
+
+	// 1. 动态新增的模型应该出现
+	if _, ok := modelMap["gemini-new-exp"]; !ok {
+		t.Errorf("期望动态模型 gemini-new-exp 存在，但未找到")
+	}
+
+	// 2. 内部模型与非聊天模型（chat_*, imagen, tab_*）应该被过滤
+	for _, filtered := range []string{"chat_debug_internal", "imagen-3-generate", "tab_flash_lite_preview"} {
+		if _, ok := modelMap[filtered]; ok {
+			t.Errorf("模型 %s 应该被过滤排除", filtered)
+		}
+	}
+
+	// 3. 静态兜底表中的模型（如 claude-sonnet-4-6）应该被合并保留
+	if _, ok := modelMap["claude-sonnet-4-6"]; !ok {
+		t.Errorf("静态兜底模型 claude-sonnet-4-6 应该被保留")
+	}
+
+	// 4. 解析包含动态模型并发送请求
+	body := `{"model":"gemini-new-exp","messages":[{"role":"user","content":"hi"}]}`
+	out, code, err := buildInternalBodyWithModels([]byte(body), "test-proj", models)
+	if err != nil || code != "" {
+		t.Fatalf("buildInternalBodyWithModels 失败: %v, code=%s", err, code)
+	}
+	if !strings.Contains(string(out), `"model":"gemini-new-exp"`) {
+		t.Errorf("出站信封应包含动态模型: %s", out)
+	}
+}
+
 // TestResolveModelID 测试各种模型与别名的映射解析
 func TestResolveModelID(t *testing.T) {
 	cases := []struct {

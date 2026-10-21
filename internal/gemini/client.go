@@ -57,6 +57,9 @@ type Client struct {
 	projCache map[string]string
 	// quotaCache 配额查询缓存（TTL = QuotaCacheTTL），键同上。
 	quotaCache map[string]quotaCacheEntry
+	// modelsCache 远端模型目录缓存。
+	modelsCache []provider.ModelInfo
+	modelsCacheAt time.Time
 }
 
 // quotaCacheEntry 一次成功配额查询的结果与时刻。
@@ -201,7 +204,11 @@ func (c *Client) ChatStream(a *auth.Auth, body []byte) (io.ReadCloser, int, []by
 		return nil, status,
 			localErrorBody(status, "upstream_error", "gemini：project 探测失败，未发推理（"+err.Error()+"）"), nil
 	}
-	out, code, err := buildInternalBody(body, project)
+	c.mu.Lock()
+	cachedModels := c.modelsCache
+	c.mu.Unlock()
+
+	out, code, err := buildInternalBodyWithModels(body, project, cachedModels)
 	if err != nil {
 		return nil, http.StatusBadRequest, localErrorBody(http.StatusBadRequest, code, "gemini："+err.Error()), nil
 	}
@@ -373,9 +380,68 @@ func ParseTokenGrant(raw []byte, previousRefreshToken string) (TokenGrant, error
 // provider.Upstream：模型清单 / 定价
 // ---------------------------------------------------------------------------
 
-// FetchModels 实现 provider.Upstream：**纯静态表**，不发任何上游请求
-// （协议 §2.6：用户 2026-10-03 拍板静态表，不拉远端目录）。
-func (c *Client) FetchModels(_ *auth.Auth) ([]provider.ModelInfo, error) { return StaticModels(), nil }
+// FetchModels 实现 provider.Upstream：从上游 fetchAvailableModels 端点动态拉取模型目录，
+// 失败或无凭据时自动回退至静态表 StaticModels()，并做内存缓存（TTL 5分钟）。
+func (c *Client) FetchModels(a *auth.Auth) ([]provider.ModelInfo, error) {
+	c.mu.Lock()
+	if len(c.modelsCache) > 0 && time.Since(c.modelsCacheAt) < 5*time.Minute {
+		cached := make([]provider.ModelInfo, len(c.modelsCache))
+		copy(cached, c.modelsCache)
+		c.mu.Unlock()
+		return cached, nil
+	}
+	c.mu.Unlock()
+
+	token := tokenOf(a)
+	if token == "" {
+		return StaticModels(), nil
+	}
+
+	remote, err := c.fetchRemoteModels(a, token)
+	if err != nil || len(remote) == 0 {
+		return StaticModels(), nil
+	}
+
+	merged := mergeModelCatalog(remote, StaticModels())
+
+	c.mu.Lock()
+	c.modelsCache = merged
+	c.modelsCacheAt = time.Now()
+	c.mu.Unlock()
+
+	return merged, nil
+}
+
+// fetchRemoteModels 请求 /v1internal:fetchAvailableModels
+func (c *Client) fetchRemoteModels(a *auth.Auth, token string) ([]provider.ModelInfo, error) {
+	project, _ := c.resolveProject(a)
+	if project == "" {
+		project = DefaultProject
+	}
+	bodyJSON := fmt.Sprintf(`{"project":%q}`, project)
+	for _, ep := range c.endpoints() {
+		req, err := http.NewRequest(http.MethodPost, ep+EpFetchAvailableModels, strings.NewReader(bodyJSON))
+		if err != nil {
+			continue
+		}
+		identityHeaders(req, token)
+		resp, err := c.HTTP.Do(req)
+		if err != nil {
+			continue
+		}
+		raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+		_ = resp.Body.Close()
+		if resp.StatusCode >= 400 {
+			continue
+		}
+
+		models := parseAvailableModelsResponse(raw)
+		if len(models) > 0 {
+			return models, nil
+		}
+	}
+	return nil, errors.New("gemini: 无法从上游获取模型目录")
+}
 
 // FetchModelPricing 本渠道**没有费率端点**（协议 §2.6/§2.7 全篇无倍率/定价字段），
 // 故返回空切片——面板显示「未知」，而不是把缺失当成「免费」。
