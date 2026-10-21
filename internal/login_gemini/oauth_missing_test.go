@@ -39,6 +39,7 @@ func clearOAuthClientEnv(t *testing.T) {
 
 	_ = os.Unsetenv(gemini.EnvClientID)
 	_ = os.Unsetenv(gemini.EnvClientSecret)
+	_ = os.Setenv("WILDWORK_GEMINI_DISABLE_DEFAULT_CLIENT", "1")
 	// 指向不存在的目录：提取器必然返回空串，用例结果不依赖本机是否装了 CLI。
 	_ = os.Setenv("GEMINI_CLI_HOME", filepath.Join(t.TempDir(), "no-cli-here"))
 	// 清缓存后再读，才能拿到"空凭据"这一真实状态。
@@ -58,6 +59,7 @@ func clearOAuthClientEnv(t *testing.T) {
 		restore(gemini.EnvClientID, oldID, idSet)
 		restore(gemini.EnvClientSecret, oldSecret, secretSet)
 		restore("GEMINI_CLI_HOME", oldHome, homeSet)
+		_ = os.Unsetenv("WILDWORK_GEMINI_DISABLE_DEFAULT_CLIENT")
 		gemini.ResetOAuthClientCacheForTest()
 	})
 }

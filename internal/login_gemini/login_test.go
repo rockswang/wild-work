@@ -62,7 +62,7 @@ func startLogin(t *testing.T) (string, string, state) {
 	return authURL, statePath, st
 }
 
-// TestStartAuthURLShape 授权 URL 的参数形态逐条对照协议 §2.3（含**无 PKCE**）。
+// TestStartAuthURLShape 授权 URL 的参数形态逐条对照 Antigravity OAuth + PKCE。
 func TestStartAuthURLShape(t *testing.T) {
 	authURL, _, st := startLogin(t)
 
@@ -77,36 +77,32 @@ func TestStartAuthURLShape(t *testing.T) {
 	want := map[string]string{
 		"client_id":              gemini.ClientID(),
 		"response_type":          "code",
-		"redirect_uri":           st.RedirectURI,
+		"redirect_uri":           gemini.AntigravityRedirectURI,
 		"scope":                  strings.Join(gemini.Scopes, " "),
 		"state":                  st.State,
 		"access_type":            "offline",
-		"include_granted_scopes": "true",
 		"prompt":                 "consent",
+		"code_challenge_method": "S256",
 	}
 	for k, v := range want {
 		if q.Get(k) != v {
 			t.Errorf("授权参数 %s = %q，期望 %q", k, q.Get(k), v)
 		}
 	}
-	// ⚠️ 无 PKCE（协议 §2.3 明确「刻意去掉」）。
-	for _, banned := range []string{"code_challenge", "code_challenge_method", "code_verifier"} {
-		if q.Get(banned) != "" {
-			t.Errorf("本渠道**无 PKCE**，不得出现 %s", banned)
-		}
+	// 验证 PKCE code_challenge 存在
+	if q.Get("code_challenge") == "" {
+		t.Error("Antigravity OAuth 必须携带 PKCE code_challenge")
 	}
-	// 回调地址形态：http://localhost:<动态端口>/oauth-callback（**必须是 localhost**，
-	// 不能是 127.0.0.1 —— 那是 client 注册值）。
-	if !strings.HasPrefix(st.RedirectURI, "http://localhost:") ||
-		!strings.HasSuffix(st.RedirectURI, gemini.CallbackPath) {
-		t.Errorf("回调地址形态错误：%s", st.RedirectURI)
+	if st.CodeVerifier == "" {
+		t.Error("state 必须保存 code_verifier 以供兑换")
+	}
+	// 回调地址形态：https://antigravity.google/oauth-callback
+	if st.RedirectURI != gemini.AntigravityRedirectURI {
+		t.Errorf("回调地址形态错误：%s，期望 %s", st.RedirectURI, gemini.AntigravityRedirectURI)
 	}
 	// state = randomBytes(16).hex → 32 个小写 hex 字符。
 	if len(st.State) != 32 || strings.Trim(st.State, "0123456789abcdef") != "" {
 		t.Errorf("state 必须是 32 位 hex：%q", st.State)
-	}
-	if st.CallbackPort <= 0 || !strings.Contains(st.RedirectURI, fmt.Sprintf(":%d", st.CallbackPort)) {
-		t.Errorf("state 里的端口应与 redirect_uri 一致：%+v", st)
 	}
 }
 

@@ -75,48 +75,88 @@ func (s *loginSession) sessionState() string {
 	return s.state.State
 }
 
-// SubmitCallbackURL 手动提交浏览器跳转后的回调地址（远程/局域网面板的粘贴兜底入口）。
+// parseCallbackCode 从用户粘贴的内容中提取授权码或错误。
+// 支持以下几种形态：
+//  1. 裸 code（如 4/0AX...）；
+//  2. 包含 query 参数的 URL（如 https://antigravity.google/oauth-callback?code=...）；
+//  3. 包含 fragment/hash 的 URL（如 https://antigravity.google/oauth-callback#code=...）；
+//  4. 纯 query 字符串（如 code=...&state=...）。
+func parseCallbackCode(raw string) (code, state, errName, errDesc string) {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return "", "", "", ""
+	}
+
+	// 1. 尝试作为 URL 解析
+	if u, err := url.Parse(trimmed); err == nil && (u.Scheme != "" || u.Host != "" || strings.Contains(trimmed, "?") || strings.Contains(trimmed, "#")) {
+		q := u.Query()
+		// 如果 query 中没有 code，但 hash 中有，尝试从 hash 中解析参数
+		if q.Get("code") == "" && u.Fragment != "" {
+			frag := strings.TrimPrefix(u.Fragment, "#")
+			if fq, ferr := url.ParseQuery(frag); ferr == nil {
+				for k, vs := range fq {
+					if len(vs) > 0 && q.Get(k) == "" {
+						q[k] = vs
+					}
+				}
+			}
+		}
+		if c := q.Get("code"); c != "" {
+			return c, q.Get("state"), q.Get("error"), q.Get("error_description")
+		}
+		if e := q.Get("error"); e != "" {
+			return "", q.Get("state"), e, q.Get("error_description")
+		}
+	}
+
+	// 2. 尝试作为 url.Values 解析
+	if q, err := url.ParseQuery(strings.TrimPrefix(trimmed, "?")); err == nil {
+		if c := q.Get("code"); c != "" {
+			return c, q.Get("state"), q.Get("error"), q.Get("error_description")
+		}
+		if e := q.Get("error"); e != "" {
+			return "", q.Get("state"), e, q.Get("error_description")
+		}
+	}
+
+	// 3. 裸授权码：Google OAuth 2.0 授权码通常以 "4/" 开头，或不含空白和 query/hash 分隔符的单行 token
+	if !strings.ContainsAny(trimmed, " \t\r\n?&#=") {
+		return trimmed, "", "", ""
+	}
+
+	return "", "", "", ""
+}
+
+// SubmitCallbackURL 手动提交浏览器跳转后的回调地址或授权码。
 //
-// 与 codearts/lobsterai 的同名函数同构：解析 URL query → 复用 handleCallback 的
-// 同一条校验链（state 逐字比对 → error 透传 → code 先到保留）。
-// 与 HTTP 回调的差异只在「无 w 可写页面」：state 不匹配/缺 code 时仅落 pending.errMsg，
-// 由 Poll 报出可行动错误（与 reject 的语义一致）。兑换路径零分叉。
+// 支持粘贴 Antigravity 回调后的整条 URL（无论 code 位于 query 还是 hash fragment）或直接粘贴授权码。
+// 针对 Antigravity 回调地址，若携带 state 则逐字比对；若未携带 state（如直接从 antigravity.google 回调获取），
+// 在 PKCE 保护下允许放行。
 func SubmitCallbackURL(raw string) error {
 	sess := currentSession()
 	if sess == nil {
 		return errors.New("没有进行中的登录流程（可能已完成或已超时），请重新发起登录")
 	}
-	q, err := url.ParseQuery(strings.TrimPrefix(strings.TrimSpace(raw), ""))
-	if err != nil {
-		// 完整 URL 形态：Parse 整条后取 query 重试
-		u, uerr := url.Parse(strings.TrimSpace(raw))
-		if uerr != nil {
-			return fmt.Errorf("回调地址无法解析: %w", err)
-		}
-		q = u.Query()
-	}
-	// 1. state 逐字比对（与 handleCallback 同一条规则）
-	got := q.Get("state")
-	if got == "" {
-		m := "回调缺少 state 参数，已拒绝"
-		sess.fail(m)
-		return errors.New(m)
-	}
-	if got != sess.sessionState() {
+
+	code, gotState, errName, errDesc := parseCallbackCode(raw)
+
+	// 1. 如果携带了 state，做严格比对防止跨流程串码
+	if gotState != "" && gotState != sess.sessionState() {
 		m := "state 不匹配，已拒绝该回调（多半是上一次登录遗留的地址，请用本次登录后跳转的那条）"
 		sess.fail(m)
 		return errors.New(m)
 	}
+
 	// 2. 用户取消 / 上游报错
-	if e := q.Get("error"); e != "" {
-		desc := firstNonEmpty(q.Get("error_description"), e)
+	if errName != "" {
+		desc := firstNonEmpty(errDesc, errName)
 		sess.fail(desc)
 		return fmt.Errorf("登录失败: %s", desc)
 	}
-	// 3. code 先到保留（与 handleCallback 同款）
-	code := q.Get("code")
+
+	// 3. code 先到保留
 	if code == "" {
-		const m = "回调缺少 code 参数：请复制含 code=… 的整条 URL"
+		const m = "未从输入中识别出授权码：请复制含 code=… 的完整 URL 或直接复制授权码"
 		sess.fail(m)
 		return errors.New(m)
 	}
