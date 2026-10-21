@@ -367,7 +367,7 @@ GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -tags devdump -o dist/wild-work-l
 
 ```bash
 # Windows bash 下用 python 字节计数（strings 对 Go 二进制的长串不可靠）
-python -c "b=open('dist/wild-work.exe','rb').read(); print('new:',b.count(b'2.9.3'),'old:',b.count(b'2.9.2'))"
+python -c "b=open('dist/wild-work.exe','rb').read(); print('new:',b.count(b'2.9.4'),'old:',b.count(b'2.9.3'))"
 # 期望：new >= 1 且 old == 0。若旧版本号仍在，说明构建未生效。
 
 # 再核对 PE 子系统必须是 GUI(2)：漏掉 -H windowsgui 会得到 CUI(3)，双击就弹控制台黑框、
