@@ -123,6 +123,8 @@ type Result struct {
 type state struct {
 	// State 是回调时**逐字比对**的随机串（randomBytes(16).hex，协议 §2.3）。
 	State string `json:"state"`
+	// CodeVerifier PKCE 校验串（32 字节高熵随机串 base64URL 编码）。
+	CodeVerifier string `json:"codeVerifier,omitempty"`
 	// RedirectURI / CallbackPort 仅诊断与 Poll 复用（redirect_uri 必须与授权请求逐字一致）。
 	RedirectURI  string `json:"redirectUri"`
 	CallbackPort int    `json:"callbackPort"`
@@ -241,12 +243,14 @@ func Start(_ *http.Client, statePath string) (string, error) {
 		return "", err
 	}
 	stateVal := randomState()
-	redirectURI := fmt.Sprintf("http://%s:%d%s", gemini.RedirectHost, port, gemini.CallbackPath)
+	verifier, _ := generatePKCE()
+	redirectURI := gemini.AntigravityRedirectURI
 	st := state{
 		State:        stateVal,
+		CodeVerifier: verifier,
 		RedirectURI:  redirectURI,
 		CallbackPort: port,
-		AuthURL:      buildAuthURL(stateVal, redirectURI),
+		AuthURL:      buildAuthURL(stateVal, redirectURI, verifier),
 		CreatedAt:    time.Now().Unix(),
 	}
 	if err := writeState(statePath, st); err != nil {
@@ -344,7 +348,14 @@ func exchange(client *http.Client, st state, code string) (Result, bool, error) 
 	form.Set("client_secret", gemini.ClientSecret())
 	form.Set("code", code)
 	form.Set("grant_type", "authorization_code")
-	form.Set("redirect_uri", st.RedirectURI)
+	redirectURI := st.RedirectURI
+	if redirectURI == "" {
+		redirectURI = gemini.AntigravityRedirectURI
+	}
+	form.Set("redirect_uri", redirectURI)
+	if st.CodeVerifier != "" {
+		form.Set("code_verifier", st.CodeVerifier)
+	}
 
 	req, err := http.NewRequest(http.MethodPost, tokenEndpoint, strings.NewReader(form.Encode()))
 	if err != nil {
@@ -601,23 +612,39 @@ func extraOf(r Result) map[string]string {
 // 内部工具
 // ---------------------------------------------------------------------------
 
-// buildAuthURL 拼授权页 URL（gemini-oauth.ts:102-115）。
+// generatePKCE 生成用于 PKCE 流程的 code_verifier 和 code_challenge（S256）。
+func generatePKCE() (verifier, challenge string) {
+	b := make([]byte, 32)
+	if _, err := rand.Read(b); err != nil {
+		verifier = base64.RawURLEncoding.EncodeToString([]byte(fmt.Sprintf("%032x%032x", time.Now().UnixNano(), time.Now().UnixNano())))
+	} else {
+		verifier = base64.RawURLEncoding.EncodeToString(b)
+	}
+	h := sha256.Sum256([]byte(verifier))
+	challenge = base64.RawURLEncoding.EncodeToString(h[:])
+	return verifier, challenge
+}
+
+// buildAuthURL 拼授权页 URL。
 //
-// 参数：`client_id`、`response_type=code`、`redirect_uri`、`scope`（空格分隔的 6 项）、
-// `state`、`access_type=offline`、`include_granted_scopes=true`、`prompt=consent`。
-// `access_type=offline` + `prompt=consent` 是 refresh_token 的必要条件。
-//
-// ⚠️ **无 PKCE**：不产生 `code_challenge` / `code_verifier`（协议 §2.3 明确「刻意去掉」）。
-func buildAuthURL(stateVal, redirectURI string) string {
+// 参数：client_id、response_type=code、redirect_uri、scope、state、access_type=offline、
+// prompt=consent、code_challenge、code_challenge_method=S256。
+func buildAuthURL(stateVal, redirectURI, codeVerifier string) string {
 	q := url.Values{}
 	q.Set("client_id", gemini.ClientID())
 	q.Set("response_type", "code")
 	q.Set("redirect_uri", redirectURI)
 	q.Set("scope", strings.Join(gemini.Scopes, " "))
-	q.Set("state", stateVal)
+	if stateVal != "" {
+		q.Set("state", stateVal)
+	}
 	q.Set("access_type", "offline")
-	q.Set("include_granted_scopes", "true")
 	q.Set("prompt", "consent")
+	if codeVerifier != "" {
+		h := sha256.Sum256([]byte(codeVerifier))
+		q.Set("code_challenge", base64.RawURLEncoding.EncodeToString(h[:]))
+		q.Set("code_challenge_method", "S256")
+	}
 	return authEndpoint + "?" + q.Encode()
 }
 

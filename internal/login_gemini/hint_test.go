@@ -34,13 +34,19 @@ func TestGeminiErrorHint(t *testing.T) {
 	}
 }
 
-// TestScopesNoInternalScopes 授权请求不得再携带 Cloud Code 内部 scope（issue #167 第一堵墙）：
-// 旧 CLI 的公开 client 未登记 cclog/experimentsandconfigs，请求即 403 restricted_client。
-func TestScopesNoInternalScopes(t *testing.T) {
+// TestScopesAntigravity 对照 Antigravity 官方要求的 OAuth scope 清单。
+func TestScopesAntigravity(t *testing.T) {
 	joined := strings.Join(gemini.Scopes, " ")
-	for _, banned := range []string{gemini.ScopeCCLog, gemini.ScopeExperiments} {
-		if strings.Contains(joined, banned) {
-			t.Errorf("Scopes 含未登记的内部 scope %s，授权页必 403（issue #167）", banned)
+	for _, required := range []string{
+		gemini.ScopeOpenID,
+		gemini.ScopeCloudPlatform,
+		gemini.ScopeUserInfoEmail,
+		gemini.ScopeUserInfoProfile,
+		gemini.ScopeCCLog,
+		gemini.ScopeExperiments,
+	} {
+		if !strings.Contains(joined, required) {
+			t.Errorf("Scopes 缺少 Antigravity 必要 scope %s", required)
 		}
 	}
 }
