@@ -58,7 +58,7 @@ func TestExpiryItems(t *testing.T) {
 func TestStatsAccountsMapping(t *testing.T) {
 	a := newPanelApp(t, "127.0.0.1", "")
 	rt := a.runtime(provider.WorkBuddy)
-	rt.Pool.SetCreditDetail("wb-1", 2050, 100, 0)
+	rt.Pool.SetCreditDetail("wb-1", 2050, 100, 0, time.Time{})
 	accts := a.statsAccounts()
 	if len(accts) != 1 {
 		t.Fatalf("应映射 1 个账号，实际 %d", len(accts))

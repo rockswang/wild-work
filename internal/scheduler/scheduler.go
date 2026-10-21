@@ -45,14 +45,6 @@ type Config struct {
 	// WorkBuddy 国际版使用该模式。
 	ActivitiesOnly bool
 
-	// ExpiringThreshold 临期阈值（config.schedule.expiring_threshold_hours）。
-	// 0 = 24h 兜底。用于签到后计算临期额度（Pick() 的第一排序键）。
-	//
-	// 注意：自 2026-10-19 起判据改为**自然日**（expiringDays()），本字段只作
-	// 换算来源；不要直接拿它跟 ExpireAt 做时长比较（会把「次日 00:00 失效」
-	// 在 24h 阈值下漏掉或误判，见 provider.ExpireWithinDays 注释）。
-	ExpiringThreshold time.Duration
-
 	// Ledger 积分流水记账器（非 nil 时签到后余额刷新触发差分记账）。
 	Ledger *ledger.Ledger
 }
@@ -101,27 +93,7 @@ func New(cfg Config) *Scheduler {
 	if cfg.KeepaliveHours == nil {
 		cfg.KeepaliveHours = []int{22}
 	}
-	if cfg.ExpiringThreshold <= 0 {
-		cfg.ExpiringThreshold = 24 * time.Hour
-	}
 	return &Scheduler{cfg: cfg, wake: make(chan struct{}, 1), checkinDone: map[string]bool{}}
-}
-
-// expiringDays 把时长阈值换算成自然日数（1/2/3；非整日向上取整）。
-// 与 config.Config.ExpiringThresholdDays 同算法，保持两侧判据一致。
-func (c Config) expiringDays() int {
-	h := int(c.ExpiringThreshold / time.Hour)
-	if h <= 0 {
-		h = 24
-	}
-	days := h / 24
-	if h%24 != 0 {
-		days++
-	}
-	if days < 1 {
-		days = 1
-	}
-	return days
 }
 
 // schedule 返回当前签到分钟/保活小时配置的副本。
@@ -585,11 +557,14 @@ func (s *Scheduler) checkinOne(uid string) CheckinResult {
 		}
 	} else {
 		_, unusable := provider.Summarize(items)
-		// 临期额度：自然日口径（与面板三列、pool 路由同一判据）。
-		expiring := provider.ExpiringWithinDays(items, s.cfg.expiringDays(), time.Now())
+		// 临期额度（仅展示）与最早到期时刻（Pick 排序键）同一份 items。
+		// 阈值固定 provider.ExpiringDays，R112 起不再可配。
+		now := time.Now()
+		expiring := provider.ExpiringWithinDays(items, provider.ExpiringDays, now)
+		earliest, _ := provider.EarliestExpire(items, now)
 		r.Remain, r.HasRemain = usable, true
-		log.Printf("checkin credits platform=%s uid=%s remain=%d expiring=%d unusable=%d", name, uid, usable, expiring, unusable)
-		s.cfg.Pool.ReenableIfCredits(uid, usable, expiring, unusable)
+		log.Printf("checkin credits platform=%s uid=%s remain=%d expiring=%d unusable=%d earliest=%v", name, uid, usable, expiring, unusable, earliest)
+		s.cfg.Pool.ReenableIfCredits(uid, usable, expiring, unusable, earliest)
 		// 差分记账：与上次快照对比产出 earn/spend/expire 流水
 		if s.cfg.Ledger != nil {
 			s.cfg.Ledger.DiffCredits(name, uid, usable, items)

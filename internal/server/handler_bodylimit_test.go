@@ -1,5 +1,9 @@
-// handler_bodylimit_test.go 回归 issue #30：请求体超上限（原 8MiB，后提至 32MiB 容纳
-// 多模态大图）不得静默截断后误报 invalid_model，应明确回 413 request_too_large。
+// handler_bodylimit_test.go 回归 issue #30 / #176：请求体超上限不得静默截断后误报
+// invalid_model，应明确回 413 request_too_large。
+//
+// 上限沿革 8MiB → 32MiB（#30）→ 128MiB（#176：无状态客户端每轮重放整段历史，
+// 12 张截图 33MiB 直接把 32MiB 打穿）。测试一律基于 MaxRequestBody 变量，
+// 不写死数字，改上限后仍成立。
 package server
 
 import (
@@ -12,12 +16,12 @@ import (
 )
 
 // oversizedBody 构造 n 字节的可解析 JSON 请求体（用大量填充消息撑体积）。
-func oversizedBody(n int) []byte {
+func oversizedBody(n int64) []byte {
 	// {"model":"workbuddy/m","messages":[{"role":"user","content":"<pad>"}]}
 	// padding 放进 content 字符串里，保证整体仍是合法 JSON
 	head := `{"model":"workbuddy/test-model","messages":[{"role":"user","content":"`
 	tail := `"}]}`
-	pad := bytes.Repeat([]byte("a"), n-len(head)-len(tail))
+	pad := bytes.Repeat([]byte("a"), int(n)-len(head)-len(tail))
 	if pad == nil {
 		pad = []byte{}
 	}

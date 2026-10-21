@@ -5,6 +5,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"wild-work/internal/auth"
 	"wild-work/internal/pool"
@@ -26,8 +27,8 @@ func newClineTestHandler(t *testing.T, up *kindedUpstream) (*Handler, *pool.Pool
 	p.Add(&auth.Auth{Kind: "cline", AccessToken: "sk_A", ExpiresAt: 4102444800, UID: "apk-A"})
 	p.Add(&auth.Auth{Kind: "cline", AccessToken: "sk_B", ExpiresAt: 4102444800, UID: "apk-B"})
 	// A 积分更高保证首挑确定性（挑号遍历 map 顺序随机）
-	p.SetCreditDetail("apk-A", 1000, 0, 0)
-	p.SetCreditDetail("apk-B", 500, 0, 0)
+	p.SetCreditDetail("apk-A", 1000, 0, 0, time.Time{})
+	p.SetCreditDetail("apk-B", 500, 0, 0, time.Time{})
 	h := NewHandler(Config{
 		Runtimes: map[provider.Kind]*Runtime{
 			provider.Cline: {Kind: provider.Cline, Pool: p, Upstream: up,
@@ -38,7 +39,6 @@ func newClineTestHandler(t *testing.T, up *kindedUpstream) (*Handler, *pool.Pool
 		SoftCooldown: 60_000_000_000,
 		ErrThreshold: 3,
 		ErrCooldown:  60_000_000_000,
-		MaxRotate:    3,
 	})
 	return h, p
 }

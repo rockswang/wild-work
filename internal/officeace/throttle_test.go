@@ -10,7 +10,7 @@ import (
 // 至少 interval 的间隔，否则上游 429（限 1 req/s）。
 //
 // 这条测试守的是 2026-10-18 实测事故：officeace 无节流 ⇒ 并发稍高即 429
-// ModelArts.81101 ⇒ handler 整号软冷却 ⇒ MaxRotate 轮空 ⇒ 整渠道 503。
+// ModelArts.81101 ⇒ handler 整号软冷却 ⇒ 逐号轮空 ⇒ 整渠道 503。
 func TestThrottleSerializesWithinBaseURL(t *testing.T) {
 	const baseURL = "https://throttle-test-1.example/officeace"
 	const interval = 60 * time.Millisecond

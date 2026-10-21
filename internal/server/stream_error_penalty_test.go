@@ -111,8 +111,8 @@ func newStreamErrHandler(t *testing.T, up *streamErrUpstream) (*Handler, *pool.P
 	p.Add(&auth.Auth{Kind: "traework", AccessToken: "at-A", ExpiresAt: 4102444800, UID: "A"})
 	p.Add(&auth.Auth{Kind: "traework", AccessToken: "at-B", ExpiresAt: 4102444800, UID: "B"})
 	// PickExcluding 遍历 map（顺序随机），同分时选择不确定 ⇒ 给 A 更高分让排序确定。
-	p.SetCreditDetail("A", 1000, 0, 0)
-	p.SetCreditDetail("B", 500, 0, 0)
+	p.SetCreditDetail("A", 1000, 0, 0, time.Time{})
+	p.SetCreditDetail("B", 500, 0, 0, time.Time{})
 
 	h := NewHandler(Config{
 		Runtimes: map[provider.Kind]*Runtime{

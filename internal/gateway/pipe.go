@@ -71,11 +71,13 @@ func (r *innerResult) Close() {
 // ReadAll 读取完整响应体（非流式路径用），随后自动 Close。
 func (r *innerResult) ReadAll() ([]byte, error) {
 	defer r.Close()
-	return io.ReadAll(io.LimitReader(r.Body, maxInnerBody))
+	return io.ReadAll(io.LimitReader(r.Body, maxInnerBody()))
 }
 
-// maxInnerBody 内层错误体读取上限（正常流式路径不走这里）；请求体上限见 server.MaxRequestBody。
-const maxInnerBody = server.MaxRequestBody
+// maxInnerBody 读取上限（内层错误体/非流式响应体）。
+// 直接用 server.MaxRequestBody 的当前值——它可在 NewHandler 里按配置覆盖，
+// 所以这里必须**每次取值**，不能在包初始化时快照成常量。
+func maxInnerBody() int64 { return server.MaxRequestBody }
 
 // call 在进程内调用内层 handler（按 path 路由），返回其状态码与响应流。
 //

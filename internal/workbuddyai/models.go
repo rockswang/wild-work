@@ -113,7 +113,7 @@ func (c *Client) fetchCatalog(a *auth.Auth) ([]catalogModel, error) {
 	if err != nil {
 		return nil, err
 	}
-	commonHeaders(req, a)
+	commonHeaders(req)
 	req.Header.Set("Authorization", "Bearer "+a.AccessToken)
 	req.Header.Set("Accept", "application/json")
 	resp, err := c.HTTP.Do(req)
@@ -214,7 +214,7 @@ func (c *Client) fetchV3Catalog(a *auth.Auth) ([]catalogModel, error) {
 	if err != nil {
 		return nil, err
 	}
-	commonHeaders(req, a)
+	commonHeaders(req)
 	req.Header.Set("Authorization", "Bearer "+a.AccessToken)
 	req.Header.Set("Accept", "application/json")
 	// UA 门禁：commonHeaders 已设 clientUA（CLI 形），实测可通过；
@@ -385,7 +385,7 @@ func (c *Client) PollLogin(state string) (r LoginResult, pending bool, err error
 	if err != nil {
 		return r, false, err
 	}
-	commonHeaders(req, nil)
+	commonHeaders(req)
 	req.Header.Set("Accept", "*/*")
 	req.Header.Set("X-No-Authorization", "true")
 	req.Header.Set("X-No-User-Id", "true")
@@ -430,7 +430,7 @@ func (c *Client) fetchAccount(state, accessToken string) [3]string {
 	if err != nil {
 		return [3]string{}
 	}
-	commonHeaders(req, nil)
+	commonHeaders(req)
 	req.Header.Set("Authorization", "Bearer "+accessToken)
 	data, err := c.doJSON(req)
 	if err != nil {
@@ -516,6 +516,13 @@ func Classify(status int, body string) provider.ErrKind {
 		return provider.ErrServer
 	}
 	if status >= 400 {
+		// 会话头族缺失（11128 "conversation id missing"）是上游按账号灰度的渠道校验，
+		// 属账号级问题（补头后仍撞 ⇒ 该号被灰度到别的口径）：软冷却 + 换号。必须排在
+		// contentBlocked 之前——同码的另一形态 "Illegal API invocation from an unapproved
+		// channel" 才是请求级指纹问题（改提示词就能过，不罚号）。R116。
+		if strings.Contains(lower, "conversation id missing") {
+			return provider.ErrAccountFault
+		}
 		if strings.Contains(lower, "blocked by security policy") ||
 			strings.Contains(lower, "unapproved channel") ||
 			strings.Contains(lower, "illegal api invocation") {

@@ -65,6 +65,11 @@ func TestClassify(t *testing.T) {
 		{400, `{"code": 11115, "msg": "prompt is too long"}`, ErrPromptTooLong},
 		{400, `{"code":"11115"}`, ErrPromptTooLong},
 		{404, `{"code": 11115}`, ErrPromptTooLong},
+		// 会话头族缺失（11128 conversation id missing）= 上游**按账号灰度**的渠道校验，
+		// 归账号级（软冷却 + 换号，见 R116）；同一个 11128 的另一形态（内容指纹
+		// unapproved channel）才是请求级问题，归内容拦截不罚号。
+		{400, `{"code":11128,"msg":"conversation id missing","requestId":"x"}`, ErrAccountFault},
+		{400, `{"code":11128,"msg":"Illegal API invocation from an unapproved channel"}`, ErrContentBlocked},
 		{500, `boom`, ErrServer},
 		{503, `unavailable`, ErrServer},
 		{200, ``, ErrNone},
@@ -218,7 +223,8 @@ func TestChatStreamSendsHeadersAndStreamTrue(t *testing.T) {
 		t.Errorf("200 response should carry nil body, got %q", respBody)
 	}
 	rc.Close()
-	if gotAuth != "Bearer at" || gotUID != "u1" || gotProduct != "WorkBuddy" {
+	// X-Product 取官方 product.json 的 deploymentType（SaaS），见 R117。
+	if gotAuth != "Bearer at" || gotUID != "u1" || gotProduct != "SaaS" {
 		t.Errorf("headers: auth=%q uid=%q product=%q", gotAuth, gotUID, gotProduct)
 	}
 	if !bytes.Contains(gotBody, []byte(`"stream":true`)) {

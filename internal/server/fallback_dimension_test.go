@@ -39,6 +39,7 @@ var allErrKinds = []provider.ErrKind{
 	provider.ErrAccountFault,
 	provider.ErrModelBlocked,
 	provider.ErrPassthrough,
+	provider.ErrQueued,
 }
 
 // dimensionOf 把错误类型归到唯一维度。这是本测试对生产代码的**独立复述**：
@@ -50,6 +51,9 @@ var allErrKinds = []provider.ErrKind{
 //   - account-rotate：账号可用性问题 → 换号（换模型治不了本）
 //   - account-transparent：账号级问题但**不换号**（上游已给出确定性结论，
 //     换号只会再撞一次）→ 冷却该号 + 直接透传
+//   - upstream-transparent：上游确定性故障（5xx），既不是账号也不是请求的问题
+//     → 不换号、不换模型、不冷却，直接透传（2026-10-20：实测 11134 同一波
+//     4 个号全 500，换号只会把 1 次失败放大成 9 次）
 func dimensionOf(kind provider.ErrKind) string {
 	switch kind {
 	case provider.ErrContentBlocked, provider.ErrPromptTooLong, provider.ErrImageInvalid,
@@ -59,6 +63,8 @@ func dimensionOf(kind provider.ErrKind) string {
 		return "model"
 	case provider.ErrWafBlock, provider.ErrModelBlocked:
 		return "account-transparent"
+	case provider.ErrServer:
+		return "upstream-transparent"
 	default:
 		return "account-rotate"
 	}
@@ -103,6 +109,13 @@ func TestFallbackDimensionCoverage(t *testing.T) {
 		case "account-transparent":
 			if rotatable {
 				t.Errorf("%s 应直接透传不换号（Rotatable=true）——上游结论确定，换号只会再撞一次", kind)
+			}
+			if fallback {
+				t.Errorf("%s 不应换模型（fallbackWorthy=true）", kind)
+			}
+		case "upstream-transparent":
+			if rotatable {
+				t.Errorf("%s 应直接透传不换号（Rotatable=true）——上游整体故障，换号必撞同一面墙", kind)
 			}
 			if fallback {
 				t.Errorf("%s 不应换模型（fallbackWorthy=true）", kind)
@@ -171,7 +184,7 @@ func TestAllErrKindsRegistered(t *testing.T) {
 	// provider.ErrKind 当前枚举定义见 internal/provider/provider.go 的 const 块。
 	// 该常量若新增而未同步本表，此数字需要同步上调——刻意用硬编码数字，
 	// 让「新增枚举」这件事无法静默通过。
-	const expectedKindCount = 14
+	const expectedKindCount = 15
 	if len(allErrKinds) != expectedKindCount {
 		t.Errorf("allErrKinds 登记 %d 个，期望 %d 个——provider 新增 ErrKind 时必须同步本表与归属表",
 			len(allErrKinds), expectedKindCount)

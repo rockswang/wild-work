@@ -157,8 +157,12 @@ type Config struct {
 		CheckinHours   []int    `json:"checkin_hours,omitempty"` // 旧格式：[9,21]
 		CheckinTimes   []string `json:"checkin_times,omitempty"` // 新格式：["09:00","21:30"]
 		KeepaliveHours []int    `json:"keepalive_hours"`         // [22]
-		// ExpiringThresholdHours 临期阈值（小时）：到期日在此范围内的积分视为「临期」,
-		// Pick() 临期优先消耗。默认 24，下限 24（低于 24 会被钳到 24）。
+		// ExpiringThresholdHours 临期展示窗口（小时，本仓独有；上游 R112 已删该开关）。
+		//
+		// ⚠️ 两侧语义不同、互不冲突：上游 R112 让**选号**改按「最早到期时刻升序」，
+		// 不再需要「N 天内算临期」；本仓保留它是给**面板**用的——「临期额度」这列
+		// 按用户选的天数（1/2/3）统计，见 ExpiringThresholdDays / POST /api/config/expiring_days。
+		// 选号完全不读本字段，故保留不构成对 R112 的偏离。
 		ExpiringThresholdHours int `json:"expiring_threshold_hours,omitempty"`
 	} `json:"schedule"`
 
@@ -172,6 +176,15 @@ type Config struct {
 		// 流式因此用无总超时的 client，改由本项做空闲兜底。默认 90，下限 10。
 		StreamIdleSeconds int `json:"stream_idle_seconds,omitempty"`
 	} `json:"upstream"`
+
+	// Server 入站 HTTP 服务参数。
+	Server struct {
+		// MaxRequestBodyMB 入站请求体上限（MiB）。0 = 默认 128。
+		// 为什么要给到这么高：无状态客户端（Codex）每轮把整段历史原样重放，
+		// 多张截图的 base64 会线性累积；gateway 转发前会把图缩到 1568px/JPEG，
+		// 所以这个上限只需容纳**客户端原始体**，不代表上游会收到这么大的包（issue #176）。
+		MaxRequestBodyMB int `json:"max_request_body_mb,omitempty"`
+	} `json:"server"`
 
 	// Login 登录流程的可调项。
 	Login struct {
@@ -299,6 +312,29 @@ type Config struct {
 	StreamIdleDur time.Duration `json:"-"`
 }
 
+// ExpiringThresholdDays 临期展示窗口（自然日数，1/2/3）。
+//
+// 2026-10-19 起临期判定统一用**自然日**口径：days 个自然日内到期
+// （次日 00:00 失效算今日，见 provider.ExpireWithinDays）。
+// 由 ExpiringThresholdHours 换算；非整日时向上取整（保守，宁可提前预警）。
+//
+// ⚠️ 上游 R112 把选号改成「最早到期时刻升序」，这个天数**只影响面板「临期额度」列**；
+// 本仓保留可配是因为面板有 1/2/3 下拉框（上游已删该开关、固定成 provider.ExpiringDays=1）。
+func (c *Config) ExpiringThresholdDays() int {
+	h := c.Schedule.ExpiringThresholdHours
+	if h <= 0 {
+		h = 24
+	}
+	days := h / 24
+	if h%24 != 0 {
+		days++
+	}
+	if days < 1 {
+		days = 1
+	}
+	return days
+}
+
 // DeepseekThinkingEnabled DeepSeek 思考改写是否启用（字段未设置视为启用）。
 func (c *Config) DeepseekThinkingEnabled() bool {
 	return c.Compat.DeepseekThinking == nil || *c.Compat.DeepseekThinking
@@ -337,7 +373,6 @@ func Default() *Config {
 	c.Schedule.CheckinHours = []int{9, 21}
 	c.Schedule.CheckinTimes = []string{"09:00", "21:00"}
 	c.Schedule.KeepaliveHours = []int{22}
-	c.Schedule.ExpiringThresholdHours = 24
 	c.Upstream.TimeoutSeconds = 120
 	c.Upstream.StreamIdleSeconds = 90
 	c.Compat.DefaultChannel = "workbuddy"
@@ -675,6 +710,17 @@ func (c *Config) normalize() error {
 		return err
 	}
 	c.Compat.ResponsesReasoningSummary = mode
+	// 入站请求体上限：0 = 默认；负数/过大一律钳到合理区间（下限 8MiB 沿用历史最低值，
+	// 上限 1024MiB 防手滑写成天文数字把内存撑爆）。
+	if c.Server.MaxRequestBodyMB < 0 {
+		c.Server.MaxRequestBodyMB = 0
+	}
+	if c.Server.MaxRequestBodyMB > 0 && c.Server.MaxRequestBodyMB < 8 {
+		c.Server.MaxRequestBodyMB = 8
+	}
+	if c.Server.MaxRequestBodyMB > 1024 {
+		c.Server.MaxRequestBodyMB = 1024
+	}
 	if c.Listen.Port <= 0 {
 		c.Listen.Port = 7863
 	}
@@ -771,24 +817,4 @@ func NextDailyGrant(now time.Time, at, buffer time.Duration) time.Time {
 		next = next.AddDate(0, 0, 1)
 	}
 	return next
-}
-
-// ExpiringThresholdDays 临期阈值（自然日数，1/2/3）。
-//
-// 2026-10-19 起临期判定统一用**自然日**口径：days 个自然日内到期
-// （次日 00:00 失效算今日，见 provider.ExpireWithinDays）。
-// 由 ExpiringThresholdHours 换算；非整日时向上取整（保守，宁可提前预警）。
-func (c *Config) ExpiringThresholdDays() int {
-	h := c.Schedule.ExpiringThresholdHours
-	if h <= 0 {
-		h = 24
-	}
-	days := h / 24
-	if h%24 != 0 {
-		days++
-	}
-	if days < 1 {
-		days = 1
-	}
-	return days
 }

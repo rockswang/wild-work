@@ -292,8 +292,7 @@ func Test14018RetryOnceLockedByTestEvenWithChainedRule(t *testing.T) {
 			provider.WorkBuddy: {Kind: provider.WorkBuddy, Pool: pb, Upstream: upB},
 			provider.TraeWork:  {Kind: provider.TraeWork, Pool: pc, Upstream: upC},
 		},
-		APIKey: "k", MaxRotate: 3,
-		HardCooldown: time.Hour, SoftCooldown: time.Minute,
+		APIKey: "k", HardCooldown: time.Hour, SoftCooldown: time.Minute,
 		ErrThreshold: 1, ErrCooldown: time.Minute,
 		ModelFallbacks: []config.ModelFallbackRule{
 			{From: "oczen/big-pickle", To: []string{"workbuddy/glm-free"}},

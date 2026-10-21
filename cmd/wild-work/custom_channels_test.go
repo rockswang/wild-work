@@ -1,6 +1,8 @@
 package main
 
 import (
+	"time"
+
 	"testing"
 
 	"wild-work/internal/custom"
@@ -21,7 +23,7 @@ func TestBuildCustomRuntimes(t *testing.T) {
 		},
 	}
 
-	sRts, aRts, names := buildCustomRuntimes(channels, stateDir)
+	sRts, aRts, names := buildCustomRuntimes(channels, stateDir, 120*time.Second)
 	if len(sRts) != 1 || len(aRts) != 1 || len(names) != 1 {
 		t.Fatalf("expected 1 custom runtime, got s=%d, a=%d, names=%v", len(sRts), len(aRts), names)
 	}
@@ -42,6 +44,44 @@ func TestBuildCustomRuntimes(t *testing.T) {
 
 	if !stats.IsKnownChannel("stepfun") {
 		t.Errorf("stepfun should be registered in stats channelKind")
+	}
+}
+
+// TestBuildCustomRuntimesWiresUpstreamTimeout 锁定 R110 的接线：
+//
+// `upstream.timeout_seconds` 必须真的传到自定义渠道的 client 上。R66 引入自定义渠道时
+// 漏了这条接线（内建渠道在 main 里逐个 `xxxUp.HTTP.Timeout = ...`，自定义渠道直接
+// `custom.New(cc)` 用硬编码），导致配置项对它们一直是摆设——这也是 2026-10-20
+// sgproxy 压缩上下文必然超时的根因之一。
+func TestBuildCustomRuntimesWiresUpstreamTimeout(t *testing.T) {
+	channels := []custom.ChannelConfig{{Name: "sgproxy", BaseURL: "http://127.0.0.1:8317/v1"}}
+
+	sRts, _, _ := buildCustomRuntimes(channels, t.TempDir(), 300*time.Second)
+	rt := sRts[provider.Kind("sgproxy")]
+	if rt == nil {
+		t.Fatal("runtime 未装配")
+	}
+	cl, ok := rt.Upstream.(*custom.Client)
+	if !ok {
+		t.Fatalf("Upstream 类型不符: %T", rt.Upstream)
+	}
+	if got := cl.HTTP.Timeout; got != 300*time.Second {
+		t.Errorf("HTTP.Timeout = %v, want 300s（必须来自 upstream.timeout_seconds）", got)
+	}
+	// 响应头上限跟随放宽：大 prompt 首字节慢，不能用 90s 紧值。
+	if got := cl.HeaderTimeout(); got != 300*time.Second {
+		t.Errorf("HeaderTimeout = %v, want 300s", got)
+	}
+	// 流式 client 必须无总超时（R35）。
+	if got := cl.StreamHTTP.Timeout; got != 0 {
+		t.Errorf("StreamHTTP.Timeout 必须为 0（R35），got %v", got)
+	}
+
+	// 传 0 时回落到渠道默认值（而不是 0 秒的无限超时）。
+	sRts, _, _ = buildCustomRuntimes(channels, t.TempDir(), 0)
+	cl = sRts[provider.Kind("sgproxy")].Upstream.(*custom.Client)
+	if cl.HTTP.Timeout <= 0 {
+		t.Fatalf("timeout 传 0 时必须回落默认值，got %v", cl.HTTP.Timeout)
 	}
 }
 

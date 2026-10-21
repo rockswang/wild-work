@@ -81,8 +81,7 @@ func newSingleAccountHandler(t *testing.T, up *codeUpstream) (*Handler, *pool.Po
 		Runtimes: map[provider.Kind]*Runtime{
 			provider.Oczen: {Kind: provider.Oczen, Pool: p, Upstream: up, SingleAccount: true},
 		},
-		APIKey: "k", MaxRotate: 3,
-		HardCooldown: time.Hour, SoftCooldown: time.Minute,
+		APIKey: "k", HardCooldown: time.Hour, SoftCooldown: time.Minute,
 		ErrThreshold: 1, ErrCooldown: time.Minute,
 	})
 	return h, p

@@ -34,6 +34,8 @@ type Client struct {
 	StreamHTTP *http.Client
 	// IdleTimeout 流式空闲超时：连续该时长读不到任何字节即判上游卡死。
 	// 0 = 用 DefaultIdleTimeout。⚠️ 目前**没有配置项**（main 不注入），实际恒为默认值。
+	// 注意它只管「拿到响应头之后」那段；等响应头另由 Transport.ResponseHeaderTimeout
+	// 兜底（R118：≥180s，本渠道上游首字节常态 60~100s）。
 	IdleTimeout time.Duration
 
 	// liveMu 保护 liveIDs（动态目录缓存）。
@@ -72,17 +74,40 @@ func (c *Client) authBaseURL() string {
 // DefaultIdleTimeout 流式空闲超时默认值（与 loomy 对齐，见其注释）。
 const DefaultIdleTimeout = 90 * time.Second
 
-// New 默认 180s 超时的客户端（仅作用于非流式调用；流式见 StreamHTTP）。
-func New() *Client { return NewWithTimeout(180 * time.Second) }
+// 等响应头（TTFB）的上限与硬下限（R118）。
+//
+// 为什么必须 ≥180s：小浣熊的 LLM 网关是**缓冲式**的——即便请求带 stream:true，
+// 它也要等深度思考跑到一定阶段才回首字节。2026-10-21 本机实测（同账号同模型、
+// `max_tokens:64` 的极短请求）TTFB 三次为 64.9s / 102.9s / 95.0s。旧 60s 会把正常
+// 请求稳定判死：日志 235 次 `net/http: timeout awaiting response headers`，每次距
+// 派发精确 60.0s，用户侧表现为随机 502（同一账号、同一模型时而成功时而失败）。
+const (
+	// defaultHeaderTimeout 等响应头的默认上限。
+	defaultHeaderTimeout = 180 * time.Second
+	// minHeaderTimeout 等响应头的硬下限：再小就是把正常请求判死（有反向护栏测试）。
+	minHeaderTimeout = 180 * time.Second
+)
 
-// NewWithTimeout 指定非流式超时。
+// New 默认下限配置的客户端（仅作用于非流式调用；流式见 StreamHTTP）。
+func New() *Client { return NewWithTimeout(defaultHeaderTimeout) }
+
+// NewWithTimeout 指定非流式整请求超时。
+//
+// 等响应头上限 = max(minHeaderTimeout, timeout)：非流式总超时调得比 180s 宽时
+// 响应头跟着放宽，但它**不能**被调低——`upstream.timeout_seconds` 是为「整条请求」
+// 设的，若拿它去压响应头这一段，大问题（长思考首字节 100s+）会重新变成必然失败。
+// 流中空闲看门狗（IdleTimeout）刻意不跟着放宽，与 R58/R110 同口径。
 func NewWithTimeout(timeout time.Duration) *Client {
 	if timeout <= 0 {
-		timeout = 180 * time.Second
+		timeout = defaultHeaderTimeout
+	}
+	headerTimeout := defaultHeaderTimeout
+	if timeout > headerTimeout {
+		headerTimeout = timeout
 	}
 	return &Client{
-		HTTP:       &http.Client{Timeout: timeout, Transport: newTransport()},
-		StreamHTTP: &http.Client{Transport: newTransport()},
+		HTTP:       &http.Client{Timeout: timeout, Transport: newTransport(headerTimeout)},
+		StreamHTTP: &http.Client{Transport: newTransport(headerTimeout)},
 	}
 }
 
@@ -91,7 +116,10 @@ func NewWithTimeout(timeout time.Duration) *Client {
 // ⚠️ 此前本包 `&http.Client{Timeout: ...}` 未设 Transport，实际在共用 http.DefaultTransport
 // （h2 开启、无 ResponseHeaderTimeout）。StreamHTTP 无总超时后**必须**有
 // ResponseHeaderTimeout 兜底，否则连响应头都等不到就会无限挂住。
-func newTransport() *http.Transport {
+func newTransport(headerTimeout time.Duration) *http.Transport {
+	if headerTimeout <= 0 {
+		headerTimeout = defaultHeaderTimeout
+	}
 	dialer := &net.Dialer{Timeout: 10 * time.Second, KeepAlive: 15 * time.Second}
 	return &http.Transport{
 		DialContext:           dialer.DialContext,
@@ -100,7 +128,7 @@ func newTransport() *http.Transport {
 		MaxIdleConns:          100,
 		MaxIdleConnsPerHost:   20,
 		IdleConnTimeout:       30 * time.Second,
-		ResponseHeaderTimeout: 60 * time.Second,
+		ResponseHeaderTimeout: headerTimeout,
 	}
 }
 
@@ -108,7 +136,7 @@ func newTransport() *http.Transport {
 // 仍有总超时：这些是短请求，总超时是恰当的兜底。
 func (c *Client) httpClient() *http.Client {
 	if c.HTTP == nil {
-		c.HTTP = &http.Client{Timeout: 180 * time.Second, Transport: newTransport()}
+		c.HTTP = &http.Client{Timeout: defaultHeaderTimeout, Transport: newTransport(0)}
 	}
 	return c.HTTP
 }
@@ -116,7 +144,7 @@ func (c *Client) httpClient() *http.Client {
 // streamClient 返回流式调用用的客户端（无总超时）。
 func (c *Client) streamClient() *http.Client {
 	if c.StreamHTTP == nil {
-		c.StreamHTTP = &http.Client{Transport: newTransport()}
+		c.StreamHTTP = &http.Client{Transport: newTransport(0)}
 	}
 	return c.StreamHTTP
 }

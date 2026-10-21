@@ -249,7 +249,7 @@ func convertResponsesItems(items []any) ([]any, error) {
 			}
 			out = append(out, map[string]any{
 				"role": "tool", "tool_call_id": callID,
-				"content": stringifyOutput(item["output"]),
+				"content": toolContentValue(item["output"]),
 			})
 			continue
 		}
@@ -278,7 +278,7 @@ func convertResponsesItems(items []any) ([]any, error) {
 			}
 		case "tool":
 			callID := firstNonEmpty(asString(item["tool_call_id"]), asString(item["call_id"]))
-			out = append(out, map[string]any{"role": "tool", "tool_call_id": callID, "content": flattenText(item["content"])})
+			out = append(out, map[string]any{"role": "tool", "tool_call_id": callID, "content": toolContentValue(item["content"])})
 		default: // user 及其他未知角色一律按 user 处理
 			if content := convertResponsesContent(item["content"]); content != nil {
 				out = append(out, map[string]any{"role": "user", "content": content})
@@ -341,7 +341,7 @@ func convertResponsesContent(content any) any {
 				}
 				if url != "" {
 					hasImg = true
-					blocks = append(blocks, map[string]any{"type": "image_url", "image_url": map[string]any{"url": url}})
+					blocks = append(blocks, imageURLBlock(url, ""))
 				}
 			}
 		}

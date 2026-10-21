@@ -20,6 +20,7 @@ var sanitizeFeatures = []string{
 	"You are a coding agent running in the Codex CLI", // Codex instructions 首段（截断前缀即可命中）
 	"github.com/anthropics/",                          // 反馈句里的 Anthropic 仓库链接
 	"11128",                                           // 上游反探测：裸数字错误码
+	"You are an AI agent powered by DeepSeek Harness", // DSH 身份句：上游按 system 开头逐字锚定（2026-10-21 实测）
 }
 
 // sanitizeHdrRe 剥离层：header 键名即触发（与值无关），整段删除。
@@ -75,6 +76,13 @@ var sanitizeRewrites = [][2]string{
 		// 不改写必然失败。插入连字符保留可读性与指代（零宽空格无效，实测上游会归一化）。
 		"11128",
 		"11-128",
+	},
+	{
+		// DSH 身份句：上游只认 system 开头的逐字形态（换位置、换 role、缺 "You are an"
+		// 前缀均放行）；插入冠词 the 即绕过——保留 powered by 原措辞，仅加一个虚词，
+		// 语义扰动最小，且不依赖不可见字符或 Unicode 归一化（实测 200）。
+		"You are an AI agent powered by DeepSeek Harness",
+		"You are an AI agent powered by the DeepSeek Harness",
 	},
 }
 

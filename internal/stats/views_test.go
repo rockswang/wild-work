@@ -528,3 +528,46 @@ func TestExpiryUrgency(t *testing.T) {
 		t.Errorf("5.7 天后到期的行不能被归入今天/明天档：%+v", byUID["far"])
 	}
 }
+
+// TestRotationFollowsEarliestExpire 锁定「接棒顺序」与实际选号同口径（R112）：
+// 排序键必须是**最早到期时刻升序**，而不是「临期额度降序」——否则面板预报的
+// 接班顺序和 pool 真正挑的号不一致（用户点开看的是假的）。
+// 变异验证：把 rotationLocked 改回按 expiring 降序，本用例必红。
+func TestRotationFollowsEarliestExpire(t *testing.T) {
+	s := newTestStats(t)
+	// 基准取当前真实时刻：rotationLocked 内部用 time.Now() 判「到期是否已过」，
+	// 若把基准定在当天正午，跑在下午时最早那批会被判成已过期而不参与排序
+	// （正是 expireOK 的语义），用例就会假红。
+	now := time.Now()
+	base := now
+	at := func(h int) string { return base.Add(time.Duration(h) * time.Hour).Format(time.RFC3339) }
+
+	// credits 与 expiring 都是「余额多的排前面」，若不看到期时刻会把 big 排首；
+	// 真实第一应是 earliest（余额最少、但 2 小时后就到期）。
+	// ApplyPoll 是全量快照（不在列表里的号会被剔除），故四个号必须同一轮喂入。
+	s.ApplyPoll([]Account{
+		{UID: "big", Nickname: "余额王", Group: "qwenwork", Credits: 5000},
+		{UID: "earliest", Nickname: "最早到期", Group: "qwenwork", Credits: 100},
+		{UID: "mid", Nickname: "中间", Group: "qwenwork", Credits: 900},
+		{UID: "sticky-current", Nickname: "当前", Group: "qwenwork", Credits: 10},
+	}, base)
+	s.ApplySticky("qwenwork", "sticky-current", 1, 50)
+	s.ApplyExpiry("earliest", []ExpireItem{{At: at(2), Amount: 100}})
+	s.ApplyExpiry("mid", []ExpireItem{{At: at(20), Amount: 900}})
+	s.ApplyExpiry("big", []ExpireItem{{At: at(40), Amount: 500}})
+
+	snap := s.Snapshot(base)
+	if len(snap.Rotation) != 1 {
+		t.Fatalf("rotation=%d，want 1", len(snap.Rotation))
+	}
+	next := snap.Rotation[0].Next
+	if len(next) != 3 {
+		t.Fatalf("next=%d，want 3", len(next))
+	}
+	want := []string{"earliest", "mid", "big"}
+	for i, uid := range want {
+		if next[i].UID != uid {
+			t.Fatalf("接棒第 %d 位 = %s，want %s（最早到期优先，不看余额）", i+1, next[i].UID, uid)
+		}
+	}
+}

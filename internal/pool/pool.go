@@ -100,8 +100,13 @@ type modelCool struct {
 type entry struct {
 	a        *auth.Auth
 	credits  int64
-	expiring int64 // 临期（快到期）的可消耗积分，Pick() 第一排序键
+	expiring int64 // 临期（快到期）的可消耗积分，仅面板展示（R112 起不参与路由）
 	unusable int64
+	// earliestExpire 该账号**仍有效**的最早到期时刻，Pick() 的第一排序键（R112）。
+	// 零值 = 无到期信息（渠道不下发 expire_at，如 Qoder）或所有包已失效。
+	// 存的是绝对时刻而非「剩余多少」，所以 10/30 分钟的刷新间隔不会让它越放越错；
+	// 但过期后必须能被识别（见 expireOK）——否则旧时间戳恒为最小，会一直排第一。
+	earliestExpire time.Time
 	// creditsStale 余额口径不可信（旧版 state 或从未成功刷新过）。
 	// 仅影响面板展示，不参与 Pick() 路由。
 	creditsStale bool
@@ -160,19 +165,23 @@ const stateVersion = 5
 const creditsLayoutVersion = 3
 
 type accountState struct {
-	Credits           int64                `json:"credits"`
-	Expiring          int64                `json:"expiring,omitempty"`
-	Unusable          int64                `json:"unusable,omitempty"`
-	ModelUntil        map[string]modelCool `json:"model_until,omitempty"`
-	Disabled          bool                 `json:"disabled"`
-	Reason            string               `json:"reason,omitempty"`
-	Until             time.Time            `json:"until,omitempty"`
-	LastCheckinOK     bool                 `json:"last_checkin_ok,omitempty"`
-	LastCheckinAt     time.Time            `json:"last_checkin_at,omitempty"`
-	LastCheckinMsg    string               `json:"last_checkin_msg,omitempty"`
-	SessionDead       bool                 `json:"session_dead,omitempty"`
-	SessionDeadReason string               `json:"session_dead_reason,omitempty"`
-	SessionDeadAt     time.Time            `json:"session_dead_at,omitempty"`
+	Credits  int64 `json:"credits"`
+	Expiring int64 `json:"expiring,omitempty"`
+	Unusable int64 `json:"unusable,omitempty"`
+	// EarliestExpireUnix 最早有效到期时刻（unix 秒，0 = 无到期信息）。上游 R112 的路由键。
+	// 不 bump stateVersion：老文件缺该字段只会读成「无到期信息」⇒ 退回按余额排序，
+	// 与升级前行为等价，首刷自动补上；bump 反而会让全部账号白闪一次「待刷新」。
+	EarliestExpireUnix int64                `json:"earliest_expire,omitempty"`
+	ModelUntil         map[string]modelCool `json:"model_until,omitempty"`
+	Disabled           bool                 `json:"disabled"`
+	Reason             string               `json:"reason,omitempty"`
+	Until              time.Time            `json:"until,omitempty"`
+	LastCheckinOK      bool                 `json:"last_checkin_ok,omitempty"`
+	LastCheckinAt      time.Time            `json:"last_checkin_at,omitempty"`
+	LastCheckinMsg     string               `json:"last_checkin_msg,omitempty"`
+	SessionDead        bool                 `json:"session_dead,omitempty"`
+	SessionDeadReason  string               `json:"session_dead_reason,omitempty"`
+	SessionDeadAt      time.Time            `json:"session_dead_at,omitempty"`
 }
 
 // Pool 账号池。
@@ -275,7 +284,7 @@ func (p *Pool) PickExcluding(tried map[string]bool, model string) *auth.Auth {
 		if !e.healthy(now, model) {
 			continue
 		}
-		if best == nil || entryBetter(e, best) {
+		if best == nil || entryBetter(e, best, now) {
 			best = e
 		}
 	}
@@ -285,24 +294,52 @@ func (p *Pool) PickExcluding(tried map[string]bool, model string) *auth.Auth {
 	return best.a
 }
 
-// entryBetter e 是否应排在 b 之前（路由优先级更高）：临期降序 → 总可用降序。
-func entryBetter(e, b *entry) bool {
-	if e.expiring != b.expiring {
-		return e.expiring > b.expiring
+// entryBetter e 是否应排在 b 之前（路由优先级更高）。
+//
+// 排序规则（R112，用户口径：「总是选积分最快过期的那条记录对应的账号」）：
+//  1. **最早到期时刻升序**——快过期的先烧；
+//  2. 同一到期时刻 → uid 的 ASCII 升序（稳定、可预期，不再看余额）；
+//  3. 无有效到期信息的（渠道不下发 expire_at，或快照里的到期时刻已过）垫底，
+//     彼此按总可用余额降序——Qoder 这类池子因此仍能正常轮换而不被钉死在一个号上。
+//
+// 为什么不再用「临期额度降序」：那是**体量**，两个账号体量相同时它无法分辨谁更急。
+func entryBetter(e, b *entry, now time.Time) bool {
+	ee, be := e.expireOK(now), b.expireOK(now)
+	if ee != be {
+		return ee // 有有效到期时刻的恒排前面
 	}
-	return e.credits > b.credits
+	if ee {
+		if !e.earliestExpire.Equal(b.earliestExpire) {
+			return e.earliestExpire.Before(b.earliestExpire)
+		}
+		return e.a.UID < b.a.UID
+	}
+	if e.credits != b.credits {
+		return e.credits > b.credits
+	}
+	return e.a.UID < b.a.UID // 同级也比 uid：byUID 是 map，迭代序随机，无 tie-break 则选号不可复现
 }
 
-// SetCreditDetail 更新账号积分：usable 为可消耗余额，expiring 为其中临期部分，
-// unusable 为账号名下有但本工具用不了的额度（如 TraeWork 的 ep=1 专用池），仅面板展示。
-// usable+expiring 是 Pick() 的排序依据。写入即视为余额口径可信，清除 creditsStale。
-func (p *Pool) SetCreditDetail(uid string, usable, expiring, unusable int64) {
+// expireOK 该账号是否有**仍然有效**的最早到期时刻。
+//
+// 已过期的旧快照不能算：否则那个时间戳恒为最小值，该账号永远排第一，
+// 每次请求都白打一次「余额不足」（硬冷却）——它自己不会变好，只能等刷新。
+func (e *entry) expireOK(now time.Time) bool {
+	return !e.earliestExpire.IsZero() && e.earliestExpire.After(now)
+}
+
+// SetCreditDetail 更新账号积分：usable 为可消耗余额，expiring 为其中临期部分（仅展示），
+// unusable 为账号名下有但本工具用不了的额度（如 TraeWork 的 ep=1 专用池，仅面板展示）。
+// earliest 为该账号仍有效的最早到期时刻（零值 = 无到期信息），是 Pick() 的第一排序键。
+// 写入即视为余额口径可信，清除 creditsStale。
+func (p *Pool) SetCreditDetail(uid string, usable, expiring, unusable int64, earliest time.Time) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if e, ok := p.byUID[uid]; ok {
 		e.credits = usable
 		e.expiring = expiring
 		e.unusable = unusable
+		e.earliestExpire = earliest
 		e.creditsStale = false
 	}
 	p.saveLocked()
@@ -397,14 +434,16 @@ func (p *Pool) SetDisabled(uid string, d bool) {
 }
 
 // ReenableIfCredits 签到后解冻：仅当 remain > 0 且账号处于冷却（非禁用）时恢复。
-// expiring 为临期额度小计，unusable 为不可消耗额度小计（仅面板展示）。写入即视为余额口径可信。
-func (p *Pool) ReenableIfCredits(uid string, remain, expiring, unusable int64) {
+// expiring 为临期额度小计（仅展示），unusable 为不可消耗额度小计（仅展示），
+// earliest 为仍有效的最早到期时刻（零值 = 无到期信息）。写入即视为余额口径可信。
+func (p *Pool) ReenableIfCredits(uid string, remain, expiring, unusable int64, earliest time.Time) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if e, ok := p.byUID[uid]; ok {
 		e.credits = remain
 		e.expiring = expiring
 		e.unusable = unusable
+		e.earliestExpire = earliest
 		e.creditsStale = false
 		if remain > 0 && !e.disabled {
 			// 签到解冻：账号级与模型级冷却一并清除。模型级冷却若残留，该账号会
@@ -614,6 +653,22 @@ func modelCoolingOf(e *entry, now time.Time) []ModelCoolStatus {
 // 持久化
 // ---------------------------------------------------------------------------
 
+// unixOrZero 秒级时间戳 → time.Time（0 视为零值 = 无到期信息）。
+func unixOrZero(sec int64) time.Time {
+	if sec <= 0 {
+		return time.Time{}
+	}
+	return time.Unix(sec, 0)
+}
+
+// zeroOrUnix 零值时间 → 0（不落一个 "0001-01-01" 的假到期时刻）。
+func zeroOrUnix(t time.Time) int64 {
+	if t.IsZero() {
+		return 0
+	}
+	return t.Unix()
+}
+
 func (p *Pool) load() {
 	raw, err := os.ReadFile(p.stateFp)
 	if err != nil {
@@ -633,6 +688,7 @@ func (p *Pool) load() {
 			credits:           s.Credits,
 			expiring:          s.Expiring,
 			unusable:          s.Unusable,
+			earliestExpire:    unixOrZero(s.EarliestExpireUnix),
 			creditsStale:      stale,
 			disabled:          s.Disabled,
 			reason:            s.Reason,
@@ -655,19 +711,20 @@ func (p *Pool) saveLocked() {
 	sf := stateFile{Version: stateVersion, Accounts: map[string]accountState{}}
 	for uid, e := range p.byUID {
 		sf.Accounts[uid] = accountState{
-			Credits:           e.credits,
-			Expiring:          e.expiring,
-			Unusable:          e.unusable,
-			ModelUntil:        e.modelUntil,
-			Disabled:          e.disabled,
-			Reason:            e.reason,
-			Until:             e.until,
-			LastCheckinOK:     e.lastCheckinOK,
-			LastCheckinAt:     e.lastCheckinAt,
-			LastCheckinMsg:    e.lastCheckinMsg,
-			SessionDead:       e.sessionDead,
-			SessionDeadReason: e.sessionDeadReason,
-			SessionDeadAt:     e.sessionDeadAt,
+			Credits:            e.credits,
+			Expiring:           e.expiring,
+			Unusable:           e.unusable,
+			EarliestExpireUnix: zeroOrUnix(e.earliestExpire),
+			ModelUntil:         e.modelUntil,
+			Disabled:           e.disabled,
+			Reason:             e.reason,
+			Until:              e.until,
+			LastCheckinOK:      e.lastCheckinOK,
+			LastCheckinAt:      e.lastCheckinAt,
+			LastCheckinMsg:     e.lastCheckinMsg,
+			SessionDead:        e.sessionDead,
+			SessionDeadReason:  e.sessionDeadReason,
+			SessionDeadAt:      e.sessionDeadAt,
 		}
 	}
 	raw, err := json.MarshalIndent(sf, "", "  ")

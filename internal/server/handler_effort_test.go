@@ -69,8 +69,7 @@ func newEffHandler(t *testing.T, up provider.Upstream, efforts map[string]string
 		Runtimes: map[provider.Kind]*Runtime{
 			provider.Oczen: {Kind: provider.Oczen, Pool: pa, Upstream: up},
 		},
-		APIKey: "k", MaxRotate: 3,
-		HardCooldown: time.Hour, SoftCooldown: time.Minute,
+		APIKey: "k", HardCooldown: time.Hour, SoftCooldown: time.Minute,
 		ErrThreshold: 1, ErrCooldown: time.Minute,
 		ReasoningEfforts: efforts,
 	})

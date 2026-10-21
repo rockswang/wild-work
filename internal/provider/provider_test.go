@@ -288,3 +288,51 @@ func TestExpiringWithinDaysSum(t *testing.T) {
 		t.Errorf("days=3 应含今日+明日+第三天 = 600 分，实际 %d", got)
 	}
 }
+
+// TestEarliestExpire 守门 R112 的选号主键：取最短到期时刻，不能是「最早到期日那批的额度之和」。
+// 与 ExpiringWithinDays 是两回事：那个是体量（窗口内总和），这个是紧迫度（一个时刻）。
+func TestEarliestExpire(t *testing.T) {
+	now := time.Date(2026, 10, 19, 14, 0, 0, 0, expireLoc)
+	want := time.Date(2026, 10, 20, 0, 0, 0, 0, expireLoc)
+	items := []ResourceItem{
+		{Name: "远期", Remain: 900, Usable: true, ExpireAt: "2026-10-30T12:00:00+08:00"},
+		{Name: "今晚", Remain: 100, Usable: true, ExpireAt: "2026-10-20T00:00:00+08:00"},
+		{Name: "明天", Remain: 200, Usable: true, ExpireAt: "2026-10-20T23:59:59+08:00"},
+		// 以下三条都不能成为「最早」：不可用 / 仅展示 / 已失效 / 无剩余
+		{Name: "不可用且最早", Remain: 500, Usable: false, ExpireAt: "2026-10-19T15:00:00+08:00"},
+		{Name: "仅展示且最早", Remain: 400, Usable: true, InfoOnly: true, ExpireAt: "2026-10-19T16:00:00+08:00"},
+		{Name: "已失效", Remain: 300, Usable: true, ExpireAt: "2026-10-19T10:00:00+08:00"},
+		{Name: "已用尽", Remain: 0, Usable: true, ExpireAt: "2026-10-19T11:00:00+08:00"},
+	}
+	got, ok := EarliestExpire(items, now)
+	if !ok || !got.Equal(want) {
+		t.Fatalf("EarliestExpire = %v ok=%v，want %v（今晚 00:00）", got, ok, want)
+	}
+}
+
+// TestEarliestExpireNone 无可用到期信息时必须返回 ok=false（零值），
+// 让 pool 把该账号排到「有到期时刻」的账号之后按余额兜底（Qoder 这类渠道）。
+func TestEarliestExpireNone(t *testing.T) {
+	now := time.Date(2026, 10, 19, 14, 0, 0, 0, expireLoc)
+	for _, items := range [][]ResourceItem{
+		{{Name: "无到期", Remain: 800, Usable: true}},
+		{{Name: "已失效", Remain: 300, Usable: true, ExpireAt: "2026-10-19T10:00:00+08:00"}},
+		{{Name: "不可用", Remain: 300, Usable: false, ExpireAt: "2026-10-25T10:00:00+08:00"}},
+		nil,
+	} {
+		if got, ok := EarliestExpire(items, now); ok || !got.IsZero() {
+			t.Errorf("EarliestExpire(%v) = %v ok=%v，want 零值/false", items, got, ok)
+		}
+	}
+}
+
+// TestEarliestExpireDateGrain 纯日期粒度按「该日全天可用」解析 ⇒ 次日 00:00，
+// 与 ExpireInstant 同一口径（不得拿日期串直接比大小）。
+func TestEarliestExpireDateGrain(t *testing.T) {
+	now := time.Date(2026, 10, 19, 14, 0, 0, 0, expireLoc)
+	got, ok := EarliestExpire([]ResourceItem{{Remain: 10, Usable: true, ExpireAt: "2026-10-25"}}, now)
+	want := time.Date(2026, 10, 26, 0, 0, 0, 0, expireLoc)
+	if !ok || !got.Equal(want) {
+		t.Fatalf("got %v ok=%v，want %v", got, ok, want)
+	}
+}

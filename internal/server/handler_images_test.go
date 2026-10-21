@@ -129,7 +129,7 @@ func newImagesHandler(t *testing.T) (*Handler, *mockGLMUp, *pool.Pool) {
 		Runtimes: map[provider.Kind]*Runtime{
 			provider.GLM: {Kind: provider.GLM, Pool: p, Upstream: up, StaticModels: glm.StaticModels()},
 		},
-		APIKey: "", MaxRotate: 3, SoftCooldown: time.Minute, ErrThreshold: 3, ErrCooldown: time.Minute,
+		APIKey: "", SoftCooldown: time.Minute, ErrThreshold: 3, ErrCooldown: time.Minute,
 	})
 	return h, m, p
 }

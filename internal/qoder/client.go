@@ -150,18 +150,6 @@ func (c *Client) get(path, dt string) (*http.Response, error) {
 	return c.HTTP.Do(req)
 }
 
-func (c *Client) post(path, dt string, body []byte) (*http.Response, error) {
-	if body == nil {
-		body = []byte("{}")
-	}
-	req, err := http.NewRequest(http.MethodPost, c.base()+path, bytes.NewReader(body))
-	if err != nil {
-		return nil, err
-	}
-	billingHeaders(req, dt)
-	return c.HTTP.Do(req)
-}
-
 func readBody(resp *http.Response) ([]byte, error) {
 	defer resp.Body.Close()
 	return io.ReadAll(io.LimitReader(resp.Body, 1<<20))
@@ -500,9 +488,22 @@ func Classify(status int, body string) provider.ErrKind {
 	if status == http.StatusUnauthorized {
 		return provider.ErrSessionDead
 	}
+	// 排队提示（10605 isQueued）：就算外层是 4xx，语义也是「等一会儿再来」，
+	// 换号可能命中不同队列 ⇒ 独立类别，冷却「号×模型」而不是罚整号。
+	if strings.Contains(body, "10605") || strings.Contains(body, "isQueued") {
+		return provider.ErrQueued
+	}
 	// 429 优先于 hardRule：限流 body 高频带 "quota exceeded"。
 	if status == http.StatusTooManyRequests {
 		return provider.ErrSoftRate
+	}
+	// 账号额度耗尽（qodercom 实测 110「Billing daily count exceeded」/ 112 付费墙）：
+	// 文案不含 hardMarkers 的 "quota exceeded"，必须显式列码，否则会被归成普通
+	// ErrClient 只换号不冷却，下次请求又撞同一堵墙。
+	if strings.Contains(body, `"code":"110"`) || strings.Contains(body, `"code":"112"`) ||
+		strings.Contains(body, `\"code\":\"110\"`) || strings.Contains(body, `\"code\":\"112\"`) ||
+		strings.Contains(body, "pricingUrl") || strings.Contains(body, `"isQuotaExceeded":true`) {
+		return provider.ErrHardCredit
 	}
 	// 上游以 HTTP 200 包裹的排队/限流拒绝：内嵌 403 + subCode:RESOURCE_LIMIT
 	// （业务码 10605，带 retryAfterSeconds/waitTime/serviceAvailable:false）。

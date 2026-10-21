@@ -204,7 +204,7 @@ func convertAnthropicMessage(role string, content any, idx int) ([]any, error) {
 			}
 		case "image":
 			if url := anthropicImageURL(bm); url != "" {
-				imgBlocks = append(imgBlocks, map[string]any{"type": "image_url", "image_url": map[string]any{"url": url}})
+				imgBlocks = append(imgBlocks, imageURLBlock(url, ""))
 			}
 		case "tool_use":
 			// assistant 侧的工具调用 → Chat 的 tool_calls
@@ -225,12 +225,13 @@ func convertAnthropicMessage(role string, content any, idx int) ([]any, error) {
 		case "tool_result":
 			// user 侧的 tool_result → 独立的 role=tool 消息（Chat 要求工具结果单独成条）
 			callID := firstNonEmpty(asString(bm["tool_use_id"]), asString(bm["tool_call_id"]))
-			res := flattenText(bm["content"])
-			if res == "" {
-				res = stringifyOutput(bm["content"])
-			}
+			// tool_result 里的图片必须保留成 image_url 块（走 vision），
+			// 不能 stringify 成 base64 文本（见 toolContentValue 注释）。
+			res := toolContentValue(bm["content"])
 			if isTruthy(bm["is_error"]) {
-				res = "ERROR: " + res
+				if txt, ok := res.(string); ok {
+					res = "ERROR: " + txt
+				}
 			}
 			out = append(out, map[string]any{"role": "tool", "tool_call_id": callID, "content": res})
 		case "thinking", "redacted_thinking":

@@ -4,6 +4,7 @@ package provider
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -193,6 +194,7 @@ const (
 	ErrAccountFault                  // 账号级授权/配额故障（11140/14017）→ 冷却轮换
 	ErrModelBlocked                  // 11102 该后端无此模型 → (账号,模型) 负缓存避让
 	ErrPassthrough                   // 请求级拒绝（形态/地域/身体不被接受）→ 原文透传，不罚账号不轮转
+	ErrQueued                        // 上游「模型排队中」提示（qodercn 10605 isQueued）→ 换号可能命中不同队列
 )
 
 func (k ErrKind) String() string {
@@ -225,18 +227,25 @@ func (k ErrKind) String() string {
 		return "model_blocked"
 	case ErrPassthrough:
 		return "passthrough"
+	case ErrQueued:
+		return "queued"
 	default:
 		return "none"
 	}
 }
 
 // Rotatable 报告该错误是否应换下一个账号重试本请求（账号级错误）。
-// 账号有问题的（限流/欠费/登录态死/偶发 404/上游 5xx/账号故障）：换号有价值；
+// 账号有问题的（限流/欠费/登录态死/偶发 404/账号故障/排队）：换号有价值；
 // 请求内容有问题的（内容拦截/上下文超限/模型不存在）：换号必然复现，透传原文结束；
-// ErrClient（其他 4xx 业务错误）默认可换一次——部分渠道业务错误挂在账号权益上。
+// ErrClient（其他 4xx 业务错误）可换号——实测 workbuddyai 11158「model is not allowed for
+// user type [personal_free_user]」就是账号等级差异，换到 pro 号即放行。
+//
+// ⚠️ ErrServer（5xx）**不在**此列（2026-10-20 除名）：实测 workbuddyai 11134
+// 「the model provider is temporarily unavailable」在同一波里 4 个号全 500，且每个号
+// 内部客户端已自行重试 3 次 ⇒ 换号必撞同一面墙，只是把 1 次失败放大成 9 次。
 func (k ErrKind) Rotatable() bool {
 	switch k {
-	case ErrSoftRate, ErrHardCredit, ErrSessionDead, ErrNotFound, ErrServer, ErrAccountFault, ErrClient:
+	case ErrSoftRate, ErrHardCredit, ErrSessionDead, ErrNotFound, ErrAccountFault, ErrClient, ErrQueued:
 		return true
 	default:
 		return false
@@ -276,6 +285,9 @@ var modelScopedSoftRateMarkers = []string{
 	"switch to another model",
 	"model busy",
 	"换模型",
+	// 中文原文（WorkBuddy 系 6004 实际下发形态，2026-10-21 补）：
+	// 「您的使用量已超出频率限制，将在 … UTC+8 重置，您也可以切换其他模型继续使用。」
+	"切换其他模型",
 }
 
 // IsModelScopedSoftRate 判定软限流（ErrSoftRate）是否只作用于当前模型。
@@ -292,6 +304,50 @@ func IsModelScopedSoftRate(body string) bool {
 		}
 	}
 	return false
+}
+
+// Queued 上游「模型排队中」提示：HTTP 200 里的一帧业务错误，不是拒绝。
+//
+// 首例 qodercn deepseek-flash（2026-10-20 生产实录）——外层 headers 带 Retry-After，
+// body 内三层嵌套：{code:403} → {code:10605} → {isQueued:true, modelKey:"dfmodel",
+// queueCount:8407, retryAfterSeconds:30, waitTime:509}。
+//
+// 账号本身健康（同号其他模型照用），拥塞发生在网关的**模型维度**上；换号可能命中不同队列。
+// 该帧必须在**写出任何字节之前**识别：把这种没有 choices 的帧当普通 chunk 透传，
+// 客户端只会显示「正在等待模型…」，直到网关 180s 后掐断连接（实测三次 180.3/180.7/180.8s）。
+type Queued struct {
+	ModelKey    string
+	QueueCount  int
+	RetryAfter  time.Duration // 上游建议的重试间隔（外层 Retry-After 或 retryAfterSeconds）
+	WaitSeconds int           // 上游估计的排队时长（waitTime）
+}
+
+func (e *Queued) Error() string {
+	msg := "model queued upstream"
+	if e.ModelKey != "" {
+		msg += " (" + e.ModelKey + ")"
+	}
+	if e.QueueCount > 0 {
+		msg += fmt.Sprintf(" queue=%d", e.QueueCount)
+	}
+	if e.WaitSeconds > 0 {
+		msg += fmt.Sprintf(" wait=%ds", e.WaitSeconds)
+	}
+	if e.RetryAfter > 0 {
+		msg += fmt.Sprintf(" retry_after=%s", e.RetryAfter)
+	}
+	return msg
+}
+
+// Kind 实现 StreamErrorClassifier：流在写出字节之前命中排队时，handler 据此走换号路径。
+func (e *Queued) Kind() ErrKind { return ErrQueued }
+
+// Cooldown 本次「账号×模型」应冷却多久：优先用上游 retryAfter，缺失时退 30s。
+func (e *Queued) Cooldown() time.Duration {
+	if e.RetryAfter > 0 {
+		return e.RetryAfter
+	}
+	return 30 * time.Second
 }
 
 // Error 带分类的上游错误。
@@ -348,6 +404,33 @@ func LogParams(body []byte) string {
 		return LogBody(string(body))
 	}
 	return string(out)
+}
+
+// Classified 把 *Error 包装成实现了 StreamErrorClassifier 的错误，供**流式路径**使用。
+//
+// 为什么需要包装而不是直接给 Error 加 Kind() 方法：字段名就叫 Kind，与方法同名会冲突。
+// 为什么流式路径需要它：渠道在流首帧发现「上游 200 里包着业务错误」时（如 qodercom 的
+// envelope 403 → code 110/112 额度耗尽），一字节未写就上抛错误——此刻还来得及换号，
+// 但 handler 必须能问出错误类别（ErrHardCredit ⇒ 整号硬冷却 + 换号）。
+// 不包装则只能走「已写流」分支（只罚不换），5 个号全耗尽时客户端只能干等下次请求。
+type Classified struct{ Err *Error }
+
+// Kind 实现 StreamErrorClassifier。
+func (c *Classified) Kind() ErrKind { return c.Err.Kind }
+
+func (c *Classified) Error() string { return c.Err.Error() }
+
+// Unwrap 让 errors.As(err, &pe) 仍能取回原始 *provider.Error（保留 Status/Msg）。
+func (c *Classified) Unwrap() error { return c.Err }
+
+// AsClassified 把任何带 Kind 字段的 provider.Error 转成 StreamErrorClassifier 可识别的错误；
+// 不是 *provider.Error 时原样返回（如 *Queued 自己就实现了 Kind()）。
+func AsClassified(err error) error {
+	var pe *Error
+	if errors.As(err, &pe) {
+		return &Classified{Err: pe}
+	}
+	return err
 }
 
 // ModelInfo 动态/静态模型信息。
@@ -771,8 +854,16 @@ func ExpireWithinDays(expireAt string, now time.Time, days int) bool {
 	return !day.After(limit)
 }
 
+// ExpiringDays 面板「临期额度」的展示窗口（自然日，固定 1 天 = 今日到期）。
+//
+// 自 2026-10-20 起**不再是路由参数**：选号改用「最早到期时刻升序」
+// （EarliestExpire），窗口大小只决定面板上那一列/汇总条怎么加总，
+// 因此取消设置项（原 R18 的可配阈值被 R112 取代）。
+const ExpiringDays = 1
+
 // ExpiringWithinDays 统计 days 个自然日内到期的**可消耗**积分小计。
-// 调度器临期优先消耗的判据（替代旧的时长口径 ExpiringWithin）。
+// 自 R112 起仅用于**展示**（面板三口径的「临期额度」/汇总条）；路由判据是
+// EarliestExpire（最早到期时刻），不再看这个量。
 func ExpiringWithinDays(items []ResourceItem, days int, now time.Time) int64 {
 	var expiring int64
 	for _, it := range items {
@@ -784,6 +875,31 @@ func ExpiringWithinDays(items []ResourceItem, days int, now time.Time) int64 {
 		}
 	}
 	return expiring
+}
+
+// EarliestExpire 返回「可消耗 + 有剩余 + 尚未失效」条目中**最早的到期时刻**。
+// ok=false 表示该账号没有任何可用的到期信息（渠道不下发 expire_at，如 Qoder；
+// 或所有包都已失效）——调用方应把它当作「到期未知」，排在已知到期时刻的账号之后。
+//
+// 这是选号的**唯一**路由判据（R112）：快过期的先烧，减少到期作废。
+// 与 ExpiringWithinDays 的区别：那个是**体量**（窗口内到期积分之和），两个账号
+// 体量相同时它无法分辨谁更急；这里是**紧迫度**（绝对时刻），天然可比。
+func EarliestExpire(items []ResourceItem, now time.Time) (time.Time, bool) {
+	var earliest time.Time
+	ok := false
+	for _, it := range items {
+		if !it.Usable || it.InfoOnly || it.Remain <= 0 || it.ExpireAt == "" {
+			continue
+		}
+		t, valid := ExpireInstant(it.ExpireAt)
+		if !valid || !t.After(now) {
+			continue // 已失效的包不参与「最快过期」判定
+		}
+		if !ok || t.Before(earliest) {
+			earliest, ok = t, true
+		}
+	}
+	return earliest, ok
 }
 
 // ExpiringWithin 统计 horizon 时长内到期的**可消耗**积分小计（临期额度）。

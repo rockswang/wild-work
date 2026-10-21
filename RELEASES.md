@@ -3026,3 +3026,402 @@ OpenAI Images API 兼容生图端点，**外部 OpenAI 生态工具零改造接�
 - 多图拼版出图效果仅双人设定集定性通过，任意 N 图未全量验证；
 - 图床依赖第三方（sang.pub，含隐私提示），配置化逃生门未做；
 - edits 输出比例强制跟随输入图，请求 `size` 只对 generations 生效。
+
+---
+
+# wild-work v2.9.3 · 本机增补 — 上游「排队」不再干等 180 秒 + 换号策略按错误语义分层
+
+> 一句话：**上游说「在排队」时，我们不再把这句话当空气**——立刻换号，全号排队才告诉你等多久。
+
+## 🐛 `qodercn/deepseek-flash` 卡死 3 分钟（零 token）
+
+生产实录（2026-10-20）：同一模型连续 4 次请求全部卡死，日志一模一样：
+
+```
+elapsed=180.3s  ttfb=483ms  err=upstream stream truncated: unexpected EOF
+elapsed=180.7s  ttfb=401ms  err=upstream stream truncated: unexpected EOF
+elapsed=180.8s  ttfb=743ms  err=upstream stream truncated: unexpected EOF
+```
+
+客户端界面停在「正在等待模型…」，**3 分钟零 token，最后报错**。
+
+### 🔍 根因：上游把「排队」写成一帧业务错误，而它长得像 chunk
+
+抓上游原始响应才看清：**HTTP 200**，首帧不是 delta，而是一段三层套娃：
+
+```json
+{"code":403,"message":"{\"code\":\"10605\",\"message\":\"{\\\"isQueued\\\":true,
+ \\\"modelKey\\\":\\\"dfmodel\\\",\\\"queueCount\\\":8407,\\\"queueType\\\":\\\"p3\\\",
+ \\\"retryAfterSeconds\\\":30,\\\"waitTime\\\":509}\"}"}
+```
+
+外层 headers 还带着 `Retry-After: 30`。这帧**没有 `choices`**，旧解析器不认识它 ⇒
+当成普通 chunk 原样转发 ⇒ 客户端收到一个空 delta 后干等，直到网关 180 秒后掐断连接。
+
+对照实验：同渠道 `glm-5.3-flash` 0.87 秒正常出字 ⇒ **账号没问题，是模型在排队**。
+
+### 🔧 修法：零字节识别 → 冷却「号×模型」→ 换下一个号
+
+- 解析层在 `onChunk` 之前识别 `10605` / `isQueued`（且无 `choices`）⇒ 上抛
+  `*provider.Queued`（带 `queueCount` / `retryAfter` / `waitTime`），**保证一字节都不写**；
+- 新增错误类别 `ErrQueued`：账号本身健康，拥塞在**网关的模型维度**，
+  换号可能命中不同队列 ⇒ 只冷却「这个号的这个模型」30 秒（取上游 `retryAfter`），
+  **不升级整号冷却**；
+- 全部账号都在排队时，不再回 503 `no_healthy_account`，而是：
+
+```http
+HTTP/1.1 429 Too Many Requests
+Retry-After: 30
+{"error":{"code":"model_queued","message":"… queue=8407 wait=509s",
+          "retry_after_seconds":30,"queue_count":8407,"wait_seconds":509}}
+```
+
+一句话：**能换就换，换完还在排队就诚实告诉你「等 30 秒」，而不是让你等 3 分钟再报错。**
+
+## 🔁 换号策略重排：按「换号有没有收益」分层
+
+`MaxRotate`（魔法数字 3）**整体删除**。轮转上限改为**渠道账号数**（每个号试一次，
+`tried` 去重），继续还是失败只由错误类别决定：
+
+| 错误 | 处置 | 依据 |
+|---|---|---|
+| 排队 10605 / 429 / 402 / 401 / 404 / 账号故障 / 其他 4xx | **试满所有号** | 换号有价值 |
+| 5xx（如 workbuddyai `11134`） | **不换号，原样透传** | 实测同一波 4 个号全 500，号内客户端已各重试 3 次 ⇒ 一次请求白打 9 次 |
+| 传输层超时 / refresh 的本机 DNS 故障 | **不换号，直接 502** | 同渠道所有号打同一个 host（实测 sgproxy `timeout awaiting response headers` 114 次、`lookup …: no such host` 38 次） |
+
+`ErrClient`（其他 4xx）**保留换号**：实测 workbuddyai `11158 model [primary-model] is not
+allowed for user type [personal_free_user]` 是账号等级差异，换到 pro 号即放行。
+
+## 🧊 整号冷却升级阈值 2 → 3
+
+`CooldownModel` 原先「同号两个模型冷却就把整号冻住」。排队让「同号多模型冷却」变成
+高频事件（`deepseek-v4.1-flash` 与 `flash-sg` 先后 429 就能冻掉整个号）⇒ 阈值提到 **3**，
+两个模型排队不再触发整号下线。
+
+## ✅ 回归
+
+- `internal/qodercn/queue_frame_test.go`：排队帧**零字节**写出 + 元数据解析 + 只带外层
+  `Retry-After` 的形态 + 非排队错误帧不透传 + 正常 delta 仍透传 + `Classify` 不把普通 403 误判；
+- `internal/server/handler_queue_test.go`：首号排队 → 换号成功且只冷「号×模型」约 30s
+  （断言不整号冷）；三号全排队 → 429 + `Retry-After` + `model_queued` 且每号只试一次；
+  传输层错误 → 只打 1 次就 502；
+- `fallback_dimension_test.go`：新增第五维度 `upstream-transparent`，`ErrServer` 移出
+  `account-rotate`，`ErrQueued` 登记（`expectedKindCount` 14→15）；
+- 升级阈值相关单测同步（`pool_test.go`、`model_fallback_test.go`、`handler_model_cooldown_test.go`）。
+
+> 顺带把散落在注释、文档里的 `MaxRotate` 表述全部改为「轮转上限 = 渠道账号数」，
+> `docs/模型降级链定义.md` 的维度表补上第五类处置 `upstream-transparent`。
+
+# wild-work v2.9.3 · 本机增补 — 自定义渠道的「等响应头」不再卡在 90 秒
+
+> 一句话：**大 prompt 慢在上游排队，不是慢在你家网络**——等响应头这一段给足 180s，
+> 同时把 `upstream.timeout_seconds` 真正接到自定义渠道上。
+
+## 🐛 压缩上下文必然超时（sgproxy + gpt-6.1-sol）
+
+生产实录（2026-10-20）：自定义渠道 `sgproxy` 上的 `gpt-6.1-sol` 做上下文压缩时恒失败，
+日志一模一样，**每次距请求开始精确 90.0~90.6 秒**：
+
+```
+upstream transport error platform=sgproxy uid=custom-sgproxy
+  err=Post "http://38.135.82.8:8317/v1/chat/completions":
+      net/http: timeout awaiting response headers
+```
+
+同日 46 次、历史 114 次，全是这一句。
+
+### 🔍 根因：三处硬编码 + 一条从未接上的线
+
+| 位置 | 旧值 | 问题 |
+|---|---|---|
+| `custom/client.go` `ResponseHeaderTimeout` | **90s 硬编码** | 大 prompt 首字节由上游排队决定 |
+| `custom/client.go` `idle.Monitor` | 90s 硬编码 | 这条**本来就该是 90s**（见下） |
+| `custom/client.go` `HTTP.Timeout` | 120s 硬编码 | 不读配置 |
+| `buildCustomRuntimes` | `custom.New(cc)` | 内建渠道逐个注入 `upstream.timeout_seconds`，**自定义渠道从 R66 起就没接** |
+
+压缩请求等于把整段会话重发一遍。事故时该会话 prompt 已到 **922,572 token**，
+本机实测同链路首字节 20~45s（空载小请求也要 8~11s），**90s 在正常波动里就会被越线**。
+
+### 🔧 修法：只放宽「等响应头」这一段
+
+```go
+// 响应头上限 = max(180s, upstream.timeout_seconds)，180s 是硬下限
+client := custom.NewWithTimeout(cc, cfg.Upstream.TimeoutSeconds)
+```
+
+| 阶段 | 值 | 为什么 |
+|---|---|---|
+| 等响应头 | **180s 起**，跟随 `timeout_seconds` 放宽 | 上游排队/推理启动慢，**等下去有意义** |
+| 流中空闲 | **90s 不变** | 拿到响应头后彻底卡死，多等只是让用户多等 |
+| 流式总超时 | **仍然不设**（R35） | 长回答不能被整体超时掐断 |
+| 非流式总超时 | `upstream.timeout_seconds` | 与内建渠道口径统一 |
+
+## ✅ 回归
+
+- `internal/custom/timeout_test.go`：默认 180s / 注入 120s 仍取 180s / **注入 30s 不得把上限
+  压到 30s** / 注入 600s 跟随放宽 / `StreamHTTP.Timeout` 恒 0 / `IdleTimeout` 恒 90s
+  不随放宽 / 下限不得低于 90s 的反向护栏 / 慢响应头 300ms 端到端仍成功；
+- `cmd/wild-work/custom_channels_test.go`：`TestBuildCustomRuntimesWiresUpstreamTimeout`
+  锁死「300s 真的传到 `HTTP.Timeout` 与 `HeaderTimeout`」「传 0 回落默认值」。
+
+> 阈值仍是常量而非配置项（按 R58 的口径不新增用户概念）；要再调就改 `defaultHeaderTimeout`。
+
+> 一句话：**大 prompt 慢在上游排队，不是慢在你家网络**——等响应头这一段给足 180s，
+> 同时把 `upstream.timeout_seconds` 真正接到自定义渠道上。
+
+## 🐛 压缩上下文必然超时（sgproxy + gpt-6.1-sol）
+
+生产实录（2026-10-20）：自定义渠道 `sgproxy` 上的 `gpt-6.1-sol` 做上下文压缩时恒失败，
+日志一模一样，**每次距请求开始精确 90.0~90.6 秒**：
+
+```
+upstream transport error platform=sgproxy uid=custom-sgproxy
+  err=Post "http://38.135.82.8:8317/v1/chat/completions":
+      net/http: timeout awaiting response headers
+```
+
+同日 46 次、历史 114 次，全是这一句。
+
+### 🔍 根因：三处硬编码 + 一条从未接上的线
+
+| 位置 | 旧值 | 问题 |
+|---|---|---|
+| `custom/client.go` `ResponseHeaderTimeout` | **90s 硬编码** | 大 prompt 首字节由上游排队决定 |
+| `custom/client.go` `idle.Monitor` | 90s 硬编码 | 这条**本来就该是 90s**（见下） |
+| `custom/client.go` `HTTP.Timeout` | 120s 硬编码 | 不读配置 |
+| `buildCustomRuntimes` | `custom.New(cc)` | 内建渠道逐个注入 `upstream.timeout_seconds`，**自定义渠道从 R66 起就没接** |
+
+压缩请求等于把整段会话重发一遍。事故时该会话 prompt 已到 **922,572 token**，
+本机实测同链路首字节 20~45s（空载小请求也要 8~11s），**90s 在正常波动里就会被越线**。
+
+### 🔧 修法：只放宽「等响应头」这一段
+
+```go
+// 响应头上限 = max(180s, upstream.timeout_seconds)，180s 是硬下限
+client := custom.NewWithTimeout(cc, cfg.Upstream.TimeoutSeconds)
+```
+
+| 阶段 | 值 | 为什么 |
+|---|---|---|
+| 等响应头 | **180s 起**，跟随 `timeout_seconds` 放宽 | 上游排队/推理启动慢，**等下去有意义** |
+| 流中空闲 | **90s 不变** | 拿到响应头后彻底卡死，多等只是让用户多等 |
+| 流式总超时 | **仍然不设**（R35） | 长回答不能被整体超时掐断 |
+| 非流式总超时 | `upstream.timeout_seconds` | 与内建渠道口径统一 |
+
+## ✅ 回归
+
+- `internal/custom/timeout_test.go`：默认 180s / 注入 120s 仍取 180s / **注入 30s 不得把上限
+  压到 30s** / 注入 600s 跟随放宽 / `StreamHTTP.Timeout` 恒 0 / `IdleTimeout` 恒 90s
+  不随放宽 / 下限不得低于 90s 的反向护栏 / 慢响应头 300ms 端到端仍成功；
+- `cmd/wild-work/custom_channels_test.go`：`TestBuildCustomRuntimesWiresUpstreamTimeout`
+  锁死「300s 真的传到 `HTTP.Timeout` 与 `HeaderTimeout`」「传 0 回落默认值」。
+
+> 阈值仍是常量而非配置项（按 R58 的口径不新增用户概念）；要再调就改 `defaultHeaderTimeout`。
+
+## 🔁 同族补丁：`qoder` / `qodercom` 的 envelope 错误帧（R111）
+
+上面只修了 QoderCN。用户实测指出「**QoderCOM 好像没通过，只有 CN 的**」——确实如此：
+`qoder`/`qodercom` 的解析器**完全没有** envelope 错误识别，上游同样 200 开流、塞一帧
+没有 `choices` 的业务错误、然后挂住 180 秒。本渠道实测首帧：
+
+```json
+data:{"headers":{"Content-Type":["application/json"]},
+      "body":"{\"code\":\"112\",\"message\":\"{\\\"pricingUrl\\\":\\\"https://qoder.com/pricing?client=qoder\\\"}\"}",
+      "statusCodeValue":403,"statusCode":"FORBIDDEN"}
+```
+
+另一形态是 `{"code":"110","message":"Billing daily count exceeded"}`。
+
+### 🧪 这两个码是「账号额度耗尽」，不是排队
+
+用户判断正确（「应该是这个账号的吧」）。三条证据：
+
+| 证据 | 内容 |
+|---|---|
+| **A/B 单发**（同号同 body，只换模型） | `deepseek-flash` 与 `glm-5.3-flash` **都回 112** ⇒ 不是模型级 |
+| `GET /api/v2/quota/usage` | 五个号全部 `isQuotaExceeded: true`、`total=0, remaining=0` |
+| 帧内 payload | `112` 带 `pricingUrl`（付费页）；`110` 是「当日计费用量超限」 |
+
+⇒ 归 **`ErrHardCredit`**：整号硬冷却 + 换下一个号。若按普通 4xx 处理（只换号不冷却），
+下次请求会又撞同一堵墙。
+
+### 🔧 修法：三渠道各写一份，不共享代码
+
+按 R58「本仓渠道包历来不共享 SSE 实现」，`qoder` / `qodercom` / `qodercn` **各自**
+在 `parseNestedSSE` 里加 `envelopeNotice`，在 `onChunk` **之前**判定：
+
+| 帧内容 | 归类 | 处置 |
+|---|---|---|
+| `10605` / `isQueued` | `ErrQueued` | 只冷「号×模型」30s + 换号 |
+| `110` / `112` / `pricingUrl` / `isQuotaExceeded` | `ErrHardCredit` | 整号硬冷却 + 换号 |
+| 其余 `statusCodeValue ≥ 400` | 各渠道 `Classify` | 按类别 |
+
+> 码 `110` 的文案 `Billing daily count exceeded` **不含** hardMarkers 的 `quota exceeded`，
+> 必须显式列码——这正是它此前落成普通 4xx 的原因。
+>
+> ⚠️ 三个 `Classify` 里的新增码必须放在 **429 判定之后**，否则破坏「429 优先」不变量
+> （`TestClassifyOrder` 会当场变红）。
+
+### 🧩 配套：流首帧的错误也能换号了
+
+`provider.Error` 的字段名就叫 `Kind`，无法再定义 `Kind()` 方法 ⇒ 新增
+`provider.Classified` 包装器（带 `Unwrap`），让流式路径能问出错误类别。
+
+handler 新增「**首帧即错误、一字节未写**」的通用换号路径：此前 `ErrHardCredit` 在流首帧
+只「罚号 + return」，5 个号全耗尽时客户端拿不到「该充值」这个可行动结论。现在会按类别惩罚
+后换下一个号，全号耗尽才透传 402 原文。
+
+**回归**：`internal/qodercom/envelope_notice_test.go`、`internal/qoder/envelope_notice_test.go`
+（各 4 类，独立实现独立测）、`internal/qodercn/queue_frame_test.go` 增额度耗尽例、
+`internal/server/handler_queue_test.go` 增「首号耗尽 → 换号成功」「全号耗尽 → 试满 + 402」。
+
+
+## 六、工具结果里的图片改走 vision 通道，不再 stringify 成 base64 文本（R113，issue #174）
+
+Codex 的 `view_image` 把截图以 `input_image` 块放进 `function_call_output`。
+旧版 `internal/gateway` 的 `stringifyOutput` 取不到文本块就回退 `json.Marshal`，
+整张 PNG 的 base64 变成一条超长**文本**消息——实测 1.6MB base64 ≈ 146 万 token，
+把 1M 上下文的 `deepseek-v4.1-flash` 直接打成
+`prompt is too long: 1596603 tokens > 1048576 maximum`，会话报废；
+同一张图按 vision 只花约 1K token。
+
+- 新增 `toolContentValue`：`input_image` / `image_url` / Anthropic `image{source}`
+  一律转成 Chat 的 `image_url` 内容块（`role:"tool"` 的 content 用数组，`detail` 透传）；
+  纯文本仍返回 string（零行为变化）；只有图片时补 `[image]` 文本占位。
+- `/v1/responses` 与 `/v1/messages` 两条路径统一走它，WorkBuddy 国内版/国际版一并修复。
+- 实测（同一张 1996×1248 截图）：旧版 `prompt is too long`，新版
+  `input_tokens=1013`，模型准确描述截图内容（CN `workbuddy/deepseek-v4-pro` 亦 1013→3271 正常）。
+- 回归：`internal/gateway/tool_image_test.go` 7 例。
+
+## 七、入站请求体上限 32MiB → 128MiB，并在转发前把内联图片降采样（R114，issue #176）
+
+R113 之后图片已按 vision 通道转发，但 **base64 的字节数**还在：Codex 是无状态客户端，
+每轮把整段历史原样重放，截图会线性累积。实测一个会话 426 个 item 里，
+**12 张 2048px 截图占 33.01MiB**（其余文本仅 0.43MiB），请求体 33.44MiB 撞 32MiB 硬限，
+回 `413 Payload Too Large: request body exceeds limit of 33554432 bytes`，会话报废。
+注意这个 413 发生在网关**读入站 body** 阶段，与协议转换无关。
+
+- `server.MaxRequestBody` 由常量改为可变（默认 **128MiB**），可用 `config.json` 的
+  `server.max_request_body_mb` 调整（钳 8~1024）；超限文案里的 MiB 数由生效上限推导。
+- 新增 `internal/gateway/imageslim.go`：转发前把 `data:` 图片降采样到长边 ≤1568，
+  不透明图重编码 **JPEG q85**、带 alpha 走 PNG；按 sha256 缓存（历史重放免重复解码）。
+  覆盖用户附图、`function_call_output`、Anthropic `image` 三个入口。
+- 只动 data URL；http(s) 直链、非 base64 data URL、解码失败、像素超 5000 万、
+  体积没变小 —— 一律原样返回。
+- 实测同一会话 **33.48MiB → 4.03MiB（8.3x）**，12 张图 33.01→2.86MiB；
+  真实上游单发 3 张截图 `200 / input_tokens=655`，逐张描述准确（底部小字仍可读）。
+- 回归：`internal/gateway/image_slim_test.go` 6 例。
+
+## 八、出站脱敏补一条 DSH 身份句，绕过上游 11-128 渠道校验（R115）
+
+上游对 `system` 消息做**开头逐字前缀**匹配：只要 system 以
+`You are an AI agent powered by DeepSeek Harness` 开头（句号可有可无），即回
+`HTTP 400 {"code":11-128,"msg":"Illegal API invocation from an unapproved channel"}`。
+DeepSeek Harness 的 system prompt 正是以这句开头，于是经本代理转发的 DSH Agent
+请求会稳定撞上 11-128。
+
+- `internal/sanitize`（`PrepareBody` 真实入口）与 `internal/upstream`（内层平行实现）
+  两份脱敏表各补一条：特征串 + 最小改写「在 `DeepSeek Harness` 前插入冠词 `the`」。
+- 选插冠词的理由：语义扰动最小、改动可见可 review、不依赖不可见字符
+  （全角空格会被 NFKC 折叠，抗归一化差）；`built on` 会换实词。
+- 同步更新 `internal/upstream/sanitize_test.go` 的逐字节快照护栏
+  （`sanitizeFeatures` 7→8 项、`sanitizeRewrites` 5→6 对），并新增 3 个回归用例
+  （改写生效 / 经 `PrepareBody` 落到 system content / 措辞相近的变体不得被误改）。
+
+---
+
+# wild-work v2.9.4
+
+本版合并三个外部 PR（#175 / #177 / #178），修掉 Codex 长会话「图片打爆上下文」与
+「请求体 413」这两条让人彻底干不下去的故障，外加一条绕过上游渠道校验的脱敏补丁。
+对应决议 **R113 / R114 / R115**（原 PR 自带编号 R108/R109 与远端已占决议号撞车，合入时顺延）。
+
+## 🖼 工具结果里的图片改走 vision 通道（R113，PR #175，fix #174，[@prince121212](https://github.com/prince121212)）
+
+Codex 的 `view_image` 把截图以 `input_image` 块放进 `function_call_output`。旧版
+`internal/gateway` 的 `stringifyOutput` 取不到文本块就回退 `json.Marshal`，
+整张 PNG 的 base64 变成一条超长**文本**消息：
+
+- 实测 1.6MB base64（1996×1248 PNG）≈ **146 万 token**，把 1M 上下文的
+  `deepseek-v4.1-flash` 打成 `prompt is too long: 1596603 tokens > 1048576 maximum`；
+- 同一张图按 vision 只花约 **1K token**（差 1500 倍）；
+- 更糟的是 Codex 本地 token 计数**不含** base64（129,934 → 130,648 只涨 714），
+  950K 的压缩阈值永远触发不了 ⇒ 每轮原样重放，会话彻底报废，`/compact` 也救不了。
+
+改为 `toolContentValue`：`input_image` / `image_url` / Anthropic `image{source}`
+一律转成 Chat 的 `image_url` 内容块（`role:"tool"` 的 content 用数组，`detail` 透传）；
+**纯文本仍返回 string**（零行为变化，兼容只认 string 的上游）；只有图片时补 `[image]` 文本占位。
+`/v1/responses`、`role:"tool"` message、Anthropic `tool_result` 三处统一走它，
+WorkBuddy 国内版/国际版一并修复。
+
+> 实测：旧版 `prompt is too long` → 新版 `input_tokens=1013`，模型准确描述截图内容
+> （`workbuddy/deepseek-v4-pro` 亦 1013→3271 正常）。
+> **未覆盖**：gemini/codearts/monkeycode/zcode/minimax 等原生渠道各自转换协议，
+> 其中 `textBlocksOnly` / `toolResultBlocks` 会把工具结果的图片静默丢弃（不爆炸，但看不到图）。
+
+## 📦 请求体上限 128MiB + 转发前图片降采样（R114，PR #177，fix #176，[@prince121212](https://github.com/prince121212)）
+
+R113 解决了 **token 维**，但 **字节维**还在：Codex 是无状态客户端（不支持
+`previous_response_id`），每轮把整段历史原样重放，截图会线性累积。实测一个会话
+426 个 item 里 **12 张 2048px 截图占 33.01MiB**（其余文本仅 0.43MiB），
+请求体 33.44MiB 撞 32MiB 硬限 `413 Payload Too Large`——这个 413 发生在**读入站 body**
+阶段（`ReadBodyLimited`），R113 无论怎么修都挡不住。
+
+两道闸：
+
+1. **上限可配**：`server.MaxRequestBody` 由常量改为变量，默认 **128MiB**；
+   `config.json` 新增 `server.max_request_body_mb`（钳 8~1024）；413 文案按**生效上限**
+   推导（不再写死 32MiB）；新增 `server.IsBodyTooLarge(err)` 供 gateway 跨包判定
+   （原先靠 `strings.Contains(err,"exceeds limit")` 字符串匹配，脆弱）；
+   `gateway.maxInnerBody` 由常量改函数（常量会在包初始化时把上限快照死）。
+2. **转发前降采样**：新增 `internal/gateway/imageslim.go`，三个图片入口
+   （用户附图 / `function_call_output` / Anthropic `image` 块）统一把内联
+   `data:image/...;base64` 缩到长边 **≤1568**：不透明图 → **JPEG q85**，
+   带 alpha → **PNG**（转 JPEG 会把透明区涂黑）；按 payload sha256 缓存 256 条
+   （历史重放时同一张图每轮都会进来，命中即免解码）。
+
+保守边界：只动 `data:` URL，`http(s)` 直链不下载不改写；解码失败 / 重编码后变大 /
+体积 ≤512KB 且长边已合规 ⇒ 原样返回；像素 >5000 万放弃（防解压炸弹）。
+
+> 实测：同一 33.48MiB 请求体，旧版逐字 `413 ... 33554432 bytes`，新版
+> `400 invalid_model`（假模型名，证明已过读入闸）；60/120MiB 通过、140MiB 回 413
+> 且文案变为 `134217728 bytes`；把该会话 426 项整体走 `responsesToChat`
+> **33.48MiB → 4.03MiB（8.3x）**，12 张图 33.01→2.86MiB。
+> 真实上游单发 3 张原始截图 `200 / input_tokens=655`，回复逐张准确描述画面
+> （连底部「WASD移动」小字都读对）。
+
+## 🛡 出站脱敏补一条 DSH 身份句（R115，PR #178，[@wzwjustdoit](https://github.com/wzwjustdoit)）
+
+上游对 `system` 消息做**开头逐字前缀**匹配：只要 system 以
+`You are an AI agent powered by DeepSeek Harness` 开头（句号可有可无），即回
+`HTTP 400 {"code":11-128,"msg":"Illegal API invocation from an unapproved channel"}`。
+DeepSeek Harness 的 system prompt 正是以这句开头，于是经本代理转发的 DSH Agent
+请求稳定撞上 11-128。
+
+单发 A/B 实测（同渠道同模型）确认判据是**逐字前缀**而非关键词/语义审核：
+该句放 user role → 200；system 放第二句 → 200；前面加一行 → 200；
+截成 `powered by DeepSeek Harness.` 或 `powered by DeepSeek.` → 200；
+**只有「system 开头 + 完整第一句」→ 400**。
+
+- `internal/sanitize`（`PrepareBody` 真实入口）与 `internal/upstream`（内层平行实现）
+  两份脱敏表各补一条：特征串 + 最小改写「在 `DeepSeek Harness` 前插入冠词 `the`」。
+- 选插冠词的理由：语义扰动最小、改动可见可 review、不依赖不可见字符
+  （全角空格会被 NFKC 折叠，抗归一化差）；`built on` 会换实词。
+
+## ✅ 验证
+
+- `go build ./... && go vet ./... && go test ./...` 全绿；
+- 本版新增回归：`internal/gateway/tool_image_test.go` 7 例、
+  `internal/gateway/image_slim_test.go` 6 例、
+  `internal/upstream/sanitize_test.go` 新增 3 例（改写生效 / 经 `PrepareBody` 落到
+  system content / 措辞相近变体不得被误改）并同步逐字节快照护栏
+  （`sanitizeFeatures` 7→8 项、`sanitizeRewrites` 5→6 对）；
+- `internal/server/handler_bodylimit_test.go` 改为基于变量断言（不写死 32MiB）。
+
+## 🙏 致谢
+
+| 贡献者 | 内容 |
+|--------|------|
+| [@prince121212](https://github.com/prince121212) | PR #175 工具结果图片走 vision（R113）+ PR #177 请求体上限与图片降采样（R114），含真机 A/B 实测 |
+| [@wzwjustdoit](https://github.com/wzwjustdoit) | PR #178 DSH 身份句脱敏（R115），含完整直发实测矩阵 |
+

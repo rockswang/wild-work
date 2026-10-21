@@ -12,6 +12,7 @@ import (
 	"log"
 	"net/http"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -52,9 +53,10 @@ var _ provider.StreamErrorClassifier = (*sseError)(nil)
 // envelope Qoder 系 SSE 的外层信封。body 是**字符串**（内层 JSON 文本），
 // 与 internal/qwenwork 的 json.RawMessage 形状不同，不能照抄那边的写法。
 type envelope struct {
-	Body            string `json:"body"`
-	StatusCodeValue int    `json:"statusCodeValue"`
-	StatusCode      string `json:"statusCode"`
+	Body            string              `json:"body"`
+	Headers         map[string][]string `json:"headers"`
+	StatusCodeValue int                 `json:"statusCodeValue"`
+	StatusCode      string              `json:"statusCode"`
 }
 
 // errText 提取上游错误文案；非错误信封返回空串。
@@ -170,17 +172,25 @@ func parseNestedSSE(r io.Reader, onChunk func(map[string]any) error, truncated *
 			payload := strings.TrimPrefix(line, "data:")
 			var env envelope
 			outerOK := json.Unmarshal([]byte(payload), &env) == nil
-			// 剥壳判错（R108）：上游把排队/限流拒绝放在 200 连接里下发，
-			// statusCodeValue>=400 即失败。必须在此拦下——继续走 onChunk 的话，
-			// 客户端收到一帧没有 choices 的伪 chunk，之后要么空等到空闲看门狗
-			// （90s 后误报 truncated），要么被收尾 [DONE] 伪造成空成功流。
-			if outerOK && env.StatusCodeValue >= 400 {
-				msg := env.errText()
-				if msg == "" {
-					msg = truncate(env.Body, 300)
+			if outerOK && env.Body != "" {
+				// 排队 / 额度耗尽 / 业务错误帧：**必须在 onChunk 之前**识别——这类帧没有
+				// choices，透传出去等于给客户端一个空 delta，界面停在「正在等待模型…」，
+				// 直到网关掐断（2026-10-20 qodercn deepseek-flash 实录）。
+				// 顺序不可换：10605→Queued（模型级，R109）；110/112→HardCredit（账号级，R111）；
+				// 其余 >=400→sseError（R108，带 retry_after_seconds）。
+				if q := queueNotice(env.Body, env.StatusCodeValue, env.Headers); q != nil {
+					return q
 				}
-				// 退避秒数在原始 Body 与解出的 msg 里都可能出现（转义层级不同），两处都扫。
-				return &sseError{status: env.StatusCodeValue, msg: msg, retryAfter: parseRetryAfter(env.Body + "\n" + msg)}
+				if e := envelopeError(env.Body, env.StatusCodeValue); e != nil {
+					return e
+				}
+				if env.StatusCodeValue >= 400 {
+					msg := env.errText()
+					if msg == "" {
+						msg = truncate(env.Body, 300)
+					}
+					return &sseError{status: env.StatusCodeValue, msg: msg, retryAfter: parseRetryAfter(env.Body + "\n" + msg)}
+				}
 			}
 			innerOK := false
 			if outerOK && env.Body != "" {
@@ -207,6 +217,122 @@ func parseNestedSSE(r io.Reader, onChunk func(map[string]any) error, truncated *
 			return nil
 		}
 	}
+}
+
+// queueNotice 识别「模型排队中」帧（见 provider.Queued）。
+//
+// 上游把排队提示塞在 HTTP 200 的 SSE data 行里，三层嵌套：
+//
+//	data:{"headers":{"Retry-After":["30"]},"body":"{\"code\":\"403\",\"message\":
+//	  \"{\\\"code\\\":\\\"10605\\\",\\\"message\\\":\\\"{...isQueued...}\\\"}\"}"}
+//
+// 命中判据：内层出现 10605 / isQueued，且 **没有 choices**（带 choices 的是正常 delta）。
+// 返回 nil 表示“不是排队帧”，调用方继续按普通 chunk 处理。
+func queueNotice(body string, statusCode int, headers map[string][]string) *provider.Queued {
+	if body == "" || strings.Contains(body, "\"choices\"") {
+		return nil
+	}
+	if !strings.Contains(body, "10605") && !strings.Contains(body, "isQueued") {
+		return nil
+	}
+	vals := unwrapLayers(body)
+	code, _ := vals["code"].(string)
+	if code != "10605" && !truthy(vals["isQueued"]) {
+		return nil
+	}
+	q := &provider.Queued{
+		ModelKey:    strOf(vals["modelKey"]),
+		QueueCount:  intOf(vals["queueCount"]),
+		WaitSeconds: intOf(vals["waitTime"]),
+	}
+	if secs := intOf(vals["retryAfterSeconds"]); secs > 0 {
+		q.RetryAfter = time.Duration(secs) * time.Second
+	}
+	if q.RetryAfter == 0 {
+		for k, vs := range headers {
+			if !strings.EqualFold(k, "Retry-After") || len(vs) == 0 {
+				continue
+			}
+			if n, err := strconv.Atoi(strings.TrimSpace(vs[0])); err == nil && n > 0 {
+				q.RetryAfter = time.Duration(n) * time.Second
+			}
+		}
+	}
+	return q
+}
+
+// envelopeError 识别「HTTP 200 里包着的业务错误帧」（非排队）：这种帧同样没有
+// choices，当普通 chunk 透传只会让客户端拿到空 delta 干等。按外包 statusCode
+// 分类后上抛，走 handler 的统一错误路径（可轮换/可冷却/可降级）。
+//
+// 额度耗尽单独判（2026-10-20 qodercom 同族实测，本渠道代码同源一并补）：
+// 码 110「Billing daily count exceeded」与 112「pricingUrl 付费墙」都是**账号级**
+// 额度耗尽——文案不含 hardMarkers 的 "quota exceeded"，按 statusCode 分类只会落到
+// 普通 4xx，变成「只换号不冷却」，下次请求又撞同一堵墙。归 ErrHardCredit 后
+// 整号硬冷却 + 换下一个号。
+func envelopeError(body string, statusCode int) error {
+	if body == "" || strings.Contains(body, "\"choices\"") {
+		return nil
+	}
+	vals := unwrapLayers(body)
+	if code, _ := vals["code"].(string); code == "110" || code == "112" {
+		// 包成 Classified：流式路径要靠 Kind() 认出 ErrHardCredit 才能「整号冷却 + 换号」。
+		return &provider.Classified{Err: &provider.Error{
+			Kind:   provider.ErrHardCredit,
+			Status: 402, // 语义是付费墙，透传给客户端用 402 比 403 准确
+			Msg:    "upstream quota exhausted (code " + code + "): " + truncate(body, 200),
+		}}
+	}
+	if b, ok := vals["isQuotaExceeded"].(bool); ok && b {
+		return &provider.Classified{Err: &provider.Error{
+			Kind:   provider.ErrHardCredit,
+			Status: 402,
+			Msg:    "upstream quota exhausted: " + truncate(body, 200),
+		}}
+	}
+	// 通用 statusCode>=400 交给 sseError：它能从文案里取 retryAfterSeconds，
+	// 并在出口补带 code/retry_after_seconds 的结构化 error 帧（R108）。
+	return nil
+}
+
+// unwrapLayers 把「message 字段里再套一层 JSON 字符串」逐层解开，收集各层键值（深层覆盖浅层）。
+// 上游三层套娃：{code:403} → {code:10605} → {...isQueued...}。
+func unwrapLayers(body string) map[string]any {
+	vals := map[string]any{}
+	cur := body
+	for depth := 0; depth < 6 && cur != ""; depth++ {
+		var m map[string]any
+		if json.Unmarshal([]byte(cur), &m) != nil {
+			break
+		}
+		for k, v := range m {
+			vals[k] = v
+		}
+		next, _ := m["message"].(string)
+		if next == "" || next == cur {
+			break
+		}
+		cur = next
+	}
+	return vals
+}
+
+func truthy(v any) bool {
+	b, ok := v.(bool)
+	return ok && b
+}
+
+func strOf(v any) string {
+	s, _ := v.(string)
+	return s
+}
+
+func intOf(v any) int {
+	f, ok := v.(float64)
+	if !ok {
+		return 0
+	}
+	return int(f)
 }
 
 // aggregate 聚合完整 SSE 为单个 OpenAI chat.completion 响应。

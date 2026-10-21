@@ -17,15 +17,52 @@ import (
 	"wild-work/internal/upstream"
 )
 
+// 超时三兄弟的默认值与下限（R110）。
+//
+// 为什么等响应头这一段必须比其它渠道宽：自定义渠道挂的多是第三方反代/聚合网关
+// （sgproxy、CLIProxy…），大 prompt 的首字节耗时**由上游排队与推理启动决定**，
+// 与本机无关。90s 的旧值会让「上下文压缩」这类整段会话重发的大请求必然撞墙：
+// 实测 sgproxy + gpt-6.1-sol 在 92 万 token 时 TTFB 常态 20~45s，抖动一下就越线。
+const (
+	// defaultHeaderTimeout 等响应头的默认上限（与内建渠道口径对齐的宽松值）。
+	defaultHeaderTimeout = 180 * time.Second
+	// minHeaderTimeout 等响应头的下限：再小会把正常的大 prompt 请求判死。
+	minHeaderTimeout = 180 * time.Second
+	// defaultIdleTimeout 流中空闲上限（拿到响应头之后才开始计时）。
+	//
+	// ⚠️ 这一段**刻意不跟着 headerTimeout 放宽**：它防的是「上游连上了、吐了几个
+	// 字节之后彻底卡死」——那种情况下多等一分钟只是让用户多等，不会变好。
+	defaultIdleTimeout = 90 * time.Second
+	// defaultRequestTimeout 非流式整请求上限。
+	defaultRequestTimeout = 120 * time.Second
+)
+
 // Client 代理自定义 OpenAI 兼容上游的客户端，实现 provider.Upstream 接口。
 type Client struct {
 	cfg        ChannelConfig
-	HTTP       *http.Client // 带超时（120s），供非流式
-	StreamHTTP *http.Client // 无超时，供长 SSE 流式（R35）
+	HTTP       *http.Client // 带总超时，供非流式
+	StreamHTTP *http.Client // 无总超时，供长 SSE 流式（R35）
+	idle       time.Duration
 }
 
-// New 构造自定义渠道客户端。
-func New(cfg ChannelConfig) *Client {
+// New 构造自定义渠道客户端（取默认超时）。
+func New(cfg ChannelConfig) *Client { return NewWithTimeout(cfg, 0) }
+
+// NewWithTimeout 构造客户端并注入非流式请求总超时（0 = 取默认 120s）。
+//
+// 注入点与内建渠道一致（main.go 的 `xxxUp.HTTP.Timeout = cfg.Upstream.TimeoutSeconds`），
+// 让 `upstream.timeout_seconds` 这个既有配置项对自定义渠道也生效——R66 引入自定义
+// 渠道时漏了这条接线，配置项对它们一直是摆设。
+func NewWithTimeout(cfg ChannelConfig, requestTimeout time.Duration) *Client {
+	if requestTimeout <= 0 {
+		requestTimeout = defaultRequestTimeout
+	}
+	// 等响应头的上限至少与总超时一样宽：总超时管的是整条请求，若响应头上限比它
+	// 还小，就等于总超时被这一段提前截断，用户调大 timeout_seconds 也没用。
+	headerTimeout := defaultHeaderTimeout
+	if requestTimeout > headerTimeout {
+		headerTimeout = requestTimeout
+	}
 	tr := &http.Transport{
 		Proxy:                 http.ProxyFromEnvironment,
 		DialContext:           (&net.Dialer{Timeout: 30 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
@@ -34,13 +71,32 @@ func New(cfg ChannelConfig) *Client {
 		IdleConnTimeout:       90 * time.Second,
 		TLSHandshakeTimeout:   10 * time.Second,
 		ExpectContinueTimeout: 1 * time.Second,
-		ResponseHeaderTimeout: 90 * time.Second,
+		ResponseHeaderTimeout: headerTimeout,
 	}
 	return &Client{
 		cfg:        cfg,
-		HTTP:       &http.Client{Transport: tr, Timeout: 120 * time.Second},
+		HTTP:       &http.Client{Transport: tr, Timeout: requestTimeout},
 		StreamHTTP: &http.Client{Transport: tr},
+		idle:       defaultIdleTimeout,
 	}
+}
+
+// HeaderTimeout 返回实际生效的「等响应头」上限（供测试与日志断言）。
+func (c *Client) HeaderTimeout() time.Duration {
+	if c.StreamHTTP != nil {
+		if tr, ok := c.StreamHTTP.Transport.(*http.Transport); ok {
+			return tr.ResponseHeaderTimeout
+		}
+	}
+	return 0
+}
+
+// IdleTimeout 返回实际生效的流中空闲上限。
+func (c *Client) IdleTimeout() time.Duration {
+	if c.idle > 0 {
+		return c.idle
+	}
+	return defaultIdleTimeout
 }
 
 // Config 返回当前配置副本。
@@ -119,7 +175,7 @@ func (c *Client) ChatStream(_ *auth.Auth, body []byte) (io.ReadCloser, int, []by
 		return nil, resp.StatusCode, respBody, nil
 	}
 
-	bodyReader := idle.Monitor(resp.Body, 90*time.Second, cancel)
+	bodyReader := idle.Monitor(resp.Body, c.IdleTimeout(), cancel)
 	return bodyReader, http.StatusOK, nil, nil
 }
 

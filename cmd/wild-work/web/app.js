@@ -547,7 +547,7 @@ function renderSummary() {
       body = `<span class="credit-stale">待刷新</span>`;
     } else {
       body = `<span class="cs-num">${fmt(c.credits)}</span>`
-        + (c.expiring > 0 ? `<span class="cs-exp" title="24 小时内到期">临期${fmt(c.expiring)}</span>` : "")
+        + (c.expiring > 0 ? `<span class="cs-exp" title="今日到期（次日 00:00 失效算今日），选号时优先消耗">临期${fmt(c.expiring)}</span>` : "")
         + (c.unusable > 0 ? `<span class="cs-unu" title="账号名下、本工具不可消耗的额度（不计入合计）">不可用${fmt(c.unusable)}</span>` : "")
         + (c.stale > 0 ? `<span class="cs-stale" title="部分账号余额待刷新">${c.stale} 待刷新</span>` : "");
     }

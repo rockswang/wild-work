@@ -187,6 +187,11 @@ func TestClassify(t *testing.T) {
 		// 先判 hard 会把 6004 类模型级限流误归 12h 账号冷却。
 		{429, `{"error":{"msg":"quota exceeded"}}`, "soft_rate"},
 		{404, "", "not_found"},
+		// 会话头族缺失（11128 conversation id missing）= 上游按账号灰度的渠道校验，
+		// 归账号级（软冷却 + 换号，见 R116）；同码的 unapproved channel 是请求级内容
+		// 指纹问题，不罚号。
+		{400, `{"code":11128,"msg":"conversation id missing","requestId":"x"}`, "account_fault"},
+		{400, `{"code":11128,"msg":"Illegal API invocation from an unapproved channel"}`, "content_blocked"},
 		{500, "", "server"},
 		{400, "code=11102", "client"},
 		{200, "ok", "none"},

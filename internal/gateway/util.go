@@ -105,23 +105,90 @@ func firstNonEmpty(vals ...string) string {
 	return ""
 }
 
-// stringifyOutput 把 function_call_output 的 output 转成字符串。
-// 官方允许 string 或 ContentBlock 数组；数组时取其中的文本块。
-func stringifyOutput(v any) string {
+// toolContentValue 转换 tool 结果（Responses 的 function_call_output / role:"tool"，
+// Anthropic 的 tool_result）的 content。
+//
+// 返回 string（纯文本）或 []any（含图片时的 Chat 内容块数组）。
+//
+// 为什么不能直接 stringify：Codex 的 view_image 把截图以 input_image 块放进
+// function_call_output。旧实现 flattenText 取不到文本后回退 json.Marshal，整张 PNG 的
+// base64 就变成一条超长**文本**消息——实测 1.6MB base64 ≈ 146 万 token，把 1M 上下文的
+// 模型直接打成 `prompt is too long`（issue #178）。图片必须走 vision 通道
+// （同图约 1K token），绝不能被序列化成文本。
+func toolContentValue(v any) any {
 	switch t := v.(type) {
 	case nil:
 		return ""
 	case string:
 		return t
 	case []any:
-		if s := flattenText(t); strings.TrimSpace(s) != "" {
+		var (
+			texts  []string
+			blocks []any
+			hasImg bool
+		)
+		for _, p := range t {
+			part, ok := p.(map[string]any)
+			if !ok {
+				continue
+			}
+			switch strings.ToLower(asString(part["type"])) {
+			case "input_text", "output_text", "text", "refusal", "summary_text":
+				if s := asString(part["text"]); s != "" {
+					texts = append(texts, s)
+					blocks = append(blocks, map[string]any{"type": "text", "text": s})
+				}
+			case "input_image", "image_url", "image":
+				url, detail := imagePartURL(part)
+				if url == "" {
+					continue
+				}
+				hasImg = true
+				blocks = append(blocks, imageURLBlock(url, detail))
+			}
+		}
+		if hasImg {
+			// 补一条文本占位：部分渠道（如 codearts）会丢弃非 text 块，
+			// 若数组里只有图片，剥离后会变成空 content（上游 400）。
+			// 同时让不支持 vision 的模型至少知道「这里曾有一张图」。
+			if len(texts) == 0 {
+				blocks = append([]any{map[string]any{"type": "text", "text": "[image]"}}, blocks...)
+			}
+			return blocks
+		}
+		if s := strings.Join(texts, "\n"); strings.TrimSpace(s) != "" {
 			return s
 		}
 	}
+	// 非文本/非数组（或数组里没有可用文本）：保持旧的 JSON 字面量兜底。
 	if raw, err := json.Marshal(v); err == nil {
 		return string(raw)
 	}
 	return ""
+}
+
+// imagePartURL 从 Responses / Anthropic 两种图片块形态里取 URL 与 detail：
+//   - Responses: {"type":"input_image","image_url":"data:..."} 或 image_url 为 {url,detail}
+//   - 通用:      {"type":"image_url","image_url":{"url":...}}
+//   - Anthropic: {"type":"image","source":{"type":"base64","media_type":...,"data":...}}
+func imagePartURL(part map[string]any) (url, detail string) {
+	switch u := part["image_url"].(type) {
+	case string:
+		url = u
+	case map[string]any:
+		url = asString(u["url"])
+		detail = asString(u["detail"])
+	}
+	if url == "" {
+		url = asString(part["url"])
+	}
+	if url == "" {
+		url = anthropicImageURL(part) // {"type":"image","source":{...}} → data URL
+	}
+	if detail == "" {
+		detail = asString(part["detail"])
+	}
+	return url, detail
 }
 
 // clampMaxTokens 对 max_tokens 封顶；cap<=0 表示不限制。

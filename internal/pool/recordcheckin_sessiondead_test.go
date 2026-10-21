@@ -9,8 +9,9 @@ import (
 
 // TestRecordCheckinFailureMarksSessionDead 回归测试（issue #157）：
 // 签到失败且消息是「登录已失效」形态时，必须
-//   ① last_checkin_ok = false（面板不能显示绿色「签到成功」）；
-//   ② 打上 session_dead 标记（面板「需重新登录」徽标 + 挑号跳过）。
+//
+//	① last_checkin_ok = false（面板不能显示绿色「签到成功」）；
+//	② 打上 session_dead 标记（面板「需重新登录」徽标 + 挑号跳过）。
 //
 // 修复前此用例必失败：RecordCheckin 里 `if e, ok := p.byUID[uid]; ok` 的 ok
 // 遮蔽了函数参数 ok bool ⇒ 恒为 true ⇒ lastCheckinOK 恒真、sessionDead 被清、

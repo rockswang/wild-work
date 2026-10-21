@@ -59,7 +59,7 @@ import (
 )
 
 // Version 版本号。
-const Version = "2.9.3"
+const Version = "2.9.4"
 
 const (
 	loginTimeout   = 5 * time.Minute
@@ -2093,8 +2093,12 @@ func (a *App) CheckinAll() []scheduler.CheckinResult {
 // CreditRefreshInterval 积分自动刷新间隔。
 // 无签到活动的渠道（如 WorkBuddy 国际版）积分不随签到更新，
 // 若不定期刷新：面板长期显示旧值（新账号则一直为 0），
-// 且 Pool.Pick(model) 按积分排序会因此长期选错账号。
-const CreditRefreshInterval = 30 * time.Minute
+// 且 pool 选号用的「最早到期时刻」会因此长期陈旧而选错账号（上游 R112 起它是唯一排序键）。
+//
+// 2026-10-20 由 30min 调到 10min（上游用户要求）：代价是每账号的
+// UserResourceDetail 请求数与 state.json 落盘次数 ×3，换来「到期时刻已过」更快被纠正
+// （过期后该账号必须靠下一次刷新才会从队首退到余额兜底组）。
+const CreditRefreshInterval = 10 * time.Minute
 
 // refreshIfSessionDead 上游报「登录态失效」时刷新一次 token 并写回，返回是否已刷新。
 //
@@ -2135,13 +2139,13 @@ func (a *App) refreshIfSessionDead(rt *Runtime, au *auth.Auth, err error) bool {
 	return true
 }
 
-// creditTotals 一次上游调用同时取回「可消耗余额」「临期额度」与「不可消耗余额」。
-// 三者同源于 UserResourceDetail 的单次响应：remain 即 pool 路由口径的可消耗余额，
-// 临期额度为其中临期阈值内到期的部分（config.schedule.expiring_threshold_hours，
-// 默认 24h，实际口径「到期日≤今天+阈值」），不可消耗部分由条目的 Usable 标记汇总得到
-// （渠道不区分专用池时为 0；渠道不下发到期时间时临期为 0，如 Qoder）。
+// creditSnapshot 实时拉取明细并算出「可消耗余额」「临期额度」「不可消耗余额」三口径，
+// 成功即回写 pool 快照 + ledger 差分。三者同源于 UserResourceDetail 的单次响应：remain 即
+// pool 路由口径的可消耗余额，临期额度为其中本仓可配天数内到期的部分（config.ExpiringThresholdDays()，
+// 面板下拉 1/2/3 天；**仅展示**，上游 R112 起不参与选号），不可消耗部分由条目的 Usable 标记
+// 汇总得到（渠道不区分专用池时为 0；渠道不下发到期时间时临期为 0，如 Qoder）。
+// 同一响应里还算出「最早到期时刻」一并写入 pool——那是 Pick() 的唯一排序键。
 // 遇 401 自动刷新 token 并重试一次（见 refreshIfSessionDead）。
-// creditSnapshot 实时拉取明细并算出可用/临期/不可用三口径，成功即回写 pool 快照 + ledger 差分。
 //
 // 顶层（卡片/汇总条/Pick 选号）与明细弹层从此同源：旧实现里 pool 快照只被「刷新事件」
 // （手动刷新/全部刷新/30min 自动循环）更新，而明细是 hover 时的实时值，两者必然相差
@@ -2156,9 +2160,14 @@ func (a *App) creditSnapshot(rt *Runtime, au *auth.Auth) (remain int64, items []
 		return 0, nil, 0, 0, err
 	}
 	_, unusable = provider.Summarize(items)
-	// 临期额度：自然日口径（days 个自然日内到期，次日 00:00 失效算今日）。
-	// 与面板三个到期列、调度器优先消耗同一判据（2026-10-19 统一口径）。
-	expiring = provider.ExpiringWithinDays(items, a.cfg.ExpiringThresholdDays(), time.Now())
+	// 临期额度：自然日口径（本仓面板可配 1/2/3 天，见 SetExpiringDays；次日 00:00 失效算今日）。
+	// 上游 R112 把它固定成 provider.ExpiringDays=1 且只作展示；本仓保留可配是因为面板有下拉框。
+	// R112 起**仅展示**（面板三口径/汇总条），不参与选号——选号用下面的 earliest。
+	now := time.Now()
+	expiring = provider.ExpiringWithinDays(items, a.cfg.ExpiringThresholdDays(), now)
+	// 最早到期时刻：Pick() 的第一排序键（R112）。ok=false（如 Qoder 不下发到期时间）
+	// 时返回零值，pool 会把它排到「有到期信息」的账号之后按余额兜底。
+	earliest, _ := provider.EarliestExpire(items, now)
 	// 差分记账：与上次快照对比产出 earn/spend/expire 流水（锦上添花，失败不干扰）
 	// 积分流水只记「积分口径」的余额变化：token 计量渠道（credits_unit="token"）的 remain
 	// 是 token 数，记进积分流水会污染统计（2026-10-17 用户实测报告）。
@@ -2166,7 +2175,7 @@ func (a *App) creditSnapshot(rt *Runtime, au *auth.Auth) (remain int64, items []
 	if a.ledger != nil && a.creditsUnit(rt.Kind.String()) == "" {
 		a.ledger.DiffCredits(rt.Kind.String(), au.UID, remain, items)
 	}
-	rt.Pool.SetCreditDetail(au.UID, remain, expiring, unusable)
+	rt.Pool.SetCreditDetail(au.UID, remain, expiring, unusable, earliest)
 	return remain, items, expiring, unusable, nil
 }
 
@@ -2544,11 +2553,12 @@ func (a *App) SetCheckinTimes(times []string) error {
 	return nil
 }
 
-// SetExpiringDays 更新临期阈值（自然日数）：保存配置并即时生效。
+// SetExpiringDays 更新临期阈值（自然日数）：保存配置并在下次余额刷新时重算 expiring 字段。
+//
+// ⚠️ 语义已收窄（上游 R112 之后）：**只决定面板「临期额度」这一列统计多少个自然日**，
+// 选号早已改按「最早到期时刻升序」（pool.Pick 不再读 expiring）。上游删掉了这个开关、
+// 固定成 provider.ExpiringDays=1；本仓面板保留三级下拉（1/2/3）故继续提供该端点。
 // 仅支持 1/2/3 天（UI 下拉框限定；自然日粒度下低于一天无意义，故下限 1）。
-// 判据为 provider.ExpireWithinDays（次日 00:00 失效算今日），
-// 与面板「今日/明日/7 日内到期」三列同一口径（2026-10-19 统一）。
-// 生效机制：下一次余额刷新（手动/签到/自动循环）即按新阈值重算 expiring 字段。
 func (a *App) SetExpiringDays(days int) error {
 	if days != 1 && days != 2 && days != 3 {
 		return errors.New("临期阈值仅支持 1/2/3 天")
@@ -3150,7 +3160,7 @@ type State struct {
 	Accounts       []AccountView `json:"accounts"`
 	CheckinTimes   []string      `json:"checkin_times"`
 	KeepaliveHours []int         `json:"keepalive_hours"`
-	ExpiringDays   int           `json:"expiring_days"` // 临期阈值（天），仅支持 1/2/3
+	ExpiringDays   int           `json:"expiring_days"` // 临期展示窗口（天），仅支持 1/2/3
 	ListenHost     string        `json:"listen_host"`
 	ListenPort     int           `json:"listen_port"`
 	APIKey         string        `json:"api_key"`
@@ -3232,6 +3242,7 @@ func (a *App) GetState() State {
 	st := State{
 		CheckinTimes:   a.checkinTimes(),
 		KeepaliveHours: a.keepaliveHours(),
+		ExpiringDays:   int(a.cfg.ExpiringThresholdDur / (24 * time.Hour)),
 		ListenHost:     listen.Host,
 		ListenPort:     listen.Port,
 		APIKey:         a.cfg.APIKey,
@@ -3245,7 +3256,6 @@ func (a *App) GetState() State {
 		Autostart:      a.AutostartEnabled(),
 		Running:        a.ServerRunning(),
 		LanIP:          lanIP(),
-		ExpiringDays:   int(a.cfg.ExpiringThresholdDur / (24 * time.Hour)),
 		LoopGuard:      a.cfg.Features.LoopGuard,
 	}
 	st.ModelFallback = a.cfg.ModelFallback

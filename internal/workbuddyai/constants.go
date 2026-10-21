@@ -14,7 +14,10 @@ import "wild-work/internal/provider"
 const (
 	WBAIHost = "https://www.workbuddy.ai"
 
-	clientUA   = "CLI/2.63.2 CodeBuddy/2.63.2"
+	// 身份链与国内版一致：官方桌面 5.8.3 内嵌 CLI 2.161.0，UA 三段同形（R117）。
+	// 两区分开各持一份常量（渠道包之间不共享实现）。
+	clientUA      = "WorkBuddy/5.8.3 WorkBuddy/5.8.3 CLI/2.161.0"
+	clientVersion = "5.8.3" // X-IDE-Version = 桌面版本（不是 CLI 版本）
 	originRef  = WBAIHost
 	wbaiDomain = "www.workbuddy.ai"
 

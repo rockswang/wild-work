@@ -4,10 +4,7 @@ package workbuddyai
 
 import (
 	"bytes"
-	crand "crypto/rand"
-	"crypto/sha256"
 	"crypto/tls"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -15,7 +12,6 @@ import (
 	"net"
 	"net/http"
 	"strings"
-	"sync/atomic"
 	"time"
 
 	"wild-work/internal/auth"
@@ -105,22 +101,14 @@ func (c *Client) base() string {
 // 请求头
 // ---------------------------------------------------------------------------
 
-// commonHeaders 所有 API 共享的头。
+// commonHeaders 所有 API 共享的头（与国内版 internal/upstream/headers.go 同构）。
 //
-// 与国内版 internal/upstream/headers.go 的 CommonHeaders 保持同构：除基础头外，
-// 还要带官方客户端的 X-CodeBuddy-Request 标记与按账号稳定派生的机器指纹
-// （X-Machine-ID / X-Session-ID）。
-//
-// 这是**请求头实现分叉的补齐**，不是某个故障的修复：国际版渠道的 commonHeaders 是
-// 后来单独写的，从未移植过这几个头（git log -S X-Machine-ID 只命中国内版侧提交），
-// 而 README 一直宣称「出站自动注入官方客户端指纹头」。
-//
-// ⚠️ 认知修正（2026-10-12）：本轮曾假设「缺这几个头导致 14003 限流」，并用 A/B 探针
-// 直连上游做了 52 次对照请求（顺序 / 读完整流 / 并发 4 路，old 19 头 vs new 26 头），
-// **结果两组成功率完全一致、均未触发 14003**，假设不成立。同时 14003 的真实成因
-// 已定位为上游瞬时拥塞，处置层的缺陷见 retryPolicyAllowsRetry 与 R50。
-// 补头本身仍是对的（消除分叉、与官方客户端同口径），但不要再把它当成限流的解药。
-func commonHeaders(req *http.Request, a *auth.Auth) {
+// ⚠️ 2026-10-21 随上游 R117 删掉本包自造的 X-Machine-ID / X-Session-ID：
+// 官方桌面客户端**不发**这两个头（对本机 WorkBuddy.app 5.8.3 静态解包取证），
+// 而「混合身份」（真的是官方那一串 + 自造的这一对）本身就是反作弊视角下的特征。
+// 上一版曾用 A/B 探针（52 次直连）确认这两个头与 14003 限流无关，补与不补都不影响
+// 成功率 —— 既然无收益又增加身份噪声，按上游口径删除。
+func commonHeaders(req *http.Request) {
 	req.Header.Set("Accept", "application/json, text/plain, */*")
 	req.Header.Set("X-Requested-With", "XMLHttpRequest")
 	req.Header.Set("X-CodeBuddy-Request", "1")
@@ -128,24 +116,6 @@ func commonHeaders(req *http.Request, a *auth.Auth) {
 	req.Header.Set("Referer", originRef+"/")
 	req.Header.Set("User-Agent", clientUA)
 	req.Header.Set("Accept-Language", "en-US")
-	injectAccountStableHeaders(req, a)
-}
-
-// injectAccountStableHeaders 注入按 uid 稳定派生的 X-Machine-ID / X-Session-ID（36 hex）。
-// 稳定性是刻意的：同一账号每次请求必须是同一个机器号。若每次随机，上游会把每个请求
-// 都当成一台新设备，机器维度的计数永远从零开始——限流阈值形同虚设，且更易被判异常。
-func injectAccountStableHeaders(req *http.Request, a *auth.Auth) {
-	if a == nil || a.UID == "" {
-		return
-	}
-	req.Header.Set("X-Machine-ID", deriveStableID(a.UID, "machine"))
-	req.Header.Set("X-Session-ID", deriveStableID(a.UID, "session"))
-}
-
-// deriveStableID 由 uid 稳定派生 36 hex 标识（与国内版同算法、同盐前缀）。
-func deriveStableID(uid, purpose string) string {
-	sum := sha256.Sum256([]byte("wb2a:" + purpose + ":" + uid))
-	return hex.EncodeToString(sum[:18])
 }
 
 // chatHeaders 对话专有头：Authorization 族 + X-No-* 缺省约定。
@@ -159,8 +129,12 @@ func deriveStableID(uid, purpose string) string {
 // 官方客户端 5.8.4 抓包核验）、CangShui/workbuddy-gateway#20、
 // ithtelab/workbuddy-manager#193。实测只在 body 加 conversationId 无效，
 // 头族才是校验对象（#193）。
-func chatHeaders(req *http.Request, a *auth.Auth) {
-	commonHeaders(req, a)
+//
+// conv / turn 来自 conversationAnchors（会话级 / 轮级锚点），三层语义见同目录 convheaders.go：
+// 会话 id 同会话恒定、轮 id 一次 user send 一个值（重试与换号复用）、
+// 调用 id 每请求新生成。锚点为空时退回随机（历史行为）。
+func chatHeaders(req *http.Request, a *auth.Auth, conv, turn string) {
+	commonHeaders(req)
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+a.AccessTokenValue())
 	if a.UID != "" {
@@ -175,69 +149,33 @@ func chatHeaders(req *http.Request, a *auth.Auth) {
 	}
 	req.Header.Set("X-Domain", wbaiDomain)
 	injectAttributionWBAI(req)
-	// 会话头族 + B3 链路头，与国内版 injectConversationHeaders 对齐：
-	// 会话 ID 与消息 ID 是两个独立值（前者标识一次会话请求，后者标识本条消息）。
-	// 早期国际版实现把四者填成同一个值，与官方客户端形态不一致。
-	// X-Conversation-ID（2026-10-16 上游新增校验，缺即 400 code=11128）：官方客户端
-	// 抓包里是带连字符的 UUID（v4/v7 均被接受），与上面四个 32 位 hex 刻意不同形。
-	req.Header.Set("X-Conversation-ID", conversationIDWBAI())
-	mid := newMessageIDWBAI()
-	cid := newMessageIDWBAI()
-	req.Header.Set("X-Conversation-Request-ID", cid)
-	req.Header.Set("X-Conversation-Message-ID", mid)
-	req.Header.Set("X-Request-ID", mid)
-	req.Header.Set("X-Root-Request-ID", cid)
-	req.Header.Set("X-B3-TraceId", mid)
-	req.Header.Set("X-B3-SpanId", mid[:16])
-	req.Header.Set("X-B3-Sampled", "1")
+	// 会话头族按三层语义分层（见同目录 convheaders.go）：
+	//	X-Conversation-ID         会话级（带连字符 UUID，官方抓包形态）
+	//	X-Conversation-Request-ID 轮级（32 hex，工具回调/重试/换号复用）
+	//	X-Conversation-Message-ID 调用级（32 hex，每次上游请求新生成）
+	//	X-Root-Request-ID       = 本轮 Request-ID（官方主对话同形）
+	// 旧实现把四个头绑成同一个值且每请求现生成，等于把一次多轮对话拆成上千个
+	// 一次性会话——hub#381 明确指出这是反作弊视角下最明显的非人类形态（R116）。
+	msgID := newMessageID()
+	turnID := turnIDOf(a.UID, conv, turn)
+	req.Header.Set("X-Conversation-ID", conversationID(a.UID, conv))
+	req.Header.Set("X-Conversation-Request-ID", turnID)
+	req.Header.Set("X-Conversation-Message-ID", msgID)
+	req.Header.Set("X-Request-ID", msgID)
+	req.Header.Set("X-Root-Request-ID", turnID)
 }
 
 func injectAttributionWBAI(req *http.Request) {
+	// 取值与官方桌面客户端一致（R117，本机 WorkBuddy.app 5.8.3 静态解包取证）：
+	// X-Agent-Intent 缺省 craft、X-Product 取 product.json 的 deploymentType（SaaS）、
+	// X-Private-Data 默认 true、X-IDE-Version 是桌面版本而不是 CLI 版本。
+	req.Header.Set("X-Agent-Intent", "craft")
 	req.Header.Set("X-Agent-Purpose", "conversation")
 	req.Header.Set("X-IDE-Name", "WorkBuddy")
 	req.Header.Set("X-IDE-Type", "WorkBuddy")
-	req.Header.Set("X-IDE-Version", "5.5.4")
-	req.Header.Set("X-Product", "WorkBuddy")
-}
-
-// msgIDSeq 保证同一时刻连续调用也得到不同 ID。
-//
-// 原实现是 UnixNano 的纯函数（16 字节由 n 的 8 字节前后镜像填充），而 Windows 上
-// time.Now() 分辨率可达毫秒级——同一次请求里连调两次必然拿到同一个值，
-// 会话 ID 与消息 ID 会撞成一样（见 TestChatHeadersCarryClientFingerprint）。
-// 现改为「高 8 字节时间戳 + 低 8 字节自增序号」，单进程内单调唯一。
-var msgIDSeq atomic.Uint64
-
-func newMessageIDWBAI() string {
-	var b [16]byte
-	n := uint64(time.Now().UnixNano())
-	seq := msgIDSeq.Add(1)
-	for i := 0; i < 8; i++ {
-		b[i] = byte(n >> (i * 8))
-		b[8+i] = byte(seq >> (i * 8))
-	}
-	return hex.EncodeToString(b[:])
-}
-
-// conversationIDWBAI 生成 X-Conversation-ID 的值：随机 UUIDv4（带连字符，
-// 8-4-4-4-12 小写 hex）。官方客户端抓包显示 conversation id 就是这个形态，
-// v4/v7 均被上游接受（#381 实测版本号不参与校验），取实现最简的 v4。
-// 与 newMessageIDWBAI 的 32 位 hex 刻意不同形——两种形态在抓包里并存，
-// 分别对应消息类与会话类 ID，保持各自原貌最不惹眼。
-func conversationIDWBAI() string {
-	var b [16]byte
-	if _, err := crand.Read(b[:]); err != nil {
-		// crypto/rand 失败时退回时间戳派生（与 newMessageIDWBAI 同源思路），
-		// 仍满足「带连字符 UUID」的形态校验。
-		n := time.Now().UnixNano()
-		for i := 0; i < 8; i++ {
-			b[i] = byte(n >> (i * 8))
-			b[15-i] = byte(n >> ((7 - i) * 8))
-		}
-	}
-	b[6] = (b[6] & 0x0f) | 0x40 // version 4
-	b[8] = (b[8] & 0x3f) | 0x80 // RFC 4122 variant
-	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
+	req.Header.Set("X-IDE-Version", clientVersion)
+	req.Header.Set("X-Product", "SaaS")
+	req.Header.Set("X-Private-Data", "true")
 }
 
 // billingHeaders 余额 / 签到接口头。
@@ -258,7 +196,7 @@ func billingHeaders(req *http.Request, a *auth.Auth) {
 // refreshHeaders refresh 端点专属头（X-Refresh-Token 只允许出现在这里）。
 // refreshHeaders refresh 端点专属头。调用方必须持有 a.Lock()，本函数直接读 RefreshToken。
 func refreshHeaders(req *http.Request, a *auth.Auth) {
-	commonHeaders(req, a)
+	commonHeaders(req)
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-Refresh-Token", a.RefreshToken)
 	if a.EnterpriseID != "" {
@@ -365,10 +303,11 @@ func (c *Client) RefreshToken(a *auth.Auth) error {
 // 2026-10-17 上游形态漂移后只下发 actions）：上游自己说可重试，
 // 此时直接抛错并让上层罚号，会把一次可自愈的抖动放大成渠道级 503。
 func (c *Client) ChatStream(a *auth.Auth, body []byte) (rc io.ReadCloser, status int, respBody []byte, err error) {
+	conv, turn := conversationAnchors(body)
 	prepared := PrepareBody(body)
 	rateLimitRetries := 0
 	for attempt := 1; attempt <= retryMaxAttempts; attempt++ {
-		rc, status, respBody, err = c.chatStreamOnce(a, prepared)
+		rc, status, respBody, err = c.chatStreamOnce(a, prepared, conv, turn)
 		ok, isRateLimit := retryDecision(status, respBody, err)
 		if !ok {
 			return rc, status, respBody, err
@@ -401,13 +340,14 @@ func (c *Client) ChatStream(a *auth.Auth, body []byte) (rc io.ReadCloser, status
 }
 
 // chatStreamOnce 单次对话请求（不做重试）。
-func (c *Client) chatStreamOnce(a *auth.Auth, prepared []byte) (rc io.ReadCloser, status int, respBody []byte, err error) {
+func (c *Client) chatStreamOnce(a *auth.Auth, prepared []byte, conv, turn string) (rc io.ReadCloser, status int, respBody []byte, err error) {
 	req, err := http.NewRequest(http.MethodPost, c.base()+EpChat, bytes.NewReader(prepared))
 	if err != nil {
 		return nil, 0, nil, err
 	}
-	chatHeaders(req, a)
-	// 用无总超时的 client：长思考请求不受整请求上限约束（见 Client.StreamHTTP）。
+	chatHeaders(req, a, conv, turn)
+	// 用无总超时的 client：长思考请求不受整请求上限约束（见 Client.StreamHTTP），
+	// 流中卡死由下方 provider.NewIdleReader 兜底（保留本仓方案，不引入第二条超时链）。
 	resp, err := c.streamClient().Do(req)
 	if err != nil {
 		log.Printf("workbuddyai chat_stream uid=%s: transport error: %v", a.UID, err)

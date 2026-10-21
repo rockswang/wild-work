@@ -8,8 +8,10 @@ import (
 	"io"
 	"io/fs"
 	"log"
+	"net"
 	"net/http"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -87,7 +89,9 @@ type Config struct {
 	// Stats 运行统计引擎（非 nil 时转发请求插桩 AddUsage/AddRequestRow；见 internal/stats 包注释）。
 	Stats *statsEngine.Stats
 
-	MaxRotate    int
+	// MaxRequestBody 请求体上限（字节）。0 = 用 DefaultMaxRequestBody（128MiB）。
+	MaxRequestBody int64
+
 	HardCooldown time.Duration
 	SoftCooldown time.Duration
 	ErrThreshold int
@@ -214,9 +218,6 @@ func NewHandler(cfg Config) *Handler {
 			provider.WorkBuddy: {Kind: provider.WorkBuddy, Pool: cfg.Pool, Upstream: cfg.Upstream, StaticModels: WorkBuddyStaticModels()},
 		}
 	}
-	if cfg.MaxRotate <= 0 {
-		cfg.MaxRotate = 3
-	}
 	if cfg.HardCooldown <= 0 {
 		cfg.HardCooldown = 12 * time.Hour
 	}
@@ -231,6 +232,9 @@ func NewHandler(cfg Config) *Handler {
 	}
 	if cfg.RefreshSkew <= 0 {
 		cfg.RefreshSkew = 10 * time.Minute
+	}
+	if cfg.MaxRequestBody > 0 {
+		MaxRequestBody = cfg.MaxRequestBody
 	}
 	h := &Handler{cfg: cfg, mux: http.NewServeMux(), sticky: make(map[string]*stickyEntry), ledger: cfg.Ledger, stats: cfg.Stats, fallbacks: cfg.ModelFallbacks, efforts: cfg.ReasoningEfforts}
 	h.mux.HandleFunc("POST /v1/chat/completions", h.withAuth(h.chatCompletions))
@@ -853,6 +857,10 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 		}
+		if res.lastKind == provider.ErrQueued {
+			// 全号排队：给合规的重试信号（与 body 里的 retry_after_seconds 一致）。
+			w.Header().Set("Retry-After", "30")
+		}
 		transparentError(w, res.lastStatus, res.lastBody)
 		return
 	}
@@ -903,7 +911,15 @@ func (h *Handler) serveRotation(
 	// lastKind：轮转中最后一个「账号级可轮换」错误的类别（Rotatable 分支置位）——
 	// 候选耗尽透传前交回调用方做方案 B 判定；成功/请求级错误不置位（零值 ErrNone）。
 	var lastKind provider.ErrKind
-	for i := 0; i < h.cfg.MaxRotate; i++ {
+	// attempts：本次请求最多试几个号 = 渠道账号数（原 MaxRotate 已删）。
+	// 每个号最多试一次（tried），是否真的换下一个由错误类别决定——
+	// kind.Rotatable() 为假、或传输层/5xx 这类「换号必撞同一面墙」的错误直接返回，
+	// 这样「试满所有号」与「立即失败」两种语义都由错误类型决定，不再有魔法数字上限。
+	attempts := len(rt.Pool.List())
+	if attempts <= 0 {
+		attempts = 1
+	}
+	for i := 0; i < attempts; i++ {
 		acct := h.pickWithSticky(rt, model)
 		if acct == nil {
 			break
@@ -937,6 +953,16 @@ func (h *Handler) serveRotation(
 				log.Printf("refresh failed platform=%s uid=%s err=%v", rt.Kind, acct.UID, err)
 				lastErr = err
 				h.stickyClear(rt, model)
+				// 本机网络/DNS 挂着时（`dial tcp: lookup ...: no such host`、connection refused），
+				// 所有账号都刷不出来，换号必撞同一面墙 ⇒ 直接 502，别把 N×30s 超时堆满。
+				if isNetworkError(err) {
+					log.Printf("refresh failed by network platform=%s uid=%s（不换号）err=%v", rt.Kind, acct.UID, err)
+					statRow.Status = http.StatusBadGateway
+					writeOpenAIError(w, http.StatusBadGateway, "upstream_error", err.Error())
+					return
+				}
+				// 账号侧问题（refresh token 失效 / 刷新接口 5xx）：只有「恰好要刷新」的号
+				// 受影响，其余号 token 仍然有效 ⇒ 换下一个号，不设次数上限（试满所有号）。
 				var ue *provider.Error
 				if errors.As(err, &ue) && ue.Kind == provider.ErrSessionDead {
 					rt.Pool.MarkSessionDead(acct.UID, "refresh: "+err.Error())
@@ -951,16 +977,16 @@ func (h *Handler) serveRotation(
 		if terr != nil {
 			lastErr = terr
 			h.stickyClear(rt, model)
-			if rt.SingleAccount {
-				// 单账号渠道：不累计 errCount。网络抖动重试三次就冷却唯一账号，
-				// 会让整条渠道下线（且无号可轮换）。直接透传错误，重试交给客户端。
-				log.Printf("upstream transport error platform=%s uid=%s（单账号渠道不计错）err=%v",
-					rt.Kind, acct.UID, terr)
-				writeOpenAIError(w, http.StatusBadGateway, "upstream_error", terr.Error())
-				return
-			}
-			rt.Pool.NoteError(acct.UID, h.cfg.ErrThreshold, h.cfg.ErrCooldown)
-			continue
+			// 传输层错误（连接超时 / 拒连 / 等响应头超时）：同一渠道所有账号打的是**同一个
+			// host**，网络层故障与账号无关 ⇒ 换号必然撞同一面墙，而且单次可长达 120s。
+			// 直接 502 把重试交给客户端（原逻辑：多号渠道轮 3 次 = 最长 6 分钟白等）。
+			// 也不计入账号错误（2026-10-20）：一次本机网络抖动不该把整池账号打成冷却。
+			// 单账号渠道（oczen）本来就是这条语义，现在统一（上游 R112 同族）。
+			log.Printf("upstream transport error platform=%s uid=%s（不换号、不计账号错误）err=%v",
+				rt.Kind, acct.UID, terr)
+			statRow.Status = http.StatusBadGateway
+			writeOpenAIError(w, http.StatusBadGateway, "upstream_error", terr.Error())
+			return
 		}
 		if status >= 400 {
 			h.stickyClear(rt, model)
@@ -1049,6 +1075,11 @@ func (h *Handler) serveRotation(
 				// 面板呈现「渠道自己挂了」假象，且诱发无意义的模型降级链触发。
 				// 仅轮转以兼容「同模型不同账号权益差异」场景；候选耗尽后透传最后
 				// 错误（与上游分类器注释「BadParams：不罚号但仍轮转」对齐）。
+			case provider.ErrQueued:
+				// 上游把「排队」当 4xx 下发（同 10605 的另一种形态）：只冷却「号×模型」，不罚整号。
+				// 冷却时长取响应里的 retryAfter/重置点，换号可能命中不同队列。
+				rt.Pool.CooldownModel(acct.UID, model, pool.CoolSoft, h.softRateCooldown(string(respBody)), "model queued")
+				log.Printf("model queued (http %d) platform=%s uid=%s model=%s", status, rt.Kind, acct.UID, model)
 			case provider.ErrServer:
 				// 上游 5xx = 服务端故障，与账号健康无关 ⇒ **不计入账号错误**。
 				//
@@ -1058,9 +1089,11 @@ func (h *Handler) serveRotation(
 				// 而 err_threshold 默认 3 ⇒ **重试一次就把三个健康账号全冷却 10 分钟**，
 				// 期间整条渠道 503。账号本身完全健康（积分/签到/session 全正常）。
 				//
-				// 判据：5xx 的语义就是「服务端出问题了」，记到客户端凭据头上既不合因果，
-				// 也会把一次上游故障放大成整条渠道下线。轮转保留（ErrServer 仍 Rotatable），
-				// 「换个账号重试」的机会还在，只是不再拿 5xx 惩罚账号。
+				// ⚠️ 2026-10-20 再进一步：**连换号也不做了**（ErrServer 从 Rotatable 除名）。
+				// 实测 workbuddyai 11134「the model provider is temporarily unavailable」
+				// 在同一波里 4 个号全 500，且每个号内部客户端已自行重试 3 次（日志
+				// 「http 500，800ms 后重试 (2/3)」）⇒ 一次请求实际打 9 次，全部白打。
+				// 结论：5xx 直接透传原状态码/原文，把等待与重试交给客户端。
 				//
 				// 逃生门：NoCooldownOnServerError 字段保留，但语义不变（仍表示「不豁免」），
 				// 仅用于审计/文档层面标注渠道差异；真正的计数开关由 CountServerErrorAsAccountFault
@@ -1070,15 +1103,16 @@ func (h *Handler) serveRotation(
 					log.Printf("upstream server error platform=%s uid=%s status=%d（渠道显式要求计入账号错误）",
 						rt.Kind, acct.UID, status)
 				} else {
-					log.Printf("upstream server error platform=%s uid=%s status=%d（不计入账号错误）",
+					log.Printf("upstream server error platform=%s uid=%s status=%d（不计入账号错误、不换号，直接透传）",
 						rt.Kind, acct.UID, status)
 				}
 			default:
 				rt.Pool.NoteError(acct.UID, h.cfg.ErrThreshold, h.cfg.ErrCooldown)
 			}
-			// 账号级错误（限流/欠费/登录态死/5xx/账号故障等）：换下一个账号重试本请求，
-			// 全部候选耗尽后才把最后一个上游错误透传给客户端（此前此处直接 return，
-			// 导致客户端看到本可避免的 429/402）。内容类错误在上方 case 中已提前返回。
+			// 账号级错误（限流/欠费/登录态死/账号故障/排队等）：换下一个账号重试本请求，
+			// 全部候选耗尽后才把最后一个上游错误透传给客户端（改前此处直接 return，
+			// 导致客户端看到本可避免的 429/402）。内容类错误在上方 case 中已提前返回；
+			// 5xx 与传输层错误也是直接透传（换号必撞同一面墙，见各自分支注释）。
 			if kind.Rotatable() {
 				log.Printf("rotate platform=%s uid=%s kind=%s status=%d body=%s",
 					rt.Kind, acct.UID, kind, status, truncateBody(respBody))
@@ -1102,6 +1136,61 @@ func (h *Handler) serveRotation(
 		h.stickySuccess(rt, model)
 		if stream {
 			usage, serr := rt.Upstream.Stream(w, rc, dispModel)
+			// 排队提示（qodercn 10605 isQueued）：上游把「模型拥塞」当成 HTTP 200 里的
+			// 一帧业务错误下发，此刻 **一字节未写** ⇒ 冷却「号×该模型」后换下一个号。
+			//
+			// 若不识别：这帧没有 choices，会被当普通 chunk 透传 ⇒ 客户端只有一个空 delta，
+			// 界面停在「正在等待模型…」，直到网关 180s 后掐断（2026-10-20 实录：
+			// 180.3/180.7/180.8s 三次，每轮扣掉 3 分钟，且零 token 计费）。
+			var qe *provider.Queued
+			if errors.As(serr, &qe) && !sw.written {
+				h.stickyClear(rt, model)
+				rt.Pool.CooldownModel(acct.UID, model, pool.CoolSoft, qe.Cooldown(), "model queued")
+				clearSSEHeaders(w) // StreamCapture 已写进 header 的 SSE 头必须撤掉
+				log.Printf("model queued platform=%s uid=%s model=%s %s（换下一个账号，冷却 %s）",
+					rt.Kind, acct.UID, model, qe.Error(), qe.Cooldown())
+				lastErr = qe
+				lastStatus = http.StatusTooManyRequests
+				lastBody = queuedBody(qe)
+				lastKind = provider.ErrQueued
+				continue
+			}
+			// 其余「首帧即错误、一字节未写」的分类错误（典型：qodercom 的 envelope 403 里
+			// 包着 code 110/112 额度耗尽帧 → ErrHardCredit）：此刻换号还来得及，不应当作
+			// 「已写流的残留错误」只罚不换（那样 5 个号全耗尽时客户端只能干等下次请求）。
+			// 与写后分支的区别仅在「能不能换」：已写出字节的流无法撤回，只能罚号 + 透传。
+			if serr != nil && !sw.written && len(rt.Pool.List()) > 1 {
+				var sec provider.StreamErrorClassifier
+				if errors.As(serr, &sec) && sec.Kind().Rotatable() {
+					kind := sec.Kind()
+					h.stickyClear(rt, model)
+					switch kind {
+					case provider.ErrHardCredit:
+						rt.Pool.Cooldown(acct.UID, pool.CoolHard, h.hardCooldown(), "stream 402 权益不足")
+					case provider.ErrSoftRate:
+						rt.Pool.CooldownModel(acct.UID, model, pool.CoolSoft, h.softRateCooldown(serr.Error()), "stream 429 限流")
+					case provider.ErrSessionDead:
+						rt.Pool.MarkSessionDead(acct.UID, serr.Error())
+					case provider.ErrAccountFault:
+						rt.Pool.Cooldown(acct.UID, pool.CoolSoft, h.cfg.SoftCooldown, "stream account fault")
+					default:
+						rt.Pool.NoteError(acct.UID, h.cfg.ErrThreshold, h.cfg.ErrCooldown)
+					}
+					clearSSEHeaders(w)
+					log.Printf("stream error before write platform=%s uid=%s model=%s kind=%s（换下一个账号）err=%v",
+						rt.Kind, acct.UID, model, kind, serr)
+					lastErr = serr
+					lastKind = kind
+					// 额度耗尽透 402（付费墙语义，客户端/用户一看就知道要充值/换号），
+					// 其余保留上游原始状态码；body 用原文，保留上游错误码与文案。
+					lastStatus = http.StatusPaymentRequired
+					if pe := (*provider.Error)(nil); errors.As(serr, &pe) && pe.Status >= 400 {
+						lastStatus = pe.Status
+					}
+					lastBody = []byte(serr.Error())
+					continue
+				}
+			}
 			cu := cacheUsageOf(usage) // 缓存命中（上游未上报时 reported=false，面板显示「—」）
 			// 记 token 流水（成功请求口径；usage 缺失记 0 token 仅计请求数）。
 			// 记账失败不干扰主流程——锦上添花功能。
@@ -1313,9 +1402,17 @@ func (h *Handler) serveRotation(
 	}
 	// 账号均健康、但请求模型在全部账号上都处于模型级限流冷却：
 	// 明确告知解冻时间，避免误以为账号故障去重登（2026-09-23 全池 6004 事故的教训）。
+	//
+	// 措辞「冷却」而不写「限流」：同一窗口也可能来自上游排队（ErrQueued 给「号×模型」
+	// 打 30s 冷却，2026-10-20），写死「限流」会让用户以为被限速了。
+	// 同时补 Retry-After：首次请求遇到全号排队时回的是 429 + Retry-After: 30，
+	// 冷却窗口内的后续请求应当给同量级的重试信号，而不是让 agent 把 503 当“服务坏了”硬退避。
 	if bound > 0 && modelAvail == 0 {
+		if !earliest.IsZero() {
+			w.Header().Set("Retry-After", formatRetryAfter(earliest))
+		}
 		writeOpenAIError(w, http.StatusServiceUnavailable, "no_healthy_account",
-			fmt.Sprintf("渠道 %s 的 %d 个账号均健康，但模型 %s 已在全部账号上限流冷却：最早约 %s 解冻（到点自动恢复，无需重新登录），也可先切换其他模型",
+			fmt.Sprintf("渠道 %s 的 %d 个账号均健康，但模型 %s 已在全部账号上冷却（上游限流或排队）：最早约 %s 解冻（到点自动恢复，无需重新登录），也可先切换其他模型",
 				rt.Kind, bound, model, formatUnfreeze(earliest)))
 		return
 	}
@@ -1361,6 +1458,16 @@ func (h *Handler) serveRotation(
 	}
 	writeOpenAIError(w, http.StatusServiceUnavailable, "no_healthy_account", msg)
 	return // 裸 return：携带命名结果 res（done=true——诊断引导已把响应写完）
+}
+
+// formatRetryAfter 把解冻时刻换算成整数秒（至少 1）。
+// 用于 Retry-After 头：与首次全号排队时的 Retry-After: 30 同一量级信号。
+func formatRetryAfter(until time.Time) string {
+	d := time.Until(until)
+	if d < time.Second {
+		d = time.Second
+	}
+	return strconv.Itoa(int(d.Seconds() + 0.5))
 }
 
 // noLoginChannel 报告渠道是否「无登录概念」（不存在凭证文件、也无重登入口）。
@@ -1879,28 +1986,47 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	_, _ = w.Write(raw)
 }
 
-// MaxRequestBody 请求体上限（32MiB）：server 与 gateway 共用，避免两处硬编码不同步。
-// 原为 8MiB，实测多模态大图 base64 后（体积 ×~1.37）很宐易超限（issue #30 反馈），提至 32MiB。
-// 超限直接回 413 说真话，不做静默截断——截断后 JSON 解析失败会被误报成
-// invalid_model（issue #30），比直接拒绝更误导排查。
-const MaxRequestBody = 32 << 20
+// DefaultMaxRequestBody 请求体默认上限（128MiB）。
+//
+// 沿革：8MiB → 32MiB（issue #30，多模态大图 base64 后易超限）→ 128MiB（issue #176）。
+// 提不动的原因不是「图大」，而是**无状态客户端每轮重放整段历史**：Codex 的一个会话
+// 累积 12 张 2048px 截图（33.01MiB base64，文本仅 0.43MiB），请求体 33.44MiB 直接撞
+// 32MiB 硬限回 413，会话报废。gateway 侧另有 `imageURLBlock` 在转发前把图缩到 1568px
+// / JPEG（同 12 张 → 约 2.9MiB），所以上游实际收到的仍很小；此处上限只需容纳
+// **客户端原始体**。仍可经 config.json 的 `server.max_request_body_mb` 调整。
+const DefaultMaxRequestBody = 128 << 20
+
+// MaxRequestBody 当前生效的请求体上限。默认 DefaultMaxRequestBody，
+// 启动时按配置覆盖（见 NewHandler）。保留为包级变量是为兼容既有测试与调用方。
+var MaxRequestBody int64 = DefaultMaxRequestBody
 
 // ReadBodyLimited 读取请求体：超过 MaxRequestBody 时回 413 并返回错误。
 // 用 LimitReader(max+1) 多读 1 字节以区分「恰好 max」与「超限」。
 func ReadBodyLimited(r *http.Request) ([]byte, error) {
-	raw, err := io.ReadAll(io.LimitReader(r.Body, MaxRequestBody+1))
+	limit := MaxRequestBody
+	raw, err := io.ReadAll(io.LimitReader(r.Body, limit+1))
 	if err != nil {
 		return nil, err
 	}
-	if int64(len(raw)) > MaxRequestBody {
+	if int64(len(raw)) > limit {
 		_ = r.Body.Close()
-		return nil, errTooLarge
+		return nil, tooLargeError(limit)
 	}
 	return raw, nil
 }
 
-// errTooLarge 超限哨兵错误（调用方据此回 413）。MiB 数字直接用常量推导，避免改上限后文案不同步。
-var errTooLarge = fmt.Errorf("request body exceeds limit of %d bytes (%d MiB); please reduce request size", MaxRequestBody, MaxRequestBody>>20)
+// errTooLarge 超限哨兵（调用方用 errors.Is 判定后回 413）。
+var errTooLarge = errors.New("request body too large")
+
+// IsBodyTooLarge 供 gateway 层判定「入站请求体超限」（跨包无法引用未导出哨兵）。
+func IsBodyTooLarge(err error) bool { return errors.Is(err, errTooLarge) }
+
+// tooLargeError 构造超限错误：包住哨兵以便 errors.Is 命中，文案带实际上限。
+// MiB 数字由生效上限推导，避免改上限后文案不同步。
+func tooLargeError(limit int64) error {
+	return fmt.Errorf("%w: exceeds limit of %d bytes (%d MiB); please reduce request size",
+		errTooLarge, limit, limit>>20)
+}
 
 func writeOpenAIError(w http.ResponseWriter, status int, code, msg string) {
 	writeJSON(w, status, map[string]any{"error": map[string]any{"message": msg, "type": "api_error", "code": code}})
@@ -1911,6 +2037,52 @@ func transparentError(w http.ResponseWriter, status int, body []byte) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_, _ = w.Write(body)
+}
+
+// clearSSEHeaders 撑掉渠道 StreamCapture 预先写进 header 的 SSE 头。
+// 排队/业务错误帧发现于**未写出任何字节**之时，此时撤掉这些头，后续才能干净地
+// 写回 JSON 错误（否则客户端会按 text/event-stream 解析一个 JSON 体）。
+func clearSSEHeaders(w http.ResponseWriter) {
+	h := w.Header()
+	h.Del("Content-Type")
+	h.Del("Cache-Control")
+	h.Del("Connection")
+	h.Del("X-Accel-Buffering")
+}
+
+// queuedBody 构造「全号排队」的出口错误体：OpenAI 错误信封 + 排队元数据。
+// 客户端/agent 读 code=model_queued 即知“不是渠道挂了，是模型拥塞，等 retry_after 再试”。
+func queuedBody(q *provider.Queued) []byte {
+	payload, _ := json.Marshal(map[string]any{"error": map[string]any{
+		"message":             q.Error(),
+		"type":                "upstream_error",
+		"code":                "model_queued",
+		"retry_after_seconds": int(q.Cooldown().Seconds()),
+		"queue_count":         q.QueueCount,
+		"wait_seconds":        q.WaitSeconds,
+	}})
+	return payload
+}
+
+// isNetworkError 判定是否**本机传输层/DNS**故障（与账号无关）。
+// 判据：http.Client.Do 包装的 *url.Error / net.Error，或文案里出现 DNS/拒连特征。
+// 用途：refresh 失败要区分「号坏了（换号有效）」与「网络坏了（换号无用）」。
+func isNetworkError(err error) bool {
+	if err == nil {
+		return false
+	}
+	var ne net.Error
+	if errors.As(err, &ne) {
+		return true
+	}
+	s := err.Error()
+	for _, m := range []string{"dial tcp", "no such host", "connection refused",
+		"connection reset", "i/o timeout", "timeout awaiting response headers", "network is unreachable"} {
+		if strings.Contains(s, m) {
+			return true
+		}
+	}
+	return false
 }
 
 // softRateResetMaxCap 解析出的重置时长上限：上游时间戳异常（如错给一年后）时不至于把号冻死。

@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"wild-work/internal/auth"
 	"wild-work/internal/pool"
@@ -92,8 +93,8 @@ func TestMultiAccountDisablesAndSwitchesOnNextRequest(t *testing.T) {
 	//
 	// 给 A 更高积分让排序确定：Pick 按 credits 降序，A 恒排在 B 前。
 	// （同分随机选本身是合理行为，不是生产 bug——本测试只是不能依赖它。）
-	p.SetCreditDetail("A", 1000, 0, 0)
-	p.SetCreditDetail("B", 500, 0, 0)
+	p.SetCreditDetail("A", 1000, 0, 0, time.Time{})
+	p.SetCreditDetail("B", 500, 0, 0, time.Time{})
 
 	h := NewHandler(Config{
 		Runtimes: map[provider.Kind]*Runtime{

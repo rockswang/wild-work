@@ -674,6 +674,17 @@ func (s *Stats) expiryRowsLocked(now time.Time) []ExpiryRow {
 	return rows
 }
 
+// earliestRowExpiry 轮换视图的排序键：**仍有效**的最早到期时刻（ok=false = 无到期信息
+// 或快照里的到期时刻已过）。与 `pool.entry.expireOK` 同一口径：过期旧快照必须落回
+// 「无到期信息」组，否则一个已经空了的号会恒排第一。
+func earliestRowExpiry(a *acct, now time.Time) (time.Time, bool) {
+	_, _, inst, ok := a.earliestExpiryLocked()
+	if !ok || !inst.After(now) {
+		return time.Time{}, false
+	}
+	return inst, true
+}
+
 // channelKind 渠道前缀白名单（= provider.Kind，也等于 /api/state 的 group 值），
 // 用于把模型名 "<渠道>/<模型>" 归属到平台行。新增渠道须同步此表——遗漏会让该渠道
 // 的 token 不进平台表；不在表内（含无前缀的裸模型名——那类请求由 compat 层映射，
@@ -821,7 +832,9 @@ func (s *Stats) platformRowsLocked(now time.Time) []PlatformRow {
 }
 
 // rotationLocked 生成「使用中 / 接棒顺序」视图（调用方须持锁）。
-// 排序复刻上游 pool 选号两级排序：临期额度降序 → 余额降序（再以 uid 升序保证稳定）；
+// 排序复刻上游 pool 选号三级排序（R112）：**仍有效的最早到期时刻**升序 → 同到期时刻
+// uid 升序 → 无到期信息者按余额降序；与 `pool.entryBetter` 逐条同口径，
+// 不同步就会让面板预报的接班顺序与实际选号不一致。
 // 排除冷却/停用；接棒顺序剔除当前粘性账号。粘性账号被删/冷却后 Current 自动为
 // null（上游下一请求会重建粘性记录，下一轮喂入自然纠正）。
 // 只下发有使用记录（Current 非 null）的平台——无粘性记录=今日未用过，
@@ -867,9 +880,18 @@ func (s *Stats) rotationLocked() []RotationView {
 				cands = append(cands, a)
 			}
 		}
+		now := time.Now()
 		sort.Slice(cands, func(i, j int) bool {
-			if cands[i].expiring != cands[j].expiring {
-				return cands[i].expiring > cands[j].expiring
+			ti, oki := earliestRowExpiry(cands[i], now)
+			tj, okj := earliestRowExpiry(cands[j], now)
+			if oki != okj {
+				return oki // 有有效到期时刻的恒排前面
+			}
+			if oki {
+				if !ti.Equal(tj) {
+					return ti.Before(tj)
+				}
+				return cands[i].uid < cands[j].uid
 			}
 			if cands[i].credits != cands[j].credits {
 				return cands[i].credits > cands[j].credits

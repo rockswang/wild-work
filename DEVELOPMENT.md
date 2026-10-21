@@ -22,6 +22,7 @@ internal/
 ├── app/app.go                 # 业务编排：HTTP 管理 API + 登录流程 + 费率缓存 + 日志
 ├── app/session.go             # 管理面板鉴权：cookie 会话 + 管理员密码 + 登录限流
 ├── server/handler.go          # OpenAI 兼容 HTTP handler：前缀路由 + 挑号 + 错误透传（含 SingleAccount 豁免）
+├── gateway/                    # 三接口兼容层（Responses/Anthropic → 内层 Chat）；imageslim.go 做入站图片降采样
 ├── pool/pool.go               # 账号池：余额挑号 + 冷却/禁用状态机 + state.json 持久化
 ├── scheduler/scheduler.go     # 定时签到 + token 保活 + 冷却解冻
 ├── provider/provider.go       # Upstream 接口 + 共享类型（ModelInfo/ModelPricing/ResourceItem）
@@ -75,6 +76,15 @@ internal/
       `syncListenRisk()` 是唯一入口（下拉框 onchange / 自定义输入框 input / 打开弹层时各调一次），
       同时控制黄色警告条（`#listenRiskTip`）与管理密码的必填星号（`#adminPassReq`）。
       判定口径须与后端 `config.Listen.IsLoopback` 一致（显式环回才安全，空主机名=对外暴露）。
+14. **入站请求体上限是变量不是常量**：`server.MaxRequestBody` 默认 128MiB，装配层由
+    `config.server.max_request_body_mb` 覆盖（0=默认，钳 8~1024）。判定错误必须用
+    `server.IsBodyTooLarge(err)`，不得靠 `strings.Contains(err, "exceeds limit")` 字符串匹配。
+    `gateway.maxInnerBody()` 必须是**函数**——常量会在包初始化时把上限快照死，改配置不生效。
+15. **图片只在网关转发前降采样，且只动 data URL**：`gateway.imageslim.go` 把内联 base64 图缩到
+    长边 ≤1568（不透明 → JPEG q85，带 alpha → PNG，防透明区涂黑），按 payload sha256 缓存 256 条。
+    `http(s)` 直链不下载不改写；解码失败 / 重编码后变大 / 体积 ≤512KB 且长边合规 ⇒ 原样返回。
+    工具结果里的图片必须走 `image_url` 内容块（`toolContentValue`），**不得** `json.Marshal` 成 base64 文本
+    ——一张 1.6MB 截图按文本计 ≈146 万 token，按 vision 只 ~1K token。
 
 ## 3. 渠道上游接口
 

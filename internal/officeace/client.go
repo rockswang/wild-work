@@ -26,7 +26,7 @@ type Client struct {
 	// ChatThrottleInterval 对话请求的最小出站间隔（按 base_url 共享）。
 	//
 	// 上游限 1 req/s（429 ModelArts.81101），超限会被上层当成整号软冷却、
-	// MaxRotate 轮空后整渠道 503。默认 DefaultChatThrottleInterval（= 1.1s）。
+	// 把渠道内账号逐个轮空后整渠道 503。默认 DefaultChatThrottleInterval（= 1.1s）。
 	// 置为负值可关闭节流（调试/上游放宽时的逃生门）；零值按默认处理。
 	ChatThrottleInterval time.Duration
 }

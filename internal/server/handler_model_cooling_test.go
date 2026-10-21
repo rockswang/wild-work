@@ -89,8 +89,8 @@ func newModelCoolingHandler(body string) (*Handler, *pool.Pool) {
 	p := pool.New("")
 	p.Add(&auth.Auth{UID: "u1", AccessToken: "t", ExpiresAt: time.Now().Add(24 * time.Hour).Unix()})
 	p.Add(&auth.Auth{UID: "u2", AccessToken: "t", ExpiresAt: time.Now().Add(24 * time.Hour).Unix()})
-	p.SetCreditDetail("u1", 500, 0, 0)
-	p.SetCreditDetail("u2", 100, 0, 0)
+	p.SetCreditDetail("u1", 500, 0, 0, time.Time{})
+	p.SetCreditDetail("u2", 100, 0, 0, time.Time{})
 	rt := &Runtime{Kind: provider.Qoder, Pool: p, Upstream: modelScopedUpstream{body: body}}
 	h := NewHandler(Config{
 		Runtimes:     map[provider.Kind]*Runtime{provider.Qoder: rt},

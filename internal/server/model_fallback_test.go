@@ -34,8 +34,7 @@ func newFbHandler(t *testing.T, upA, upB provider.Upstream, rules []config.Model
 			provider.Oczen:     {Kind: provider.Oczen, Pool: pa, Upstream: upA},
 			provider.WorkBuddy: {Kind: provider.WorkBuddy, Pool: pb, Upstream: upB},
 		},
-		APIKey: "k", MaxRotate: 3,
-		HardCooldown: time.Hour, SoftCooldown: time.Minute,
+		APIKey: "k", HardCooldown: time.Hour, SoftCooldown: time.Minute,
 		ErrThreshold: 1, ErrCooldown: time.Minute,
 		ModelFallbacks: rules,
 	})

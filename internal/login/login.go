@@ -21,7 +21,8 @@ import (
 const (
 	UpstreamBaseCN      = "https://copilot.tencent.com"
 	UpstreamBaseGlobal  = "https://www.workbuddy.ai"
-	clientUA            = "CLI/2.63.2 CodeBuddy/2.63.2"
+	// 与聊天链同一客户端身份（官方桌面 5.8.3 内嵌 CLI 2.161.0，R117）。
+	clientUA            = "WorkBuddy/5.8.3 WorkBuddy/5.8.3 CLI/2.161.0"
 	originRefererCN     = "https://www.codebuddy.cn"
 	originRefererGlobal = "https://www.workbuddy.ai"
 )

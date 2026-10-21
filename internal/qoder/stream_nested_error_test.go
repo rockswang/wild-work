@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"wild-work/internal/provider"
 )
@@ -20,28 +21,22 @@ func TestNestedStreamBusinessErrorFailsFast(t *testing.T) {
 	if err == nil {
 		t.Fatalf("信封内嵌 403 必须报错，不得被当普通 chunk 吞掉；输出=%s", rec.Body.String())
 	}
-	var sErr *sseError
-	if !errors.As(err, &sErr) {
-		t.Fatalf("期望 *sseError，实际 %T: %v", err, err)
+	// 本仓口径（R109/R111）：10605/isQueued 是「模型排队」，比上游 R108 的 ErrSoftRate
+	// 更具体——返回 *provider.Queued，handler 只冷「号×模型」，并在零字节阶段换号，
+	// 客户端不会收到伪成功流。上游的通用信封判据仍保留（见 TestNestedStreamGenericEnvelopeError）。
+	var q *provider.Queued
+	if !errors.As(err, &q) {
+		t.Fatalf("期望 *provider.Queued，实际 %T: %v", err, err)
 	}
-	if sErr.status != 403 {
-		t.Errorf("status=%d 期望 403", sErr.status)
+	if q.RetryAfter != 30*time.Second {
+		t.Errorf("RetryAfter=%s 期望 30s（上游 retryAfterSeconds）", q.RetryAfter)
 	}
-	if got := sErr.Kind(); got != provider.ErrSoftRate {
-		t.Errorf("Kind()=%v 期望 ErrSoftRate（RESOURCE_LIMIT 属可恢复软限流）", got)
-	}
-	if sErr.retryAfter != 30 {
-		t.Errorf("retryAfter=%d 期望 30（上游 retryAfterSeconds）", sErr.retryAfter)
+	if q.WaitSeconds != 30 {
+		t.Errorf("WaitSeconds=%d 期望 30（上游 waitTime）", q.WaitSeconds)
 	}
 	out := rec.Body.String()
-	if !strings.Contains(out, `"code":"upstream_rate_limited"`) {
-		t.Errorf("error 帧缺结构化 code，客户端无法分原因: %s", out)
-	}
-	if !strings.Contains(out, `"retry_after_seconds":30`) {
-		t.Errorf("error 帧缺 retry_after_seconds，客户端只能盲重试: %s", out)
-	}
-	if !strings.Contains(out, "RESOURCE_LIMIT") {
-		t.Errorf("error 帧应带上游原文关键信息: %s", out)
+	if strings.TrimSpace(out) != "" {
+		t.Errorf("首帧即排队必须零字节返回（handler 才能换号）: %s", out)
 	}
 	// 核心回归：修复前这里会补一个 [DONE]，把失败包装成「空内容的成功流」。
 	if strings.Contains(out, "[DONE]") {
@@ -85,13 +80,43 @@ func TestStreamNormalStillExactlyOneDone(t *testing.T) {
 }
 
 func TestClassifyResourceLimitIsSoftRate(t *testing.T) {
+	// 带队列明细（10605 + isQueued）→ Queued：比 ErrSoftRate 更具体，冷却粒度是
+	// 「号×模型」而不是整号（本仓 R109/R111 口径）。
 	msg := `{"code":"10605","message":"{\"isQueued\":true,\"modelKey\":\"dfmodel\",\"retryAfterSeconds\":30,\"serviceAvailable\":false,\"subCode\":\"RESOURCE_LIMIT\"}","subCode":"RESOURCE_LIMIT"}`
-	if got := Classify(403, msg); got != provider.ErrSoftRate {
-		t.Errorf("Classify(403, RESOURCE_LIMIT)=%v 期望 ErrSoftRate", got)
+	if got := Classify(403, msg); got != provider.ErrQueued {
+		t.Errorf("Classify(403, 10605/isQueued)=%v 期望 ErrQueued", got)
 	}
-	// 业务码单独出现（无 subCode 字样）也要命中——上游两种下发形态都见过。
-	if got := Classify(403, `{"code":"10605","serviceAvailable":false}`); got != provider.ErrSoftRate {
-		t.Errorf("仅 10605 + serviceAvailable 期望 ErrSoftRate，实际 %v", got)
+	// 只有 subCode.RESOURCE_LIMIT、没有队列明细 → 软限流（吸收上游 R108 判据）。
+	if got := Classify(403, `{"subCode":"RESOURCE_LIMIT"}`); got != provider.ErrSoftRate {
+		t.Errorf("Classify(403, 仅 RESOURCE_LIMIT)=%v 期望 ErrSoftRate", got)
+	}
+	if got := Classify(403, `{"code":"10605","serviceAvailable":false}`); got != provider.ErrQueued {
+		t.Errorf("仅 10605 + serviceAvailable 期望 ErrQueued，实际 %v", got)
+	}
+}
+
+// TestNestedStreamGenericEnvelopeError 吸收上游 R108：非队列/非额度的信封 4xx
+// （纯文本 rate limit）仍要返回 *sseError，并在出口补 code + retry_after_seconds。
+func TestNestedStreamGenericEnvelopeError(t *testing.T) {
+	in := `data:{"body":"{\"code\":\"403\",\"message\":\"rate limit exceeded; {\\\"retryAfterSeconds\\\":30}\"}","statusCodeValue":403,"statusCode":"FORBIDDEN"}` + "\n\n"
+	rec := httptest.NewRecorder()
+	_, err := StreamCapture(rec, strings.NewReader(in), "qodercom/deepseek-flash", nil)
+	var sErr *sseError
+	if !errors.As(err, &sErr) {
+		t.Fatalf("期望 *sseError，实际 %T: %v", err, err)
+	}
+	if got := sErr.Kind(); got != provider.ErrSoftRate {
+		t.Errorf("Kind()=%v 期望 ErrSoftRate", got)
+	}
+	if sErr.retryAfter != 30 {
+		t.Errorf("retryAfter=%d 期望 30（从文案里取的 retryAfterSeconds）", sErr.retryAfter)
+	}
+	out := rec.Body.String()
+	if !strings.Contains(out, `"retry_after_seconds":30`) {
+		t.Errorf("error 帧缺 retry_after_seconds，客户端只能盲重试: %s", out)
+	}
+	if strings.Contains(out, "[DONE]") {
+		t.Errorf("业务错误流不得补 [DONE]: %s", out)
 	}
 }
 
