@@ -21,6 +21,7 @@ var sanitizeFeatures = []string{
 	"github.com/anthropics/",                          // 反馈句里的 Anthropic 仓库链接
 	"11128",                                           // 上游反探测：裸数字错误码
 	"You are an AI agent powered by DeepSeek Harness", // DSH 身份句：上游按 system 开头逐字锚定（2026-10-21 实测）
+	"DeepSeek Harness Web GUI",                        // DSH Web GUI 段：与后半句构成跨句组合判据，单句不拦（2026-10-21 实测）
 }
 
 // sanitizeHdrRe 剥离层：header 键名即触发（与值无关），整段删除。
@@ -83,6 +84,12 @@ var sanitizeRewrites = [][2]string{
 		// 语义扰动最小，且不依赖不可见字符或 Unicode 归一化（实测 200）。
 		"You are an AI agent powered by DeepSeek Harness",
 		"You are an AI agent powered by the DeepSeek Harness",
+	},
+	{
+		// DSH Web GUI 品牌短语：单句不拦，与后半句（"they mean this GUI."）组合才命中；
+		// 缩写为 DSH 后语义不变，完整 prompt 实测 200。
+		"DeepSeek Harness Web GUI",
+		"DSH Web GUI",
 	},
 }
 
