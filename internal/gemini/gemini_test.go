@@ -438,16 +438,17 @@ func TestQuotaPercentParsing(t *testing.T) {
 	if remain != 0 {
 		t.Errorf("UserResource 应恒 0（本渠道无积分概念），得 %d", remain)
 	}
-	if len(items) != 2 {
-		t.Fatalf("应只认两个 bucketId（3p-* 与 resetTime 不可解析的桶都丢弃），得 %d 条：%+v",
+	if len(items) != 3 {
+		t.Fatalf("应解析 Gemini 组 2 条 + Claude/GPT 组 1 条，得 %d 条：%+v",
 			len(items), items)
 	}
-	fiveHour, weekly := items[0], items[1]
+	// Gemini Models: 5h (99%), weekly (50%)
+	fiveHour, weekly, claude5h := items[0], items[1], items[2]
 	if fiveHour.Key != BucketFiveHour || fiveHour.Remain != 99 || fiveHour.Total != 100 || fiveHour.Used != 1 {
 		t.Errorf("5 小时窗口条目错误：%+v", fiveHour)
 	}
-	if fiveHour.Name != "5 小时窗口（%）" {
-		t.Errorf("单位必须写进名字（ResourceItem 没有单位字段）：%q", fiveHour.Name)
+	if fiveHour.Name != "Gemini 5 小时窗口（%）" {
+		t.Errorf("单位必须写进名字（含组前缀）：%q", fiveHour.Name)
 	}
 	if !fiveHour.Usable || !fiveHour.InfoOnly {
 		t.Errorf("配额条目应 Usable=true（真实可用）+ InfoOnly=true（不是积分，不参与小计）：%+v", fiveHour)
@@ -456,8 +457,11 @@ func TestQuotaPercentParsing(t *testing.T) {
 	if fiveHour.ExpireAt != "2026-10-17T23:00:00+08:00" {
 		t.Errorf("ExpireAt 应按 UTC+8 墙钟：%q", fiveHour.ExpireAt)
 	}
-	if weekly.Key != BucketWeekly || weekly.Remain != 50 {
+	if weekly.Key != BucketWeekly || weekly.Remain != 50 || weekly.Name != "Gemini 周窗口（%）" {
 		t.Errorf("周窗口条目错误：%+v", weekly)
+	}
+	if claude5h.Key != "3p-claude" || claude5h.Remain != 100 || claude5h.Name != "Claude/GPT 5 小时窗口（%）" {
+		t.Errorf("Claude/GPT 5 小时窗口条目错误：%+v", claude5h)
 	}
 	// ⚠️ 两个百分比相加**无意义**，故 Summarize 的可消耗小计必须为 0（不得显示 198 积分）。
 	if usable, unusable := provider.Summarize(items); usable != 0 || unusable != 0 {
@@ -727,16 +731,15 @@ func TestRefreshTokenKeepsOldRefreshTokenWhenAbsent(t *testing.T) {
 // 静态表与其它 provider.Upstream 空能力
 // ---------------------------------------------------------------------------
 
-// TestStaticModelsAndNoCheckin 静态表只 1 条 + 四档；签到必须返回明确错误
-// （返回 nil 会把缺陷伪装成「今日已签到」）。
+// TestStaticModelsAndNoCheckin 静态模型表（含 Flash/Pro/Claude/GPT-OSS）与签到必须返回明确错误
 func TestStaticModelsAndNoCheckin(t *testing.T) {
 	ms := StaticModels()
-	if len(ms) != 1 {
-		t.Fatalf("静态表应只有 1 条（不暴露带后缀的名字与 lite），得 %d 条", len(ms))
+	if len(ms) < 5 {
+		t.Fatalf("静态表应包含多个模型，得 %d 条", len(ms))
 	}
 	m := ms[0]
 	if m.ID != ModelFlash || m.ContextWindow != ContextWindow || m.MaxTokens != MaxOutputTokens {
-		t.Errorf("静态表条目错误：%+v", m)
+		t.Errorf("静态表首条目错误：%+v", m)
 	}
 	if !m.SupportsImages || !m.SupportsReasoning || !m.SupportsTools {
 		t.Errorf("能力声明错误：%+v", m)
@@ -754,7 +757,7 @@ func TestStaticModelsAndNoCheckin(t *testing.T) {
 	if err := c.DailyCheckin(nil); err == nil || !strings.Contains(err.Error(), "没有签到机制") {
 		t.Errorf("本渠道无签到，必须返回明确错误：%v", err)
 	}
-	if models, err := c.FetchModels(nil); err != nil || len(models) != 1 {
+	if models, err := c.FetchModels(nil); err != nil || len(models) != len(ms) {
 		t.Errorf("FetchModels 应返回静态表且不报错：%v %v", models, err)
 	}
 	if pricing, err := c.FetchModelPricing(nil); err != nil || len(pricing) != 0 {
@@ -762,6 +765,39 @@ func TestStaticModelsAndNoCheckin(t *testing.T) {
 	}
 	// 接口实现自检：Client 必须满足 provider.Upstream（10 个方法）。
 	var _ provider.Upstream = (*Client)(nil)
+}
+
+// TestResolveModelID 测试各种模型与别名的映射解析
+func TestResolveModelID(t *testing.T) {
+	cases := []struct {
+		input    string
+		effort   string
+		expected string
+		ok       bool
+	}{
+		{"gemini-3.8-flash", "high", "gemini-3.8-flash-high", true},
+		{"gemini-3.8-flash", "", "gemini-3.8-flash-medium", true},
+		{"gemini-3.8-flash-low", "", "gemini-3.8-flash-low", true},
+		{"gemini-3.7-flash", "low", "gemini-3.7-flash-tiered", true},
+		{"gemini-3.1-pro-high", "", "gemini-pro-agent", true},
+		{"claude-sonnet-4-6", "", "claude-sonnet-4-6", true},
+		{"gemini-claude-sonnet-4-5", "", "claude-sonnet-4-6", true},
+		{"claude-opus-4-6-thinking", "", "claude-opus-4-6-thinking", true},
+		{"gpt-oss-120b", "", "gpt-oss-120b-medium", true},
+		{"gpt-oss-120b-medium", "", "gpt-oss-120b-medium", true},
+		{"gemini-4-argon-high", "", "gemini-4-argon-high", true},
+		{"unknown-model-xyz", "", "", false},
+	}
+
+	for _, tc := range cases {
+		up, _, ok := resolveModelID(tc.input, tc.effort)
+		if ok != tc.ok {
+			t.Errorf("model %q ok got %v, want %v", tc.input, ok, tc.ok)
+		}
+		if ok && up != tc.expected {
+			t.Errorf("model %q (effort=%q) got %q, want %q", tc.input, tc.effort, up, tc.expected)
+		}
+	}
 }
 
 // TestSessionIDDerivation sessionId 依赖维度与"同输入同输出"

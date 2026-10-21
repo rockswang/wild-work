@@ -50,7 +50,6 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -175,20 +174,14 @@ func NewClient() *http.Client { return &http.Client{Timeout: 30 * time.Second} }
 // （2026-10-17 现场：用户照着旧文案设了变量仍然失败——既没说值从哪来，也没说回调地址要登记）。
 var ErrOAuthClientMissing = errors.New(
 	"未获取到 Google OAuth 客户端凭据（点「＋Gemini」失败的直接原因）：" + gemini.EnvClientID +
-		" 与 " + gemini.EnvClientSecret + " 均未设置，且本机未找到可提取的官方 CLI：\n" +
-		"· 二选一即可：① 安装官方 CLI —— npm install -g @google/gemini-cli（或 @google/antigravity），" +
-		"装完点「取消」再重新点「＋Gemini」；② 自建 OAuth 客户端 —— 在 console.cloud.google.com 建「桌面应用」类型客户端，" +
-		"并把回调地址登记为 http://" + gemini.RedirectHost + ":" + strconv.Itoa(gemini.DefaultCallbackPort) + gemini.CallbackPath +
-		"（⚠️ 必须写 localhost，不能写 127.0.0.1；默认用随机端口，该端口是端口被占时的兜底），" +
-		"再把拿到的两枚值设为上述环境变量后**重启本工具**（凭据只在进程启动时读取一次）。\n" +
-		"· 已查过的本机位置：" + strings.Join(gemini.OAuthClientSearchRoots(), "；") + "\n" +
+		" 与 " + gemini.EnvClientSecret + " 均未设置且内置凭据被禁用。\n" +
+		"· 若自建 OAuth 客户端：在 console.cloud.google.com 建「桌面应用」类型客户端，" +
+		"并把回调地址登记为 " + gemini.AntigravityRedirectURI +
+		"，再把拿到的两枚值设为上述环境变量后重启本工具。\n" +
 		"· 若要核对环境变量是否真的生效，可设置 " + EnvDiagnoseOnStart + "=1 后重启查看日志。")
 
 // EnvDiagnoseOnStart 置为 "1" 时，本工具在每次发起的登录里记一行诊断日志
-// （凭据是否就绪、取自 env 还是本机 CLI、扫描过哪些位置）。**不含任何凭据值**。
-//
-// 为什么需要它：凭据解析结果被 sync.Once 缓存，用户改了环境变量却没重启时，
-// 面板上只会重复同一条「缺凭据」——没有日志就无法区分「没设置」与「设置了但没生效」。
+// （凭据是否就绪、取自 env 还是内置凭据）。**不含任何凭据值**。
 const EnvDiagnoseOnStart = "WILDWORK_GEMINI_DIAG"
 
 // logOAuthDiagnosis 在 EnvDiagnoseOnStart=1 时记一行凭据诊断（**绝不含凭据值**）。
@@ -196,14 +189,13 @@ func logOAuthDiagnosis(status string) {
 	if strings.TrimSpace(os.Getenv(EnvDiagnoseOnStart)) != "1" {
 		return
 	}
-	source := "本机 CLI"
+	source := "内置 Antigravity 凭据"
 	if strings.TrimSpace(os.Getenv(gemini.EnvClientID)) != "" ||
 		strings.TrimSpace(os.Getenv(gemini.EnvClientSecret)) != "" {
-		source = "环境变量（或环境变量 + 本机 CLI 互补）"
+		source = "环境变量"
 	}
-	log.Printf("gemini 登录诊断：OAuth 客户端凭据%s；来源=%s；client_id 长度=%d，client_secret 长度=%d；已扫描位置=%s",
-		status, source, len(gemini.ClientID()), len(gemini.ClientSecret()),
-		strings.Join(gemini.OAuthClientSearchRoots(), " | "))
+	log.Printf("gemini 登录诊断：OAuth 客户端凭据%s；来源=%s；client_id 长度=%d，client_secret 长度=%d",
+		status, source, len(gemini.ClientID()), len(gemini.ClientSecret()))
 }
 
 // ErrGoogleUnreachable Google OAuth 端点连接层不可达（DNS 失败 / 超时 / 连接被拒）。

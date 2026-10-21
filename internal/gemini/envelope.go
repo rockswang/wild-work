@@ -209,15 +209,13 @@ func buildInternalBody(raw []byte, project string) ([]byte, string, error) {
 		return nil, errCodeBadParams, err
 	}
 
-	// 模型：客户端 ID（可能带 `gemini/` 前缀）→ 目录裸名 → **必须**是本包唯一模型。
-	// ⚠️ 严格校验是刻意的（gemini.ts:520-554）：宽容放行会让写错模型名的请求静默跑出
-	// 3.8 的答案（不报错、不降级、答案就是不对，极难排查）。
+	// 模型：客户端 ID（可能带 `gemini/` 前缀）→ 映射为上游模型与档位。
 	rawModel := jsonString(in["model"])
-	catalogID := canonicalModelID(upstreamModelName(rawModel))
-	if catalogID != ModelFlash {
-		return nil, errCodeBadParams, fmt.Errorf("模型 %q 不在本 provider 目录中（仅支持 %s）", rawModel, ModelFlash)
+	effort := jsonString(in["reasoning_effort"])
+	upstreamModel, tier, ok := resolveModelID(upstreamModelName(rawModel), effort)
+	if !ok {
+		return nil, errCodeBadParams, fmt.Errorf("模型 %q 不在本 provider 目录中", rawModel)
 	}
-	tier := tierOf(jsonString(in["reasoning_effort"]))
 
 	contents, sysTexts, err := translateMessages(in["messages"])
 	if err != nil {
@@ -247,7 +245,7 @@ func buildInternalBody(raw []byte, project string) ([]byte, string, error) {
 	}
 
 	out, err := marshalEnvelope(envelope{
-		Model:     ModelFlash + "-" + tier, // 档位后缀 = 上游准入钥匙（协议 §2.4）
+		Model:     upstreamModel, // 上游模型名称（包含必要的档位后缀或映射名）
 		Project:   project,
 		Request:   req,
 		RequestID: newRequestID(),
