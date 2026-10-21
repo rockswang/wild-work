@@ -363,6 +363,13 @@ GOOS=darwin GOARCH=arm64 go build -tags devdump -o dist/wild-work-darwin ./cmd/w
 GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -tags devdump -o dist/wild-work-linux ./cmd/wild-work
 ```
 
+> **Windows 只构建一份**：`dist/wild-work-windows-amd64.exe` 是指向 `dist/wild-work.exe`
+> 的 **symlink**（宿主机侧真链接；经 VBox 共享盘看是「解析后的普通文件」，`rm` 还会被拒）。
+> 所以 Windows 产物**只需**上面那条 `-o dist/wild-work.exe`，第二个名字自动跟随；
+> **不要**再 `go build -o dist/wild-work-windows-amd64.exe`（会透过链接写同一个文件，
+> 白编译一次，且两次构建的 VCS 戳可能不同、把自己吓一跳）。
+> 判据：`sha256sum dist/wild-work.exe dist/wild-work-windows-amd64.exe` 两个值必须相同。
+
 构建后核对版本号已进二进制（防止拿到旧文件）：
 
 ```bash
