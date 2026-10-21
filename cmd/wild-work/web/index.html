@@ -341,6 +341,11 @@
         <div class="row">
           <label class="lbl wide">签到时间</label>
           <div id="timesBox" class="times"></div>
+          <span id="timeEditor" class="time-editor" hidden>
+            <input type="time" id="timePicker" class="input time-pick" step="60">
+            <button class="btn small primary" id="btnTimeOk">确定</button>
+            <button class="btn small" id="btnTimeCancel">取消</button>
+          </span>
           <button class="icon-btn" id="btnAddTime" title="增加一个签到时间">＋</button>
         </div>
         <div class="hint">保活 22:00 自动 · 下次 <span id="nextCheckin">-</span></div>

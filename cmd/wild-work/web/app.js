@@ -1305,10 +1305,28 @@ function delTime(t) {
 }
 
 function addTime() {
-  const times = (state.checkin_times || []).slice();
+  // 点「＋」不再**直接**塞入当前时刻（旧行为：想加 21:30 只能先加「现在」再删，
+  // 用户 2026-10-21 报「签到时间添加没法手动选」）。改为就地展开一个原生
+  // <input type="time">，选好再点「确定」；取消 / Esc / 点别处即收起，且不发请求。
+  const box = $("timeEditor");
+  if (!box.hidden) { closeTimeEditor(); return; }
   const now = new Date();
-  const next = `${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}`;
-  if (!times.includes(next)) times.push(next);
+  $("timePicker").value = `${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}`;
+  box.hidden = false;
+  $("timePicker").focus();
+}
+
+function closeTimeEditor() {
+  $("timeEditor").hidden = true;
+}
+
+function commitTime() {
+  const v = ($("timePicker").value || "").trim();
+  if (!v) { toast("请先选择时间"); return; }
+  const times = (state.checkin_times || []).slice();
+  if (times.includes(v)) { toast(`${v} 已在列表中`); closeTimeEditor(); return; }
+  times.push(v);
+  closeTimeEditor();
   saveTimes(times.sort());
 }
 
@@ -1413,6 +1431,7 @@ function openSettings() {
 }
 
 function closeSettings() {
+  closeTimeEditor(); // 弹层关掉时不留半开的时间选择器
   $("settingsOverlay").classList.add("hidden");
 }
 
@@ -1711,6 +1730,20 @@ function bind() {
   $("btnCheckinAll").onclick = checkinAll;
   $("btnRefreshAll").onclick = refreshAll;
   $("btnAddTime").onclick = addTime;
+  $("btnTimeOk").onclick = commitTime;
+  $("btnTimeCancel").onclick = closeTimeEditor;
+  $("timePicker").onkeydown = (e) => {
+    if (e.key === "Enter") { e.preventDefault(); commitTime(); }
+    else if (e.key === "Escape") { e.preventDefault(); closeTimeEditor(); }
+  };
+  // 点选择器之外的地方即收起（与其它浮层同口径：不落库、不留半开状态）
+  document.addEventListener("click", (e) => {
+    const ed = $("timeEditor");
+    if (ed.hidden) return;
+    const t = e.target;
+    if (ed.contains(t) || t === $("btnAddTime")) return;
+    closeTimeEditor();
+  });
   $("btnCopyUrl").onclick = copyUrl;
   $("btnCancelLogin").onclick = cancelLogin;
   $("btnRefreshFees").onclick = refreshFees;

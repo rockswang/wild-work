@@ -260,6 +260,10 @@ body {
 .time-chip:hover { background: #dbeafe; text-decoration: line-through; }
 .icon-btn { border: 1px dashed var(--border); background: transparent; color: var(--muted); width: 30px; height: 30px; border-radius: 8px; cursor: pointer; font-size: 16px; }
 .icon-btn:hover { color: var(--primary); border-color: var(--primary); }
+/* 就地时间选择器（点「＋」展开；选完确定才写盘，取消/空白不发请求） */
+.time-editor { display: inline-flex; align-items: center; gap: 6px; }
+.time-editor[hidden] { display: none; }
+.time-pick { width: 116px; padding: 5px 8px; font-size: 13px; }
 
 /* 费率表 */
 .fees { font-size: 13px; }
