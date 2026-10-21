@@ -60,7 +60,7 @@
 | R13–R15 | 三接口兼容用 `internal/gateway` 边缘层 + in-process（`io.Pipe`）；`model` 显式传参；Responses/Anthropic 规范形状 |
 | R16 | 无账号渠道（oczen）不建 auth、不进 `reloadAccounts`、不参与账号级惩罚 |
 | R17 | 用量/积分**双流水分口径**（`ledger`），不强关联不折算 |
-| R18 | ~~临期阈值可配（默认 24h，下限 24h）~~ **已被 R112 取代（2026-10-20）：设置项、`config.schedule.expiring_threshold_hours`、`POST /api/config/expiring_days` 已全部删除** |
+| R18 | ~~临期阈值可配（默认 24h，下限 24h）~~ **路由作用已被 R112 取代（2026-10-20）；本仓保留设置项与 `POST /api/config/expiring_days`，但只决定面板「临期」展示窗口（B 决策，面板仍是 v2.9.0 版式）** |
 | R19 | TraeWork 专用池判据仅 `available_endpoint==1`（pid==209 已撤回） |
 | R20–R21 | 千问办公 body 必带 `business` 段；`expires_in` 单位是**秒**，`expiresAt` 可用 JWT `exp` 校正 |
 | R22–R33 | 智谱清言：网页版私有接口 + CDP 自动登录；签到=保活对话；新号额度需 App 登录；SSE 是增量 delta；模型名带 `:moe_53f` 后缀 |
