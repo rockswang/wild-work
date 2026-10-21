@@ -5,6 +5,7 @@
 package gemini
 
 import (
+	"encoding/json"
 	"strings"
 
 	"wild-work/internal/provider"
@@ -188,8 +189,58 @@ func thinkingBudget(tier string) int64 {
 	}
 }
 
+// isDiscoverableAgyModelID 判断模型是否可作为聊天模型被客户端发现和使用。
+// 规则参考 OmniRoute isDiscoverableAgyModelId：
+// 排除 internal 内部调试模型、chat_ 前缀、tab_ 前缀、_weekly 配额桶、多媒体/嵌入模型以及退役废弃模型。
+func isDiscoverableAgyModelID(id string) bool {
+	s := strings.TrimSpace(id)
+	if s == "" {
+		return false
+	}
+	lower := strings.ToLower(s)
+	if strings.HasPrefix(lower, "chat_") || strings.HasPrefix(lower, "tab_") || strings.HasSuffix(lower, "_weekly") {
+		return false
+	}
+	switch lower {
+	case "tab_flash_lite_preview", "tab_jump_flash_lite_preview",
+		"gemini-3-pro-preview", "gemini-3.1-pro",
+		"gemini-3.7-flash", "gemini-3.7-flash-high", "gemini-3.7-flash-medium", "gemini-3.7-flash-low",
+		"gemini-3.6-flash-high", "gemini-3.6-flash-medium", "gemini-3.6-flash-low",
+		"gemini-3-flash-agent", "gemini-3.5-flash", "gemini-3.5-flash-extra-low", "gemini-3.5-flash-low",
+		"gemini-3.5-flash-high", "gemini-3.5-flash-medium", "gemini-3.5-flash-preview",
+		"gemini-2.5-pro", "gemini-2.5-flash-thinking", "gemini-2.5-flash", "gemini-2.5-flash-lite",
+		"gemini-2.5-computer-use-preview-10-2025":
+		return false
+	}
+	// 排除图像、视频、音频、嵌入等非 chat 模型
+	for _, kw := range []string{"image", "imagen", "audio", "tts", "embedding", "embed", "video", "veo"} {
+		if strings.Contains(lower, kw) {
+			return false
+		}
+	}
+	return true
+}
+
+// formatDisplayName 为远端拉取的模型生成友好展示名
+func formatDisplayName(id, upstreamDisplayName string) string {
+	if upstreamDisplayName != "" && upstreamDisplayName != id {
+		return upstreamDisplayName
+	}
+	for _, sm := range StaticModels() {
+		if strings.EqualFold(sm.ID, id) {
+			return sm.Name
+		}
+	}
+	return id
+}
+
 // resolveModelID 将用户传入的模型 ID（可能带档位后缀或别名）映射为上游接受的模型 ID 和对应档位。
 func resolveModelID(rawID, effort string) (upstreamModel string, resolvedTier string, ok bool) {
+	return resolveModelIDWithCatalog(rawID, effort, nil)
+}
+
+// resolveModelIDWithCatalog 支持结合动态拉取的远端目录进行解析。
+func resolveModelIDWithCatalog(rawID, effort string, extraModels []provider.ModelInfo) (upstreamModel string, resolvedTier string, ok bool) {
 	s := trimSpace(rawID)
 	tier := tierOf(effort)
 
@@ -204,14 +255,24 @@ func resolveModelID(rawID, effort string) (upstreamModel string, resolvedTier st
 		}
 	}
 
-	// 2. 处理别名与带档位后缀的 gemini-3.8-flash
+	// 2. 匹配动态拉取的模型
+	for _, m := range extraModels {
+		if strings.EqualFold(m.ID, s) {
+			if m.ID == ModelFlash {
+				return ModelFlash + "-" + tier, tier, true
+			}
+			return m.ID, tier, true
+		}
+	}
+
+	// 3. 处理别名与带档位后缀的 gemini-3.8-flash
 	for _, t := range []string{TierLow, TierMedium, TierHigh, TierTiered} {
 		if strings.EqualFold(s, ModelFlash+"-"+t) {
 			return ModelFlash + "-" + t, t, true
 		}
 	}
 
-	// 3. 常见别名映射（参考 OmniRoute ANTIGRAVITY_MODEL_ALIASES）
+	// 4. 常见别名映射（参考 OmniRoute ANTIGRAVITY_MODEL_ALIASES）
 	switch strings.ToLower(s) {
 	case "gemini-3.7-flash", "gemini-3.7-flash-high", "gemini-3.7-flash-medium", "gemini-3.7-flash-low":
 		return "gemini-3.7-flash-tiered", tier, true
@@ -246,4 +307,109 @@ func canonicalModelID(id string) string {
 // （同 minimax.upstreamModelName 的取舍）。
 func upstreamModelName(id string) string {
 	return trimSpace(strings.TrimPrefix(trimSpace(id), Kind.String()+"/"))
+}
+
+// rawModelItem 远端 /v1internal:fetchAvailableModels 返回的模型项
+type rawModelItem struct {
+	ID          string `json:"id"`
+	DisplayName string `json:"displayName"`
+	IsInternal  bool   `json:"isInternal"`
+}
+
+// rawModelsEnvelope fetchAvailableModels 响应解析（兼容对象 map 与列表数组）
+type rawModelsEnvelope struct {
+	Models map[string]rawModelItem `json:"models"`
+}
+
+// parseAvailableModelsResponse 解析上游模型响应
+func parseAvailableModelsResponse(raw []byte) []provider.ModelInfo {
+	if len(raw) == 0 {
+		return nil
+	}
+	var env rawModelsEnvelope
+	if err := json.Unmarshal(raw, &env); err == nil && len(env.Models) > 0 {
+		out := make([]provider.ModelInfo, 0, len(env.Models))
+		for id, m := range env.Models {
+			if m.IsInternal {
+				continue
+			}
+			realID := id
+			if realID == "" {
+				realID = m.ID
+			}
+			if !isDiscoverableAgyModelID(realID) {
+				continue
+			}
+			displayName := m.DisplayName
+			if displayName == "" {
+				displayName = realID
+			}
+			out = append(out, makeModelInfo(realID, displayName))
+		}
+		return out
+	}
+
+	// 备选兼容：直接是 rawModelItem 数组或 {"models": [...]}
+	var altEnv struct {
+		Models []rawModelItem `json:"models"`
+	}
+	if err := json.Unmarshal(raw, &altEnv); err == nil && len(altEnv.Models) > 0 {
+		out := make([]provider.ModelInfo, 0, len(altEnv.Models))
+		for _, m := range altEnv.Models {
+			if m.IsInternal || !isDiscoverableAgyModelID(m.ID) {
+				continue
+			}
+			out = append(out, makeModelInfo(m.ID, m.DisplayName))
+		}
+		return out
+	}
+
+	return nil
+}
+
+// makeModelInfo 构造标准的 ModelInfo
+func makeModelInfo(id, displayName string) provider.ModelInfo {
+	info := provider.ModelInfo{
+		ID:             id,
+		Name:           formatDisplayName(id, displayName),
+		ContextWindow:  ContextWindow,
+		MaxTokens:      MaxOutputTokens,
+		ContextFromAPI: true,
+		SupportsImages: true,
+		SupportsTools:  true,
+	}
+	lower := strings.ToLower(id)
+	if strings.Contains(lower, "flash") || strings.Contains(lower, "pro") || strings.Contains(lower, "thinking") || strings.Contains(lower, "argon") || strings.Contains(lower, "sonnet") || strings.Contains(lower, "opus") || strings.Contains(lower, "oss") {
+		info.SupportsReasoning = true
+	}
+	if id == ModelFlash || id == "gemini-3.7-flash-tiered" {
+		info.ReasoningEfforts = []string{TierLow, TierMedium, TierHigh, TierTiered}
+		info.DefaultReasoningEffort = TierMedium
+		canDisable := false
+		info.CanDisableThinking = &canDisable
+	}
+	return info
+}
+
+// mergeModelCatalog 合并动态拉取的模型与静态兜底表
+func mergeModelCatalog(dynamic, fallback []provider.ModelInfo) []provider.ModelInfo {
+	seen := map[string]bool{}
+	out := make([]provider.ModelInfo, 0, len(dynamic)+len(fallback))
+	for _, m := range dynamic {
+		id := strings.TrimSpace(m.ID)
+		if id == "" || seen[strings.ToLower(id)] {
+			continue
+		}
+		seen[strings.ToLower(id)] = true
+		out = append(out, m)
+	}
+	for _, m := range fallback {
+		id := strings.TrimSpace(m.ID)
+		if id == "" || seen[strings.ToLower(id)] {
+			continue
+		}
+		seen[strings.ToLower(id)] = true
+		out = append(out, m)
+	}
+	return out
 }

@@ -32,6 +32,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"wild-work/internal/provider"
 )
 
 // ---------------------------------------------------------------------------
@@ -204,6 +206,10 @@ func newRequestID() string {
 // 调用方据此产出**本地 400**（而不是把错误当传输层错误去惩罚账号——那是为客户端的问题
 // 罚健康账号，见 minimax.ChatStream 的同款取舍）。
 func buildInternalBody(raw []byte, project string) ([]byte, string, error) {
+	return buildInternalBodyWithModels(raw, project, nil)
+}
+
+func buildInternalBodyWithModels(raw []byte, project string, extraModels []provider.ModelInfo) ([]byte, string, error) {
 	in, err := decodeRequest(raw)
 	if err != nil {
 		return nil, errCodeBadParams, err
@@ -212,7 +218,7 @@ func buildInternalBody(raw []byte, project string) ([]byte, string, error) {
 	// 模型：客户端 ID（可能带 `gemini/` 前缀）→ 映射为上游模型与档位。
 	rawModel := jsonString(in["model"])
 	effort := jsonString(in["reasoning_effort"])
-	upstreamModel, tier, ok := resolveModelID(upstreamModelName(rawModel), effort)
+	upstreamModel, tier, ok := resolveModelIDWithCatalog(upstreamModelName(rawModel), effort, extraModels)
 	if !ok {
 		return nil, errCodeBadParams, fmt.Errorf("模型 %q 不在本 provider 目录中", rawModel)
 	}

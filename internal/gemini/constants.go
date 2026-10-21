@@ -43,6 +43,8 @@ const (
 	EpQuotaSummary = "/v1internal:retrieveUserQuotaSummary"
 	// EpLoadCodeAssist 账号档位 / 项目探测路径。
 	EpLoadCodeAssist = "/v1internal:loadCodeAssist"
+	// EpFetchAvailableModels 远端模型目录与配额探测路径。
+	EpFetchAvailableModels = "/v1internal:fetchAvailableModels"
 
 	// LoadCodeAssistBody 探测请求体**逐字**常量（gemini.ts:97，content-length 恰为 38）。
 	// ⚠️ 刻意**不带** platform / pluginType / cloudaicompanionProject：多一个字段就可能被
