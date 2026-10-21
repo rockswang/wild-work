@@ -417,10 +417,10 @@ func (h *Handler) modelList() []map[string]any {
 
 // buildModelEntry 构造单条 /v1/models 条目。
 // OpenAI 官方仅规定 id/object/created/owned_by，未定义能力字段；
-// 多模态能力按 OpenRouter / llama.cpp 通行的 architecture.input_modalities 透传。
-// 上游模型列表接口未返回能力信息时，按惯例回退为 ["text"]。
-// 思考档位（issue #96）：按 Buddy2api v2.1.11 口径透传 reasoning 对象，
-// 上游未声明档位时整个对象不出现（不编造；supports_reasoning 同理不输出）。
+// 模态声明遵循 OpenRouter / llama.cpp 通行的 architecture.input_modalities 透传；
+// 推理能力与工具能力遵循 OpenRouter 原生推理网关规范透传 supported_parameters 与 reasoning 对象。
+// 思考强度（用户决议）：获取模型不再发一长串思考强度档位列表（supported_efforts），
+// 仅保留 mandatory / default_effort / can_disable_thinking 等原生标记，轻量且标准。
 func buildModelEntry(k provider.Kind, mi provider.ModelInfo) map[string]any {
 	// 对外 ID 与 provider.PublicModelID 同源：上游 ID 自带命名空间的渠道（cline 的 cline-free/*）
 	// 直接透传上游 ID，不再拼 `<渠道>/`（决议 R59；旧的 cline/cline-free/* 仍可路由）。
@@ -439,20 +439,33 @@ func buildModelEntry(k provider.Kind, mi provider.ModelInfo) map[string]any {
 		"input_modalities": mi.InputModalities(),
 		"modality":         mi.Modality(),
 	}
-	if len(mi.ReasoningEfforts) > 0 || mi.DefaultReasoningEffort != "" {
+
+	params := []string{"max_tokens", "temperature", "top_p"}
+	if mi.SupportsTools {
+		params = append(params, "tools", "tool_choice")
+	}
+
+	if mi.SupportsReasoning || len(mi.ReasoningEfforts) > 0 || mi.DefaultReasoningEffort != "" {
+		params = append(params, "reasoning", "include_reasoning")
+		if len(mi.ReasoningEfforts) > 0 || mi.DefaultReasoningEffort != "" {
+			params = append(params, "reasoning_effort")
+		}
 		reasoning := map[string]any{}
-		if len(mi.ReasoningEfforts) > 0 {
-			reasoning["supported_efforts"] = mi.ReasoningEfforts
+		if mi.CanDisableThinking != nil {
+			reasoning["mandatory"] = !(*mi.CanDisableThinking)
+			reasoning["can_disable_thinking"] = *mi.CanDisableThinking
+		} else {
+			reasoning["mandatory"] = true
 		}
 		if mi.DefaultReasoningEffort != "" {
 			reasoning["default_effort"] = mi.DefaultReasoningEffort
 		}
-		if mi.CanDisableThinking != nil {
-			reasoning["can_disable_thinking"] = *mi.CanDisableThinking
-		}
+		// 获取模型不再发一长串思考强度列表（supported_efforts）
 		entry["reasoning"] = reasoning
 		entry["supports_reasoning"] = true
 	}
+	entry["supported_parameters"] = params
+
 	return entry
 }
 

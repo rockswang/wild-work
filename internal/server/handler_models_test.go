@@ -82,7 +82,8 @@ func TestModelEntryTextOnly(t *testing.T) {
 // 原则：上游目录声明了档位才输出 reasoning 对象与 supports_reasoning；
 // 未声明时两者都不出现（不编造），保持与 /api/fees 面板同源。
 
-// TestModelEntryReasoning 带档位的模型应输出 reasoning 对象（Buddy2api v2.1.11 形状）。
+// TestModelEntryReasoning 对齐 OpenRouter 规范：具备推理能力时输出 reasoning 对象与 supported_parameters，
+// 且不再向客户端下发一长串思考强度档位列表（supported_efforts）。
 func TestModelEntryReasoning(t *testing.T) {
 	cd := true
 	mi := provider.ModelInfo{
@@ -107,9 +108,12 @@ func TestModelEntryReasoning(t *testing.T) {
 	if !ok {
 		t.Fatalf("缺少 reasoning 对象: %s", raw)
 	}
-	efforts, ok := r["supported_efforts"].([]any)
-	if !ok || len(efforts) != 3 || efforts[0] != "low" || efforts[2] != "max" {
-		t.Errorf("supported_efforts 应为 [low high max]，得到 %v", r["supported_efforts"])
+	// 用户决议：获取模型不要发一长串思考强度档位列表（supported_efforts）
+	if _, has := r["supported_efforts"]; has {
+		t.Errorf("获取模型不应再输出一长串 supported_efforts 列表，实际得到了: %v", r["supported_efforts"])
+	}
+	if r["mandatory"] != false {
+		t.Errorf("can_disable_thinking 为 true 时 mandatory 应为 false，得到 %v", r["mandatory"])
 	}
 	if r["default_effort"] != "high" {
 		t.Errorf("default_effort 应为 high，得到 %v", r["default_effort"])
@@ -117,30 +121,82 @@ func TestModelEntryReasoning(t *testing.T) {
 	if r["can_disable_thinking"] != true {
 		t.Errorf("can_disable_thinking 应为 true，得到 %v", r["can_disable_thinking"])
 	}
+
+	// OpenRouter 规范 supported_parameters 校验
+	params, ok := back["supported_parameters"].([]any)
+	if !ok {
+		t.Fatalf("缺少 supported_parameters 数组")
+	}
+	paramSet := map[string]bool{}
+	for _, p := range params {
+		if s, ok := p.(string); ok {
+			paramSet[s] = true
+		}
+	}
+	for _, expected := range []string{"reasoning", "include_reasoning", "reasoning_effort"} {
+		if !paramSet[expected] {
+			t.Errorf("supported_parameters 应包含 %q，实际为 %v", expected, params)
+		}
+	}
+
 	// id 带渠道前缀（其余字段不受影响）
 	if back["id"] != "workbuddy/glm-5.3" {
 		t.Errorf("id 应带渠道前缀，得到 %v", back["id"])
 	}
 }
 
-// TestModelEntryReasoningAbsent 上游未声明档位时不得输出 reasoning/supports_reasoning。
+// TestModelEntryReasoningAbsent 完全未具备推理能力时不输出 reasoning/supports_reasoning。
 func TestModelEntryReasoningAbsent(t *testing.T) {
-	cases := []provider.ModelInfo{
-		{ID: "plain"}, // 全未声明
-		{ID: "bool-only", SupportsReasoning: true}, // 只有 bool（旧数据形状），无档位列表
+	mi := provider.ModelInfo{ID: "plain"}
+	entry := buildModelEntry(provider.WorkBuddy, mi)
+	if _, has := entry["reasoning"]; has {
+		t.Errorf("%s 未具备推理能力时不应输出 reasoning 对象", mi.ID)
 	}
-	for _, mi := range cases {
-		entry := buildModelEntry(provider.WorkBuddy, mi)
-		if _, has := entry["reasoning"]; has {
-			t.Errorf("%s 未声明档位时不应输出 reasoning 对象", mi.ID)
-		}
-		if _, has := entry["supports_reasoning"]; has {
-			t.Errorf("%s 未声明档位时不应输出 supports_reasoning", mi.ID)
+	if _, has := entry["supports_reasoning"]; has {
+		t.Errorf("%s 未具备推理能力时不应输出 supports_reasoning", mi.ID)
+	}
+	if params, ok := entry["supported_parameters"].([]string); ok {
+		for _, p := range params {
+			if p == "reasoning" || p == "reasoning_effort" {
+				t.Errorf("%s 未具备推理能力时 supported_parameters 不应包含 %s", mi.ID, p)
+			}
 		}
 	}
 }
 
-// TestModelEntryReasoningMinimal 只有默认档没有列表（deepseek 系形状）也应输出。
+// TestModelEntryReasoningWithoutEfforts 原生推理模型（如 DeepSeek-R1，只有推理能力但无档位列表）也应标准输出 reasoning 标记。
+func TestModelEntryReasoningWithoutEfforts(t *testing.T) {
+	mi := provider.ModelInfo{ID: "deepseek-r1", SupportsReasoning: true}
+	entry := buildModelEntry(provider.WorkBuddy, mi)
+	if entry["supports_reasoning"] != true {
+		t.Fatalf("supports_reasoning 应为 true")
+	}
+	r, ok := entry["reasoning"].(map[string]any)
+	if !ok {
+		t.Fatalf("缺少 reasoning 对象")
+	}
+	if _, has := r["supported_efforts"]; has {
+		t.Errorf("不应输出 supported_efforts")
+	}
+	if r["mandatory"] != true {
+		t.Errorf("未声明可关闭时 mandatory 应默认为 true，得到 %v", r["mandatory"])
+	}
+	params, ok := entry["supported_parameters"].([]string)
+	if !ok {
+		t.Fatalf("缺少 supported_parameters")
+	}
+	hasReasoning := false
+	for _, p := range params {
+		if p == "reasoning" {
+			hasReasoning = true
+		}
+	}
+	if !hasReasoning {
+		t.Errorf("supported_parameters 应包含 reasoning")
+	}
+}
+
+// TestModelEntryReasoningMinimal 只有默认档没有列表也应输出。
 func TestModelEntryReasoningMinimal(t *testing.T) {
 	cd := false
 	mi := provider.ModelInfo{ID: "ds", SupportsReasoning: true, DefaultReasoningEffort: "high", CanDisableThinking: &cd}
@@ -160,5 +216,8 @@ func TestModelEntryReasoningMinimal(t *testing.T) {
 	}
 	if r["can_disable_thinking"] != false {
 		t.Errorf("can_disable_thinking 应为 false，得到 %v", r["can_disable_thinking"])
+	}
+	if r["mandatory"] != true {
+		t.Errorf("mandatory 应为 true，得到 %v", r["mandatory"])
 	}
 }
