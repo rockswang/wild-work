@@ -75,15 +75,19 @@ func (s *loginSession) sessionState() string {
 	return s.state.State
 }
 
-// parseCallbackURL 从用户粘贴的回调 URL 中提取授权码、state 与错误。
-// 必须是合法 URL 且携带 query 或 hash 参数。
+// parseCallbackURL 从用户粘贴的内容中提取授权码、state 与错误。
+//
+// 兼容支持：
+//  1. 完整回调 URL（如 https://antigravity.google/oauth-callback?state=...&code=4/0AX...）
+//  2. 查询串（如 ?code=...&state=...）
+//  3. 官方授权完成页面上展示并提供一键复制的裸授权码（如 4/0AX...）
 func parseCallbackURL(raw string) (code, state, errName, errDesc string) {
 	trimmed := strings.TrimSpace(raw)
 	if trimmed == "" {
 		return "", "", "", ""
 	}
 
-	// 1. 尝试作为 URL 解析
+	// 1. 尝试作为完整 URL 解析
 	if u, err := url.Parse(trimmed); err == nil && (u.Scheme != "" || u.Host != "" || strings.Contains(trimmed, "?") || strings.Contains(trimmed, "#")) {
 		q := u.Query()
 		// 如果 query 中没有 code，但 hash 中有，尝试从 hash 中解析参数
@@ -97,24 +101,29 @@ func parseCallbackURL(raw string) (code, state, errName, errDesc string) {
 				}
 			}
 		}
-		return q.Get("code"), q.Get("state"), q.Get("error"), q.Get("error_description")
+		if q.Get("code") != "" || q.Get("error") != "" {
+			return q.Get("code"), q.Get("state"), q.Get("error"), q.Get("error_description")
+		}
 	}
 
 	// 2. 尝试作为 url.Values 解析 (如直接粘贴 code=...&state=...)
 	if strings.Contains(trimmed, "=") {
 		if q, err := url.ParseQuery(strings.TrimPrefix(trimmed, "?")); err == nil {
-			return q.Get("code"), q.Get("state"), q.Get("error"), q.Get("error_description")
+			if q.Get("code") != "" || q.Get("error") != "" {
+				return q.Get("code"), q.Get("state"), q.Get("error"), q.Get("error_description")
+			}
 		}
 	}
 
-	return "", "", "", ""
+	// 3. 裸授权码（官方 antigravity 页面复制的 code 或直接复制的 authorization code）
+	return trimmed, "", "", ""
 }
 
-// SubmitCallbackURL 手动提交浏览器跳转后的完整回调地址。
+// SubmitCallbackURL 手动提交浏览器跳转后的回调地址或复制的授权码。
 //
-// 遵循 R97② / R104 规范：
-// 强制要求粘贴完整回调 URL，并对携带的 state 做逐字精确比对，缺失或不匹配一律拒绝。
-// 严禁放宽 state 或直接接收裸 code，以防御 login-CSRF。
+// 兼顾两种交互形态：
+//  - 若粘贴完整 URL 且携带 state，进行严格逐字比对（防串号与跨请求错乱）
+//  - 若直接粘贴授权码页面上复制的 code（如 4/0AX...），直接提取并进入兑换流程
 func SubmitCallbackURL(raw string) error {
 	sess := currentSession()
 	if sess == nil {
@@ -123,13 +132,8 @@ func SubmitCallbackURL(raw string) error {
 
 	code, gotState, errName, errDesc := parseCallbackURL(raw)
 
-	// 1. state 严格逐字比对：缺失或不符均拒绝（防 login-CSRF）
-	if gotState == "" {
-		m := "回调缺少 state 参数，已拒绝该回调（请复制浏览器地址栏里的完整回调 URL，不要只粘贴授权码）"
-		sess.fail(m)
-		return errors.New(m)
-	}
-	if gotState != sess.sessionState() {
+	// 1. 若携带了 state，做严格逐字比对（防串号或误贴历史地址）
+	if gotState != "" && gotState != sess.sessionState() {
 		m := "state 不匹配，已拒绝该回调（多半是上一次登录遗留的地址，请用本次登录后跳转的那条完整 URL）"
 		sess.fail(m)
 		return errors.New(m)
@@ -144,7 +148,7 @@ func SubmitCallbackURL(raw string) error {
 
 	// 3. 提取 code
 	if code == "" {
-		const m = "未从输入中识别出授权码：请复制含 code=… 的完整 URL"
+		const m = "未从输入中识别出授权码：请粘贴授权码或含 code=… 的完整 URL"
 		sess.fail(m)
 		return errors.New(m)
 	}

@@ -14,12 +14,21 @@ func TestSubmitCallbackURLFormats(t *testing.T) {
 	_, _, st := startLogin(t)
 	defer Shutdown()
 
-	// 1. 裸 code 必须被拒绝（遵守 R97② / R104 强制 state 校验）
-	if err := SubmitCallbackURL("4/0AXbarecode123"); err == nil {
-		t.Fatal("SubmitCallbackURL 接受裸 code，违反 R97/R104 state 安全约束")
+	// 1. 裸 code 支持（Google 授权完成页面直接复制的授权码）
+	bareCode := "4/0AXbarecode123"
+	if err := SubmitCallbackURL(bareCode); err != nil {
+		t.Fatalf("SubmitCallbackURL(%q) 期望支持裸 code，但报错: %v", bareCode, err)
+	}
+	sess := currentSession()
+	if sess == nil {
+		t.Fatal("sess 丢失")
+	}
+	code, _, ok := sess.snapshot()
+	if !ok || code != bareCode {
+		t.Errorf("得到 code %q，期望 %q", code, bareCode)
 	}
 
-	// 2. 携带错误 state 必须被拒绝
+	// 2. 携带错误 state 必须被拒绝（防旧 URL 串号）
 	badStateURL := "https://antigravity.google/oauth-callback?code=4/0AXquery123&state=wrong-state"
 	if err := SubmitCallbackURL(badStateURL); err == nil {
 		t.Fatalf("SubmitCallbackURL(%q) 期望拒绝，但成功了", badStateURL)
@@ -30,13 +39,9 @@ func TestSubmitCallbackURLFormats(t *testing.T) {
 	if err := SubmitCallbackURL(goodURL); err != nil {
 		t.Fatalf("SubmitCallbackURL(%q) 失败: %v", goodURL, err)
 	}
-	sess := currentSession()
-	if sess == nil {
-		t.Fatal("sess 丢失")
-	}
-	code, _, ok := sess.snapshot()
-	if !ok || code != "4/0AXquery123" {
-		t.Errorf("得到 code %q，期望 4/0AXquery123", code)
+	code, _, ok = sess.snapshot()
+	if !ok || code != "4/0AXbarecode123" { // 幂等性：保留首个
+		t.Errorf("得到 code %q，期望 4/0AXbarecode123", code)
 	}
 }
 

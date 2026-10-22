@@ -1999,8 +1999,7 @@ async function startLogin(channel, accountLabel) {
     if (r.manual_callback) {
       if (channel === "gemini") {
         $("lcCallbackHint").textContent =
-          "Google 授权完成后，请将跳转后的完整网页地址（含 ?code=...&state=...）"
-          + "复制粘贴到下方并提交，网关将自动校验并换取凭据。";
+          "Google 授权完成后，复制页面上显示的授权码或地址栏完整 URL 粘贴到下方，点击「提交回调」即可完成登录。";
       } else {
         $("lcCallbackHint").textContent =
           "登录完成后若浏览器停在一条打不开的 127.0.0.1 地址上（上游只允许回调到 127.0.0.1，"
