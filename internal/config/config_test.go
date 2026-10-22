@@ -1,8 +1,12 @@
 package config
 
 import (
+	"bytes"
+	"log"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"testing"
 )
 
@@ -19,6 +23,102 @@ func TestDefault(t *testing.T) {
 	}
 	if c.HardCreditDur.Hours() != 12 {
 		t.Errorf("hard=%v", c.HardCreditDur)
+	}
+	if c.Server.StickyMaxRequests != DefaultStickyMaxRequests {
+		t.Errorf("server.sticky_max_requests=%d, want %d", c.Server.StickyMaxRequests, DefaultStickyMaxRequests)
+	}
+}
+
+func TestStickyMaxRequestsLegacyConfigDefaultsWithoutWriting(t *testing.T) {
+	t.Setenv("WILDWORK_API_KEY", "")
+	dir := t.TempDir()
+	fp := filepath.Join(dir, "config.json")
+	before := []byte(`{"server":{"max_request_body_mb":128}}`)
+	if err := os.WriteFile(fp, before, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	c, err := Load(fp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Server.StickyMaxRequests != DefaultStickyMaxRequests {
+		t.Fatalf("缺字段应使用默认值 %d，实际 %d", DefaultStickyMaxRequests, c.Server.StickyMaxRequests)
+	}
+	after, err := os.ReadFile(fp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(after, before) {
+		t.Fatalf("加载配置不得主动写盘：\nbefore=%s\nafter=%s", before, after)
+	}
+
+	if err := Save(c, fp); err != nil {
+		t.Fatal(err)
+	}
+	saved, err := os.ReadFile(fp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(saved, []byte(`"sticky_max_requests": 50`)) {
+		t.Fatalf("用户保存配置后应写入默认值：%s", saved)
+	}
+}
+
+func TestStickyMaxRequestsExplicitValue(t *testing.T) {
+	t.Setenv("WILDWORK_API_KEY", "")
+	dir := t.TempDir()
+	fp := filepath.Join(dir, "config.json")
+	if err := os.WriteFile(fp, []byte(`{"server":{"sticky_max_requests":7}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c, err := Load(fp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Server.StickyMaxRequests != 7 {
+		t.Fatalf("显式配置应为 7，实际 %d", c.Server.StickyMaxRequests)
+	}
+}
+
+func TestStickyMaxRequestsInvalidFallsBackWithWarning(t *testing.T) {
+	for _, value := range []int{0, -3} {
+		t.Run(strconv.Itoa(value), func(t *testing.T) {
+			t.Setenv("WILDWORK_API_KEY", "")
+			dir := t.TempDir()
+			fp := filepath.Join(dir, "config.json")
+			raw := []byte(`{"server":{"sticky_max_requests":` + strconv.Itoa(value) + `}}`)
+			if err := os.WriteFile(fp, raw, 0o600); err != nil {
+				t.Fatal(err)
+			}
+
+			var logs bytes.Buffer
+			oldOutput, oldFlags := log.Writer(), log.Flags()
+			log.SetOutput(&logs)
+			log.SetFlags(0)
+			defer func() {
+				log.SetOutput(oldOutput)
+				log.SetFlags(oldFlags)
+			}()
+
+			c, err := Load(fp)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if c.Server.StickyMaxRequests != DefaultStickyMaxRequests {
+				t.Fatalf("非法值应回退为 %d，实际 %d", DefaultStickyMaxRequests, c.Server.StickyMaxRequests)
+			}
+			if got := logs.String(); !strings.Contains(got, "WARN config: server.sticky_max_requests=") {
+				t.Fatalf("非法值应记录可检索的 warning，实际日志：%q", got)
+			}
+			after, err := os.ReadFile(fp)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Equal(after, raw) {
+				t.Fatalf("非法值只在内存回退，不得加载时主动写盘：\nbefore=%s\nafter=%s", raw, after)
+			}
+		})
 	}
 }
 
@@ -48,6 +148,7 @@ func TestListenParsing(t *testing.T) {
 }
 
 func TestLoadFile(t *testing.T) {
+	t.Setenv("WILDWORK_API_KEY", "")
 	dir := t.TempDir()
 	fp := filepath.Join(dir, "c.json")
 	os.WriteFile(fp, []byte(`{"listen":"127.0.0.1:9999","api_key":"k","region":"cn"}`), 0o600)

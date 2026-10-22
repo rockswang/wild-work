@@ -90,6 +90,9 @@ type Config struct {
 	// MaxRequestBody 请求体上限（字节）。0 = 用 DefaultMaxRequestBody（128MiB）。
 	MaxRequestBody int64
 
+	// StickyMaxRequests 同渠道粘性账号连续成功使用多少次后轮换。0 = 默认 50。
+	StickyMaxRequests int
+
 	HardCooldown time.Duration
 	SoftCooldown time.Duration
 	ErrThreshold int
@@ -197,6 +200,9 @@ func NewHandler(cfg Config) *Handler {
 	if cfg.MaxRequestBody > 0 {
 		MaxRequestBody = cfg.MaxRequestBody
 	}
+	if cfg.StickyMaxRequests <= 0 {
+		cfg.StickyMaxRequests = config.DefaultStickyMaxRequests
+	}
 	h := &Handler{cfg: cfg, mux: http.NewServeMux(), sticky: make(map[string]*stickyEntry), ledger: cfg.Ledger, stats: cfg.Stats, fallbacks: cfg.ModelFallbacks, efforts: cfg.ReasoningEfforts}
 	h.mux.HandleFunc("POST /v1/chat/completions", h.withAuth(h.chatCompletions))
 	h.mux.HandleFunc("POST /v1/images/generations", h.withAuth(h.imagesGenerations))
@@ -232,8 +238,6 @@ func (h *Handler) stickyKey(kind provider.Kind) string { return kind.String() }
 //
 // 任一条件触发则降级为 PickForModel(model) 选新账号并重置粘性记录。
 func (h *Handler) pickWithSticky(rt *Runtime, model string) *auth.Auth {
-	const defaultMaxReqs = 50
-
 	h.stickyMu.RLock()
 	sticky := h.sticky[h.stickyKey(rt.Kind)]
 	h.stickyMu.RUnlock()
@@ -269,9 +273,9 @@ func (h *Handler) pickWithSticky(rt *Runtime, model string) *auth.Auth {
 
 	// 新建粘性记录
 	h.stickyMu.Lock()
-	h.sticky[h.stickyKey(rt.Kind)] = &stickyEntry{uid: acct.UID, maxReqs: defaultMaxReqs}
+	h.sticky[h.stickyKey(rt.Kind)] = &stickyEntry{uid: acct.UID, maxReqs: h.cfg.StickyMaxRequests}
 	h.stickyMu.Unlock()
-	log.Printf("new sticky route platform=%s uid=%s maxReqs=%d", rt.Kind, acct.UID, defaultMaxReqs)
+	log.Printf("new sticky route platform=%s uid=%s maxReqs=%d", rt.Kind, acct.UID, h.cfg.StickyMaxRequests)
 	return acct
 }
 

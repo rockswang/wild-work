@@ -685,15 +685,16 @@ func main() {
 		// 硬冷却截到每日发奖窗口（方案 B）：qwenwork 每日 00:00 UTC+8 发额度，
 		// 账本实测 00:01~00:20 到账。固定 12h 会把 19:07 的 402 锁到次日 07:07，
 		// 白锁 7 小时；按窗口截断后 00:30 即解冻，额度一到账就能用。
-		HardCooldownFor:  cfg.HardCooldownFor,
-		SoftCooldown:     cfg.SoftRateDur,
-		ErrThreshold:     cfg.Cooldown.ErrThresh,
-		ErrCooldown:      cfg.ErrCooldownDur,
-		ModelFallbacks:   cfg.ModelFallback,    // 启动时载入降级链（此前仅面板保存后热更新，重启即丢）
-		ReasoningEfforts: cfg.ReasoningEfforts, // 启动时载入思考强度映射（同上）
-		MaxRequestBody:   int64(cfg.Server.MaxRequestBodyMB) << 20, // 0 = server 默认 128MiB
-		WebUI:            sub,
-		AttachAPI:        appInst.HandleAPI,
+		HardCooldownFor:   cfg.HardCooldownFor,
+		SoftCooldown:      cfg.SoftRateDur,
+		ErrThreshold:      cfg.Cooldown.ErrThresh,
+		ErrCooldown:       cfg.ErrCooldownDur,
+		ModelFallbacks:    cfg.ModelFallback,                        // 启动时载入降级链（此前仅面板保存后热更新，重启即丢）
+		ReasoningEfforts:  cfg.ReasoningEfforts,                     // 启动时载入思考强度映射（同上）
+		MaxRequestBody:    int64(cfg.Server.MaxRequestBodyMB) << 20, // 0 = server 默认 128MiB
+		StickyMaxRequests: cfg.Server.StickyMaxRequests,
+		WebUI:             sub,
+		AttachAPI:         appInst.HandleAPI,
 	})
 	inner.SetCustomRuntimes(initCustomServerRts)
 

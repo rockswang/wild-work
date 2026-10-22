@@ -22,7 +22,8 @@
     "timeout_seconds": 120
   },
   "server": {
-    "max_request_body_mb": 128
+    "max_request_body_mb": 128,
+    "sticky_max_requests": 50
   },
   "login": {
     "lobsterai_callback_port": 0

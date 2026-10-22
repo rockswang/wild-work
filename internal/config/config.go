@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net"
 	"os"
 	"path/filepath"
@@ -149,6 +150,10 @@ type Config struct {
 		// 多张截图的 base64 会线性累积；gateway 转发前会把图缩到 1568px/JPEG，
 		// 所以这个上限只需容纳**客户端原始体**，不代表上游会收到这么大的包（issue #176）。
 		MaxRequestBodyMB int `json:"max_request_body_mb,omitempty"`
+
+		// StickyMaxRequests 同一渠道粘性账号连续成功使用多少次后轮换。
+		// 默认 50；非法值回退默认值，不阻断启动。
+		StickyMaxRequests int `json:"sticky_max_requests"`
 	} `json:"server"`
 
 	// Login 登录流程的可调项。
@@ -248,6 +253,9 @@ type ModelFallbackRule struct {
 	To   []string `json:"to"`
 }
 
+// DefaultStickyMaxRequests 粘性路由的默认轮换阈值。
+const DefaultStickyMaxRequests = 50
+
 // Default 默认配置。
 func Default() *Config {
 	c := &Config{
@@ -269,6 +277,7 @@ func Default() *Config {
 	c.Schedule.CheckinTimes = []string{"09:00", "21:00"}
 	c.Schedule.KeepaliveHours = []int{22}
 	c.Upstream.TimeoutSeconds = 120
+	c.Server.StickyMaxRequests = DefaultStickyMaxRequests
 	c.Compat.DefaultChannel = "workbuddy"
 	c.Compat.MaxTokensCap = 32000
 	c.Features.LoopGuard = true // 思考链死循环检测默认开启（面板可关）
@@ -519,6 +528,11 @@ func (c *Config) normalize() error {
 	}
 	if c.Server.MaxRequestBodyMB > 1024 {
 		c.Server.MaxRequestBodyMB = 1024
+	}
+	if c.Server.StickyMaxRequests <= 0 {
+		log.Printf("WARN config: server.sticky_max_requests=%d invalid, fallback=%d",
+			c.Server.StickyMaxRequests, DefaultStickyMaxRequests)
+		c.Server.StickyMaxRequests = DefaultStickyMaxRequests
 	}
 	if c.Listen.Port <= 0 {
 		c.Listen.Port = 7863
