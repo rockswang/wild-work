@@ -33,8 +33,8 @@ func StaticModels() []provider.ModelInfo {
 			CanDisableThinking:     &canDisableThinking,
 		},
 		{
-			ID:                     "gemini-3.7-flash-tiered",
-			Name:                   "Gemini 3.7 Flash (Tiered)",
+			ID:                     "gemini-3.7-flash",
+			Name:                   "Gemini 3.7 Flash",
 			ContextWindow:          ContextWindow,
 			MaxTokens:              MaxOutputTokens,
 			ContextFromAPI:         false,
@@ -46,24 +46,16 @@ func StaticModels() []provider.ModelInfo {
 			CanDisableThinking:     &canDisableThinking,
 		},
 		{
-			ID:                     "gemini-pro-agent",
-			Name:                   "Gemini 3.1 Pro (High)",
+			ID:                     "gemini-3.1-pro",
+			Name:                   "Gemini 3.1 Pro",
 			ContextWindow:          ContextWindow,
 			MaxTokens:              MaxOutputTokens,
 			ContextFromAPI:         false,
 			SupportsImages:         true,
 			SupportsReasoning:      true,
 			SupportsTools:          true,
-		},
-		{
-			ID:                     "gemini-3.1-pro-low",
-			Name:                   "Gemini 3.1 Pro (Low)",
-			ContextWindow:          ContextWindow,
-			MaxTokens:              MaxOutputTokens,
-			ContextFromAPI:         false,
-			SupportsImages:         true,
-			SupportsReasoning:      true,
-			SupportsTools:          true,
+			ReasoningEfforts:       []string{TierLow, TierHigh},
+			DefaultReasoningEffort: TierHigh,
 		},
 		{
 			ID:                     "gemini-3.1-flash-lite",
@@ -73,6 +65,18 @@ func StaticModels() []provider.ModelInfo {
 			ContextFromAPI:         false,
 			SupportsImages:         true,
 			SupportsTools:          true,
+		},
+		{
+			ID:                     "gemini-4-argon",
+			Name:                   "Gemini 4 Argon",
+			ContextWindow:          ContextWindow,
+			MaxTokens:              MaxOutputTokens,
+			ContextFromAPI:         false,
+			SupportsImages:         true,
+			SupportsReasoning:      true,
+			SupportsTools:          true,
+			ReasoningEfforts:       []string{TierLow, TierMedium, TierHigh},
+			DefaultReasoningEffort: TierMedium,
 		},
 		{
 			ID:                     "claude-sonnet-4-6",
@@ -96,63 +100,39 @@ func StaticModels() []provider.ModelInfo {
 			SupportsTools:          true,
 		},
 		{
-			ID:                     "gpt-oss-120b-medium",
-			Name:                   "GPT-OSS 120B (Medium)",
+			ID:                     "claude-opus-5-5",
+			Name:                   "Claude Opus 5.5",
+			ContextWindow:          ContextWindow,
+			MaxTokens:              MaxOutputTokens,
+			ContextFromAPI:         false,
+			SupportsImages:         true,
+			SupportsReasoning:      true,
+			SupportsTools:          true,
+			ReasoningEfforts:       []string{TierHigh},
+			DefaultReasoningEffort: TierHigh,
+		},
+		{
+			ID:                     "claude-sonnet-5-5",
+			Name:                   "Claude Sonnet 5.5",
+			ContextWindow:          ContextWindow,
+			MaxTokens:              MaxOutputTokens,
+			ContextFromAPI:         false,
+			SupportsImages:         true,
+			SupportsReasoning:      true,
+			SupportsTools:          true,
+			ReasoningEfforts:       []string{TierHigh},
+			DefaultReasoningEffort: TierHigh,
+		},
+		{
+			ID:                     "gpt-oss-120b",
+			Name:                   "GPT-OSS 120B",
 			ContextWindow:          131072,
 			MaxTokens:              32768,
 			ContextFromAPI:         false,
 			SupportsReasoning:      true,
 			SupportsTools:          true,
-		},
-		{
-			ID:                     "gemini-4-argon-high",
-			Name:                   "Gemini 4 Argon (High)",
-			ContextWindow:          ContextWindow,
-			MaxTokens:              MaxOutputTokens,
-			ContextFromAPI:         false,
-			SupportsImages:         true,
-			SupportsReasoning:      true,
-			SupportsTools:          true,
-		},
-		{
-			ID:                     "gemini-4-argon-medium",
-			Name:                   "Gemini 4 Argon (Medium)",
-			ContextWindow:          ContextWindow,
-			MaxTokens:              MaxOutputTokens,
-			ContextFromAPI:         false,
-			SupportsImages:         true,
-			SupportsReasoning:      true,
-			SupportsTools:          true,
-		},
-		{
-			ID:                     "gemini-4-argon-low",
-			Name:                   "Gemini 4 Argon (Low)",
-			ContextWindow:          ContextWindow,
-			MaxTokens:              MaxOutputTokens,
-			ContextFromAPI:         false,
-			SupportsImages:         true,
-			SupportsReasoning:      true,
-			SupportsTools:          true,
-		},
-		{
-			ID:                     "claude-opus-5-5-high",
-			Name:                   "Claude Opus 5.5 (High)",
-			ContextWindow:          ContextWindow,
-			MaxTokens:              MaxOutputTokens,
-			ContextFromAPI:         false,
-			SupportsImages:         true,
-			SupportsReasoning:      true,
-			SupportsTools:          true,
-		},
-		{
-			ID:                     "claude-sonnet-5-5-high",
-			Name:                   "Claude Sonnet 5.5 (High)",
-			ContextWindow:          ContextWindow,
-			MaxTokens:              MaxOutputTokens,
-			ContextFromAPI:         false,
-			SupportsImages:         true,
-			SupportsReasoning:      true,
-			SupportsTools:          true,
+			ReasoningEfforts:       []string{TierMedium},
+			DefaultReasoningEffort: TierMedium,
 		},
 	}
 }
@@ -192,6 +172,7 @@ func thinkingBudget(tier string) int64 {
 // isDiscoverableAgyModelID 判断模型是否可作为聊天模型被客户端发现和使用。
 // 规则参考 OmniRoute isDiscoverableAgyModelId：
 // 排除 internal 内部调试模型、chat_ 前缀、tab_ 前缀、_weekly 配额桶、多媒体/嵌入模型以及退役废弃模型。
+// 同时排除具有基准模型的思考级别变体（如 -low, -medium, -high, -tiered, -agent），将其档位合并至基准模型中展示。
 func isDiscoverableAgyModelID(id string) bool {
 	s := strings.TrimSpace(id)
 	if s == "" {
@@ -201,13 +182,19 @@ func isDiscoverableAgyModelID(id string) bool {
 	if strings.HasPrefix(lower, "chat_") || strings.HasPrefix(lower, "tab_") || strings.HasSuffix(lower, "_weekly") {
 		return false
 	}
+	// 排除具有基准模型的思考级别变体（合并归入基准模型，由 ReasoningEfforts 统一表达）
 	switch lower {
 	case "tab_flash_lite_preview", "tab_jump_flash_lite_preview",
-		"gemini-3-pro-preview", "gemini-3.1-pro",
-		"gemini-3.7-flash", "gemini-3.7-flash-high", "gemini-3.7-flash-medium", "gemini-3.7-flash-low",
+		"gemini-3-pro-preview",
+		"gemini-3.8-flash-low", "gemini-3.8-flash-medium", "gemini-3.8-flash-high", "gemini-3.8-flash-tiered",
+		"gemini-3.7-flash-tiered", "gemini-3.7-flash-high", "gemini-3.7-flash-medium", "gemini-3.7-flash-low",
+		"gemini-4-argon-low", "gemini-4-argon-medium", "gemini-4-argon-high",
+		"gemini-3.1-pro-low", "gemini-pro-agent",
 		"gemini-3.6-flash-high", "gemini-3.6-flash-medium", "gemini-3.6-flash-low",
 		"gemini-3-flash-agent", "gemini-3.5-flash", "gemini-3.5-flash-extra-low", "gemini-3.5-flash-low",
 		"gemini-3.5-flash-high", "gemini-3.5-flash-medium", "gemini-3.5-flash-preview",
+		"gpt-oss-120b-medium",
+		"claude-opus-5-5-high", "claude-sonnet-5-5-high",
 		"gemini-2.5-pro", "gemini-2.5-flash-thinking", "gemini-2.5-flash", "gemini-2.5-flash-lite",
 		"gemini-2.5-computer-use-preview-10-2025":
 		return false
@@ -242,48 +229,64 @@ func resolveModelID(rawID, effort string) (upstreamModel string, resolvedTier st
 // resolveModelIDWithCatalog 支持结合动态拉取的远端目录进行解析。
 func resolveModelIDWithCatalog(rawID, effort string, extraModels []provider.ModelInfo) (upstreamModel string, resolvedTier string, ok bool) {
 	s := trimSpace(rawID)
+	lower := strings.ToLower(s)
 	tier := tierOf(effort)
 
-	// 1. 优先精确匹配静态表中的模型
-	for _, m := range StaticModels() {
-		if strings.EqualFold(m.ID, s) {
-			// 如果是 gemini-3.8-flash，上游需要拼接档位后缀（如 gemini-3.8-flash-medium）
-			if m.ID == ModelFlash {
-				return ModelFlash + "-" + tier, tier, true
-			}
-			return m.ID, tier, true
-		}
-	}
-
-	// 2. 匹配动态拉取的模型
-	for _, m := range extraModels {
-		if strings.EqualFold(m.ID, s) {
-			if m.ID == ModelFlash {
-				return ModelFlash + "-" + tier, tier, true
-			}
-			return m.ID, tier, true
-		}
-	}
-
-	// 3. 处理别名与带档位后缀的 gemini-3.8-flash
-	for _, t := range []string{TierLow, TierMedium, TierHigh, TierTiered} {
-		if strings.EqualFold(s, ModelFlash+"-"+t) {
-			return ModelFlash + "-" + t, t, true
-		}
-	}
-
-	// 4. 常见别名映射（参考 OmniRoute ANTIGRAVITY_MODEL_ALIASES）
-	switch strings.ToLower(s) {
-	case "gemini-3.7-flash", "gemini-3.7-flash-high", "gemini-3.7-flash-medium", "gemini-3.7-flash-low":
+	// 1. 特殊别名与基准模型解析映射
+	switch lower {
+	case "gemini-3.8-flash":
+		return ModelFlash + "-" + tier, tier, true
+	case "gemini-3.7-flash", "gemini-3.7-flash-tiered", "gemini-3.7-flash-high", "gemini-3.7-flash-medium", "gemini-3.7-flash-low":
 		return "gemini-3.7-flash-tiered", tier, true
-	case "gemini-3.1-pro-high":
-		return "gemini-pro-agent", tier, true
-	case "gpt-oss-120b":
-		return "gpt-oss-120b-medium", tier, true
+	case "gemini-4-argon":
+		t := tier
+		if t == TierTiered {
+			t = TierMedium
+		}
+		return "gemini-4-argon-" + t, t, true
+	case "gemini-3.1-pro":
+		if strings.EqualFold(tier, TierLow) {
+			return "gemini-3.1-pro-low", TierLow, true
+		}
+		return "gemini-pro-agent", TierHigh, true
+	case "gemini-3.1-pro-high", "gemini-pro-agent":
+		return "gemini-pro-agent", TierHigh, true
+	case "gemini-3.1-pro-low":
+		return "gemini-3.1-pro-low", TierLow, true
+	case "gpt-oss-120b", "gpt-oss-120b-medium":
+		return "gpt-oss-120b-medium", TierMedium, true
+	case "claude-opus-5-5", "claude-opus-5-5-high":
+		return "claude-opus-5-5-high", TierHigh, true
+	case "claude-sonnet-5-5", "claude-sonnet-5-5-high":
+		return "claude-sonnet-5-5-high", TierHigh, true
 	case "claude-3-7-sonnet", "gemini-claude-sonnet-4-5", "claude-sonnet-4-5":
 		return "claude-sonnet-4-6", tier, true
-	case "claude-opus-4-5-thinking", "gemini-claude-opus-4-5-thinking":
+	case "claude-opus-4-5-thinking", "gemini-claude-opus-4-5-thinking", "claude-opus-4-6":
 		return "claude-opus-4-6-thinking", tier, true
+	}
+
+	// 2. 带有已知思考档位后缀的直接请求（向前兼容：客户端直接传带后缀的名字，如 gemini-3.8-flash-high）
+	for _, t := range []string{TierLow, TierMedium, TierHigh, TierTiered} {
+		if strings.HasSuffix(lower, "-"+t) {
+			return s, t, true
+		}
+	}
+
+	// 3. 优先精确匹配静态表中的模型
+	for _, m := range StaticModels() {
+		if strings.EqualFold(m.ID, s) {
+			return m.ID, tier, true
+		}
+	}
+
+	// 4. 匹配动态拉取的模型
+	for _, m := range extraModels {
+		if strings.EqualFold(m.ID, s) {
+			if len(m.ReasoningEfforts) > 0 {
+				return m.ID + "-" + tier, tier, true
+			}
+			return m.ID, tier, true
+		}
 	}
 
 	return "", "", false

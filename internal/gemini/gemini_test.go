@@ -847,6 +847,14 @@ func TestResolveModelID(t *testing.T) {
 		{"gpt-oss-120b", "", "gpt-oss-120b-medium", true},
 		{"gpt-oss-120b-medium", "", "gpt-oss-120b-medium", true},
 		{"gemini-4-argon-high", "", "gemini-4-argon-high", true},
+		{"gemini-4-argon", "high", "gemini-4-argon-high", true},
+		{"gemini-4-argon", "low", "gemini-4-argon-low", true},
+		{"gemini-4-argon", "", "gemini-4-argon-medium", true},
+		{"gemini-3.1-pro", "low", "gemini-3.1-pro-low", true},
+		{"gemini-3.1-pro", "high", "gemini-pro-agent", true},
+		{"gemini-3.1-pro", "", "gemini-pro-agent", true},
+		{"claude-opus-5-5", "", "claude-opus-5-5-high", true},
+		{"claude-sonnet-5-5", "", "claude-sonnet-5-5-high", true},
 		{"unknown-model-xyz", "", "", false},
 	}
 
