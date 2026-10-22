@@ -41,5 +41,15 @@
   "custom_channels": [],
   "features": {
     "loop_guard": true
+  },
+  "updater": {
+    "enabled": true,
+    "auto_check": true,
+    "check_interval_hours": 6,
+    "repo": "rockswang/wild-work",
+    "download_proxies": [
+      "https://gh-proxy.com/",
+      "https://ghfast.top/"
+    ]
   }
 }

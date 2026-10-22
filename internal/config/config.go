@@ -227,6 +227,9 @@ type Config struct {
 	// CustomChannels 自定义第三方 OpenAI 兼容渠道列表（R66）。
 	CustomChannels []custom.ChannelConfig `json:"custom_channels,omitempty"`
 
+	// Updater 自动更新配置。
+	Updater UpdaterConfig `json:"updater"`
+
 	// 解析后
 	HardCreditDur  time.Duration `json:"-"`
 	SoftRateDur    time.Duration `json:"-"`
@@ -238,6 +241,15 @@ type Config struct {
 	DailyGrantEnabled bool `json:"-"`
 	// DailyGrantBufferDur 发奖窗口缓冲（默认 30m）。
 	DailyGrantBufferDur time.Duration `json:"-"`
+}
+
+// UpdaterConfig 自动更新相关配置。
+type UpdaterConfig struct {
+	Enabled            bool     `json:"enabled"`              // 是否启用更新检测，默认 true
+	AutoCheck          bool     `json:"auto_check"`           // 是否启动及后台定期自动检测，默认 true
+	CheckIntervalHours int      `json:"check_interval_hours"` // 检测间隔小时数，默认 6
+	Repo               string   `json:"repo"`                 // GitHub 仓库，默认 "rockswang/wild-work"
+	Proxies            []string `json:"download_proxies,omitempty"` // 公共加速代理前缀列表
 }
 
 // ModelFallbackRule 单条模型降级规则：From（"channel/model" 全路径）在其渠道内
@@ -272,6 +284,11 @@ func Default() *Config {
 	c.Compat.DefaultChannel = "workbuddy"
 	c.Compat.MaxTokensCap = 32000
 	c.Features.LoopGuard = true // 思考链死循环检测默认开启（面板可关）
+	c.Updater.Enabled = true
+	c.Updater.AutoCheck = true
+	c.Updater.CheckIntervalHours = 6
+	c.Updater.Repo = "rockswang/wild-work"
+	c.Updater.Proxies = []string{"https://gh-proxy.com/", "https://ghfast.top/"}
 	return c
 }
 
@@ -372,6 +389,9 @@ func FormatClockTimes(minutes []int) []string {
 }
 
 func applyEnv(c *Config) {
+	if v := os.Getenv("WILDWORK_UPDATER_REPO"); v != "" {
+		c.Updater.Repo = v
+	}
 	if v := os.Getenv("WILDWORK_LISTEN"); v != "" {
 		if l, err := ParseListen(v); err == nil {
 			c.Listen = l
@@ -566,6 +586,15 @@ func (c *Config) normalize() error {
 				c.Schedule.CheckinHours = append(c.Schedule.CheckinHours, m/60)
 			}
 		}
+	}
+	if c.Updater.CheckIntervalHours <= 0 {
+		c.Updater.CheckIntervalHours = 6
+	}
+	if c.Updater.Repo == "" {
+		c.Updater.Repo = "rockswang/wild-work"
+	}
+	if len(c.Updater.Proxies) == 0 {
+		c.Updater.Proxies = []string{"https://gh-proxy.com/", "https://ghfast.top/"}
 	}
 	seenCustom := map[string]bool{}
 	for i := range c.CustomChannels {

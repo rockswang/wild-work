@@ -55,6 +55,7 @@ import (
 	// 别名 statsEngine：/api/usage handler 内有同名局部变量 stats（遮蔽包名）
 	statsEngine "wild-work/internal/stats"
 	"wild-work/internal/systray"
+	"wild-work/internal/updater"
 )
 
 // Version 版本号。
@@ -176,6 +177,8 @@ type App struct {
 	stats     *statsEngine.Stats
 	statsStop chan struct{}
 
+	updater *updater.Service
+
 	pricingMu      sync.Mutex
 	pricingCache   []provider.ModelPricing // 本地缓存
 	pricingFetched time.Time
@@ -231,6 +234,16 @@ func New(opts Options) (*App, error) {
 	log.SetOutput(&logWriter{app: a})
 	a.loadPricingCache()
 	a.healRaccoonProtocol()
+
+	upCfg := updater.Config{
+		CurrentVersion: Version,
+		Repo:           opts.Config.Updater.Repo,
+		Proxies:        opts.Config.Updater.Proxies,
+		AutoCheck:      opts.Config.Updater.Enabled && opts.Config.Updater.AutoCheck,
+		CheckInterval:  time.Duration(opts.Config.Updater.CheckIntervalHours) * time.Hour,
+	}
+	a.updater = updater.NewService(upCfg, nil, nil)
+
 	return a, nil
 }
 
@@ -610,6 +623,20 @@ func (a *App) Stop() {
 		_ = srv.Shutdown(shutdownCtx)
 	}
 	a.Close()
+}
+
+// Restart 优雅停机并重启应用（用于自更新生效）。
+func (a *App) Restart() {
+	// 给 HTTP 响应写出留 200ms
+	time.Sleep(200 * time.Millisecond)
+	systray.Quit(2 * time.Second)
+	a.Stop() // 停止 HTTP 服务，关闭端口并 flush 账本
+
+	// 此时端口已完全释放，拉起新进程并安全退出
+	if err := updater.LaunchProcess("", os.Args[1:]); err != nil {
+		log.Printf("[updater] launch restarted process failed: %v", err)
+	}
+	os.Exit(0)
 }
 
 // Quit 退出整个程序（Web UI“退出”按钮调用）。
@@ -2231,6 +2258,18 @@ func (a *App) StartCreditAutoRefresh(ctx context.Context, kinds []provider.Kind,
 // 两者都随上游变动，且面板依赖它们展示，故定期刷新保持新鲜。
 const PricingRefreshInterval = 30 * time.Minute
 
+// StartUpdaterAutoCheck 启动后台自动更新检测。
+func (a *App) StartUpdaterAutoCheck(ctx context.Context) {
+	if a.updater != nil {
+		a.updater.StartBackground(ctx)
+	}
+}
+
+// UpdaterService 返回 updater 服务实例。
+func (a *App) UpdaterService() *updater.Service {
+	return a.updater
+}
+
 // StartPricingAutoRefresh 后台定期刷新「模型列表 + 费率」。
 // 启动立即刷一次：否则刚启动时费率缓存为空，面板下方全是 unknown，观感不佳。
 // 之后每隔 interval 一次；取消 ctx 即停止。
@@ -3084,6 +3123,9 @@ type State struct {
 
 	// CustomChannels 自定义第三方渠道列表（保存走 POST /api/config/custom_channels，R66）。
 	CustomChannels []custom.ChannelConfig `json:"custom_channels"`
+
+	// Update 自动更新状态快照
+	Update *updater.State `json:"update,omitempty"`
 }
 
 // GetState 返回面板初始数据。
@@ -3142,6 +3184,10 @@ func (a *App) GetState() State {
 	// 返回深拷贝而非配置引用，避免调用方意外改写配置。
 	st.CustomChannels = maskCustomChannels(a.cfg.CustomChannels)
 	st.Accounts = a.accountViews()
+	if a.updater != nil {
+		upState := a.updater.GetState()
+		st.Update = &upState
+	}
 	return st
 }
 
@@ -3940,6 +3986,67 @@ func (a *App) HandleAPI(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/quit", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 		go a.safeGo(func() { a.Quit() })
+	})
+	mux.HandleFunc("GET /api/update/status", func(w http.ResponseWriter, r *http.Request) {
+		if a.updater == nil {
+			writeJSON(w, http.StatusOK, updater.State{Status: updater.StatusIdle, CurrentVersion: Version})
+			return
+		}
+		writeJSON(w, http.StatusOK, a.updater.GetState())
+	})
+	mux.HandleFunc("POST /api/update/check", func(w http.ResponseWriter, r *http.Request) {
+		if a.updater == nil {
+			apiError(w, http.StatusBadRequest, "updater not initialized")
+			return
+		}
+		st, err := a.updater.Check(r.Context(), true)
+		if err != nil {
+			writeJSON(w, http.StatusOK, st)
+			return
+		}
+		writeJSON(w, http.StatusOK, st)
+	})
+	mux.HandleFunc("POST /api/update/download", func(w http.ResponseWriter, r *http.Request) {
+		if a.updater == nil {
+			apiError(w, http.StatusBadRequest, "updater not initialized")
+			return
+		}
+		if err := a.updater.StartDownload(); err != nil {
+			apiError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+	})
+	mux.HandleFunc("POST /api/update/restart", func(w http.ResponseWriter, r *http.Request) {
+		if a.updater == nil {
+			apiError(w, http.StatusBadRequest, "updater not initialized")
+			return
+		}
+		dlPath := a.updater.GetDownloadedPath()
+		if dlPath == "" {
+			apiError(w, http.StatusBadRequest, "no downloaded update package ready")
+			return
+		}
+		// 执行二进制原地原子替换
+		if err := updater.ApplyUpdate(dlPath, ""); err != nil {
+			apiError(w, http.StatusInternalServerError, "apply update failed: "+err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+		// 异步触发重启：先优雅停机，释放监听端口与锁，防止 R68 端口冲突
+		go a.Restart()
+	})
+	mux.HandleFunc("POST /api/update/dismiss", func(w http.ResponseWriter, r *http.Request) {
+		if a.updater == nil {
+			writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+			return
+		}
+		var req struct {
+			Version string `json:"version"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		a.updater.Dismiss(req.Version)
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 	})
 }
 

@@ -1790,6 +1790,31 @@ for (const [label, re] of uniq) {
     if (!pass) failed++;
   }
 }
+  // ---- 自动更新组件静态断言 ----
+  {
+    const needUpdate = [
+      ["index.html 含更新提示图标（#btnUpdateNotice）", html.includes('id="btnUpdateNotice"')],
+      ["index.html 含更新弹层（#updateOverlay）", html.includes('id="updateOverlay"')],
+      ["updateOverlay 遵循 R84 标准宽度（modal-wide 720px，无内联 width）", /class="modal modal-wide"/.test(html.slice(html.indexOf('id="updateOverlay"'), html.indexOf('id="aboutOverlay"'))) && !/<div class="modal"[^>]*style="[^"]*width:\s*\d+px/i.test(html.slice(html.indexOf('id="updateOverlay"'), html.indexOf('id="aboutOverlay"')))],
+      ["updateOverlay 遵循 R90 包含 help-mark 悬浮角标", /<span class="help-mark"[^>]*>\?/.test(html.slice(html.indexOf('id="updateOverlay"'), html.indexOf('id="aboutOverlay"')))],
+      ["updateOverlay 包含更新中断提醒横条（#updateReadyNotice）", html.includes('id="updateReadyNotice"')],
+      ["index.html 含关于弹层中的检查更新按钮（#btnCheckUpdate）", html.includes('id="btnCheckUpdate"')],
+      ["index.html 含更新下载进度条（#updateProgressBar）", html.includes('id="updateProgressBar"')],
+      ["app.js 包含更新说明轻量格式化函数 formatChangelogHTML", /function formatChangelogHTML\(/.test(raw)],
+      ["app.js 包含更新渲染函数 renderUpdateNotice", /function renderUpdateNotice\(/.test(raw)],
+      ["app.js 包含更新弹窗渲染函数 renderUpdateModalContent", /function renderUpdateModalContent\(/.test(raw)],
+      ["app.js 包含手动检查更新函数 manualCheckUpdate", /async function manualCheckUpdate\(/.test(raw)],
+      ["app.js 包含更新执行处理函数 handleUpdateAction", /async function handleUpdateAction\(/.test(raw)],
+      ["app.js 包含忽略版本更新处理函数 ignoreUpdate", /async function ignoreUpdate\(/.test(raw)],
+      ["app.js 包含更新状态轮询控制 startUpdatePolling/stopUpdatePolling", /function startUpdatePolling\(/.test(raw) && /function stopUpdatePolling\(/.test(raw)],
+      ["app.js 在 renderTopbar 中消费 state.update", /state\.update/.test(raw) && /renderUpdateNotice\(updateState\)/.test(raw)],
+    ];
+    for (const [label, pass] of needUpdate) {
+      console.log(`  ${pass ? "✅" : "❌"} ${label}`);
+      if (!pass) failed++;
+    }
+  }
+
 
 console.log(failed === 0 ? "\n全部通过" : `\n${failed} 项失败`);
 process.exit(failed === 0 ? 0 : 1);

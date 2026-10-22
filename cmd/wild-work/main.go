@@ -61,6 +61,7 @@ import (
 	"wild-work/internal/stats"
 	"wild-work/internal/systray"
 	"wild-work/internal/traework"
+	"wild-work/internal/updater"
 	"wild-work/internal/upstream"
 	"wild-work/internal/workbuddyai"
 	"wild-work/internal/zcode"
@@ -76,6 +77,9 @@ func main() {
 	// 工作目录：便携/CLI 形态固定为 exe 所在目录，保证相对路径配置（./auths ./data）稳定。
 	// macOS .app bundle 内该目录只读、且随 app 替换被清空，故改用系统数据目录（见 workDir）。
 	_ = os.Chdir(workDir())
+
+	// 清理上次热更新残留的旧二进制文件（如 .old 备份）
+	updater.CleanupOldFiles()
 
 	// 小浣熊授权登录的协议回调：由 Windows 按注册表命令行唤起本 exe。
 	// 必须在**任何**初始化（config/日志/服务）之前拦下——它只落盘一个文件就退出，
@@ -849,6 +853,11 @@ func main() {
 	// 运行统计喂入器（账号状态差值/粘性路由/今日作废，30s 一轮）：
 	// 进程内直调各数据源，面板「运行统计」tab 即时可用。
 	appInst.StartStatsFeeders(sctx)
+
+	// 自动更新检测（启动 15 秒后首次检查，之后每 check_interval_hours）
+	if cfg.Updater.Enabled && cfg.Updater.AutoCheck {
+		appInst.StartUpdaterAutoCheck(sctx)
+	}
 
 	// 启动提示（非 --autostart）：系统通知
 	if !autostart && !noTray {
