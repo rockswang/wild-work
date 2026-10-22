@@ -783,3 +783,147 @@ func (c *Client) persistProject(a *auth.Auth, info codeAssistInfo) {
 		log.Printf("gemini：project/档位写回凭据失败 uid=%s err=%v", a.UID, err)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// 扩展多模态能力接口：Embeddings 与 Imagen 生图
+// ---------------------------------------------------------------------------
+
+// EmbedTexts 实现 server.EmbeddingsProvider 接口：调用 /v1internal:embedContent 进行向量化。
+func (c *Client) EmbedTexts(a *auth.Auth, model string, texts []string, dimensions int) ([][]float64, int, error) {
+	token := tokenOf(a)
+	if token == "" {
+		return nil, 0, &provider.Error{Kind: provider.ErrSessionDead, Msg: "gemini: 账号未授权"}
+	}
+	project, _ := c.resolveProject(a)
+	if project == "" {
+		project = DefaultProject
+	}
+
+	embeddings := make([][]float64, 0, len(texts))
+	totalTokens := 0
+
+	for _, text := range texts {
+		reqBody := map[string]any{
+			"project": project,
+			"model":   model,
+			"content": map[string]any{
+				"parts": []map[string]any{{"text": text}},
+			},
+		}
+		if dimensions > 0 {
+			reqBody["outputDimensionality"] = dimensions
+		}
+		rawReq, err := json.Marshal(reqBody)
+		if err != nil {
+			return nil, 0, err
+		}
+
+		var lastErr error
+		success := false
+		for _, ep := range c.endpoints() {
+			url := ep + "/v1internal:embedContent"
+			req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(rawReq))
+			if err != nil {
+				lastErr = err
+				continue
+			}
+			identityHeaders(req, token)
+			resp, err := c.HTTP.Do(req)
+			if err != nil {
+				lastErr = err
+				continue
+			}
+			bodyRaw, _ := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
+			_ = resp.Body.Close()
+
+		if resp.StatusCode >= 400 {
+				lastErr = classifyErr(resp.StatusCode, bodyRaw, "embedContent")
+				continue
+			}
+
+			var result struct {
+				Embedding struct {
+					Values []float64 `json:"values"`
+				} `json:"embedding"`
+			}
+			if err := json.Unmarshal(bodyRaw, &result); err != nil {
+				lastErr = err
+				continue
+			}
+			embeddings = append(embeddings, result.Embedding.Values)
+			totalTokens += len(strings.Fields(text))
+			success = true
+			break
+		}
+		if !success {
+			if lastErr != nil {
+				return nil, 0, lastErr
+			}
+			return nil, 0, fmt.Errorf("gemini: embedContent 失败")
+		}
+	}
+	return embeddings, totalTokens, nil
+}
+
+// GenerateImage 实现 server.ImageGeneratorProvider 接口：调用 /v1internal:predict 进行 Imagen 生图。
+func (c *Client) GenerateImage(a *auth.Auth, prompt, size string, n int) ([]string, []string, error) {
+	token := tokenOf(a)
+	if token == "" {
+		return nil, nil, &provider.Error{Kind: provider.ErrSessionDead, Msg: "gemini: 账号未授权"}
+	}
+	project, _ := c.resolveProject(a)
+	if project == "" {
+		project = DefaultProject
+	}
+
+	reqBody := map[string]any{
+		"project": project,
+		"instances": []map[string]any{
+			{"prompt": prompt},
+		},
+		"parameters": map[string]any{
+			"sampleCount": n,
+			"aspectRatio": size,
+		},
+	}
+	rawReq, err := json.Marshal(reqBody)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	for _, ep := range c.endpoints() {
+		url := ep + "/v1internal:predict"
+		req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(rawReq))
+		if err != nil {
+			continue
+		}
+		identityHeaders(req, token)
+		resp, err := c.HTTP.Do(req)
+		if err != nil {
+			continue
+		}
+		bodyRaw, _ := io.ReadAll(io.LimitReader(resp.Body, 10<<20))
+		_ = resp.Body.Close()
+
+		if resp.StatusCode >= 400 {
+			return nil, nil, classifyErr(resp.StatusCode, bodyRaw, "predict/imagen")
+		}
+
+		var result struct {
+			Predictions []struct {
+				BytesBase64Encoded string `json:"bytesBase64Encoded"`
+				MimeType           string `json:"mimeType"`
+			} `json:"predictions"`
+		}
+		if err := json.Unmarshal(bodyRaw, &result); err == nil && len(result.Predictions) > 0 {
+			b64List := make([]string, 0, len(result.Predictions))
+			revisedList := make([]string, 0, len(result.Predictions))
+			for _, p := range result.Predictions {
+				b64List = append(b64List, p.BytesBase64Encoded)
+				revisedList = append(revisedList, prompt)
+			}
+			return b64List, revisedList, nil
+		}
+	}
+	return nil, nil, fmt.Errorf("gemini: imagen 生图未返回有效图像")
+}

@@ -103,6 +103,43 @@ func (h *Handler) imagesGenerations(w http.ResponseWriter, r *http.Request) {
 	}
 	wantB64 := req.ResponseFormat != "url" // gpt-image-1 语义：默认 b64_json
 
+	// 模型分流：如果以 gemini/ 开头或带有 imagen，路由至 Gemini 上游
+	if strings.HasPrefix(strings.ToLower(req.Model), "gemini/") || strings.Contains(strings.ToLower(req.Model), "imagen") {
+		imgsAny, err := h.runImageGenerator(w, r, provider.Gemini, "gemini/image", func(up provider.Upstream, acct *auth.Auth) (any, error) {
+			gen, ok := up.(ImageGeneratorProvider)
+			if !ok {
+				return nil, fmt.Errorf("gemini 上游未实现 ImageGeneratorProvider: %T", up)
+			}
+			b64s, revised, err := gen.GenerateImage(acct, req.Prompt, mapped, n)
+			if err != nil {
+				return nil, err
+			}
+			return imageGenResult{B64List: b64s, Revised: revised}, nil
+		})
+		if err != nil {
+			return
+		}
+		genResult := imgsAny.(imageGenResult)
+		data := make([]map[string]any, 0, len(genResult.B64List))
+		for i, b64 := range genResult.B64List {
+			revised := req.Prompt
+			if i < len(genResult.Revised) && genResult.Revised[i] != "" {
+				revised = genResult.Revised[i]
+			}
+			item := map[string]any{
+				"revised_prompt": revised,
+			}
+			if wantB64 {
+				item["b64_json"] = b64
+			} else {
+				item["url"] = "data:image/png;base64," + b64
+			}
+			data = append(data, item)
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"created": time.Now().Unix(), "data": data})
+		return
+	}
+
 	imgsAny, err := h.runGLM(w, r, "glm/image", func(up provider.Upstream, acct *auth.Auth) (any, error) {
 		client, ok := up.(*glm.Client)
 		if !ok {
@@ -381,4 +418,32 @@ func fetchImageB64(url string) (string, error) {
 		return "", err
 	}
 	return base64.StdEncoding.EncodeToString(b), nil
+}
+
+type ImageGeneratorProvider interface {
+	GenerateImage(a *auth.Auth, prompt, size string, n int) (b64List []string, revisedPrompts []string, err error)
+}
+
+type imageGenResult struct {
+	B64List []string
+	Revised []string
+}
+
+func (h *Handler) runImageGenerator(w http.ResponseWriter, r *http.Request, kind provider.Kind, model string, call func(provider.Upstream, *auth.Auth) (any, error)) (any, error) {
+	rt := h.getRuntime(kind)
+	if rt == nil || rt.Pool == nil || rt.Upstream == nil {
+		writeOpenAIError(w, http.StatusServiceUnavailable, "channel_unavailable", fmt.Sprintf("%s 渠道未接入", kind))
+		return nil, errors.New("channel unavailable")
+	}
+	acct := rt.Pool.PickForModel(model)
+	if acct == nil {
+		writeOpenAIError(w, http.StatusServiceUnavailable, "no_healthy_account", fmt.Sprintf("%s 无可用健康账号", kind))
+		return nil, errors.New("no healthy account")
+	}
+	res, err := call(rt.Upstream, acct)
+	if err != nil {
+		writeOpenAIError(w, http.StatusBadGateway, "upstream_error", err.Error())
+		return nil, err
+	}
+	return res, nil
 }
