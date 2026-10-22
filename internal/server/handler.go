@@ -439,7 +439,13 @@ func buildModelEntry(k provider.Kind, mi provider.ModelInfo) map[string]any {
 		"input_modalities": mi.InputModalities(),
 		"modality":         mi.Modality(),
 	}
+	var params []string
+	if mi.SupportsTools {
+		params = append(params, "tools", "tool_choice")
+	}
+
 	if len(mi.ReasoningEfforts) > 0 || mi.DefaultReasoningEffort != "" {
+		params = append(params, "reasoning", "include_reasoning", "reasoning_effort")
 		reasoning := map[string]any{}
 		if len(mi.ReasoningEfforts) > 0 {
 			reasoning["supported_efforts"] = mi.ReasoningEfforts
@@ -449,10 +455,16 @@ func buildModelEntry(k provider.Kind, mi provider.ModelInfo) map[string]any {
 		}
 		if mi.CanDisableThinking != nil {
 			reasoning["can_disable_thinking"] = *mi.CanDisableThinking
+			reasoning["mandatory"] = !(*mi.CanDisableThinking)
 		}
 		entry["reasoning"] = reasoning
 		entry["supports_reasoning"] = true
 	}
+
+	if len(params) > 0 {
+		entry["supported_parameters"] = params
+	}
+
 	return entry
 }
 

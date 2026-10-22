@@ -45,7 +45,7 @@
 
 ---
 
-## 1. 决议项索引（R1–R121）
+## 1. 决议项索引（R1–R122）
 
 **全文（含证据链、反例、已知限制）见 [`docs/决议项.md`](docs/决议项.md)** —— 改动相关代码前必读对应条目。
 
@@ -153,6 +153,7 @@
 | R119 | **自定义渠道：探测上游 `/models` 尽力解析能力，勾选导入不再编造默认值，费率页显示接入点 + 按需复制 api-key**（2026-10-21） | 需求「把本工具当多 endpoint Key 管理 + 统一用量统计」。四个真缺陷：旧 `TestConnection` 只取 `data[].id`（能力全丢）、`confirmModelImport` 写死 `1000000/64000` + 三能力 true（**编造上游没说过的话**，违反 R49）、`StaticModels` 两个上下文体都不置 ⇒ 自定义渠道上下文列恒不显示、`saveChannelEditor` 仍写已废弃的 `enabled:true`。修法：`internal/custom/probe.go` 宽容别名解析 + `cap_source`（api/user/unknown）三态来源、`ModelConfig.cap_source` 为 `omitempty` ⇒ 老配置归 `unknown`（不变量 5 零迁移）；`provider.ModelInfo.ContextFromUser` 新字段，`has_context = ContextFromAPI||HandMeasured||ContextFromUser`；新建渠道保存后**自动拉一次**并弹勾选；导入只写拿到的字段（拿不到标「未探测」）+「更新能力」按钮把旧编造值洗成上游真值；费率页每组顶部 `.fee-access` 行显示 `base_url` + **脱敏 key**，点复制时才经 `POST /api/config/custom_channel_key` 单条取明文（`/api/state`、`/api/fees` 每 30s 轮询，批量下发明文等于让第三方 key 长期驻留浏览器）。**推翻** `ui-static-check.mjs` 旧断言「导入默认参数与手填输入框一致（1M/64k/三能力开）」——那条把编造当成了规范。判据分层：官方 `/models` 只回 id（公开文档）、new-api/OpenRouter 扩展字段按**公开形状**匹配（**未逐家实测**），靠 `internal/custom/probe_test.go` 11 例锁形状；8 处变异全部确认变红。详见 [`docs/决议项.md`](docs/决议项.md) R119 |
 | R120 | **Loomy 短信登录：一次「验证码下发失败」不得把流程钉成终态，msgid 必须由服务端持有**（2026-10-21，issue #173）：**现场**——用户「提交提示先点获取验证码、再点显示失败请重试」。`sendCode` 旧实现把下发失败调 `s.fail()` 置**终态** ⇒ 面板 Poll 拿到终态错误后 `Shutdown()` 关掉 loopback 监听 ⇒ 用户收到短信、填码提交时页面 `msgid` 从未赋值（缺陷 B：msgid 只在 JS 变量里，刷新即丢），照提示再点则 fetch 连不上 → 统一显示「失败请重试」；更隐蔽的是 `session.login` 末尾 `if s.ph == PhasePending \|\| PhaseSuccess` 把 PhaseFailed 也算「不可再写」⇒ 一次瞬时失败后的**真实成功被静默丢弃**（页面说成功、面板恒报旧错，缺陷 A）。**修法**：下发失败降级为非终态 `noteSendFail` + `Status.SendErr` 可见；守卫改 `!= PhaseCancelled`（瞬时失败可被成功覆盖、已取消不得复活）；`msgid` 服务端留一份并经 `/api/loomy/status` 回传 + 提交兜底补齐（只监听 127.0.0.1，断言不回凭据/手机号明文）；提交前 `isCurrent()` 守卫（拒绝在上游调用之前）；catch 文案改可行动；删 `session.fail()`。测试 `internal/login_loomy/issue173_test.go` 5 例 + `TestSendCodeMissingMsgIDIsError` 契约改写；4 处变异全部确认变红 |
 | R121 | **自定义渠道：接入点先规范化再「有界嗅探」确认真实端点；api-key 脱敏改「长头 + 固定四星 + 短尾」**（2026-10-21，用户驱动）：粘来的常是 `https://x/v1/chat/completions`（带尾巴）或漏协议头，而本包内部一律拼 `{BaseURL}/chat/completions` ⇒ BaseURL 语义是**API 根**。静态可证明的部分归 `NormalizeBaseURL`（去引号/补 http(s)（内网默认 http）/丢 query+fragment+userinfo/**循环剥掉** `/chat/completions`、`/completions` 尾巴且保留原大小写/去尾斜杠；**中间前缀段绝不猜删**），挂在 `config.Validate()` ⇒ 手改 config.json 也治好；剩下「`/v1` 归不归顶」只有上游能答 ⇒ `Discover` 有界嗅探：候选根最多 3（原样/加 `/v1`/去 `/v1`）、请求封顶 3+3，判读三档——`/models` 出带 id 条目=命中（顺带拿能力清单 R119）＞ 目录全线拿不到时 `{根}/chat/completions` **非 404 且非 HTML 兜底页**=认定根存在（**推断**，必须写 Note「仅按对话端点确认，模型与能力需手填」，不得升格成「对话可用」）＞ `401/403` 归「无从判断」直接报「api-key 被上游拒绝，端点是否正确无从判断」（网关路由前鉴权时 401 对错地址同形，拿它确认会把错 key 说成配好）。**嗅探绝不 POST**（POST 即真实对话、产生费用并落用户用量明细）。失败必须逐条回传 `tries{url,status,err}` 让面板说「试了哪几个地址、各回什么」，不是一句「连接失败」。脱敏改 `maskKey`=`长头12 + **** + 短尾4`，**可见总量不超原文一半**（短 key 自动收缩头部、不足全遮 `****`）、按 rune 切、**四星固定不泄漏长度**；旧口径只留前 5 字符对第三方 key 毫无辨识度（千帆 `bce-v3/ALTAK…`、OpenAI `sk-proj-…`，**不能假定形如** `sk-`）。脱敏串同时是「面板未改动此字段」记号 ⇒ `isMaskedKey` **三种都认**（`****`/`…`/`••`，升级瞬间浏览器还渲染旧串，当真值落盘会把可用密钥洗成废值），**Go/JS 两侧必须同步**。前端加 `🔍 识别端点`（确认后**回填输入框**，所见即所存）、`looksLikeEndpoint` 取代 `/^https?:/` 硬拦、导入复用同一次探测并回写真实根、**删掉前端二次脱敏**（`app.js:2408` 在后端 mask 后又 slice 一遍会切坏）。明文口径不变：列表/费率只给脱敏串，点复制才经 `custom_channel_key` 单条取（`/api/state`、`/api/fees` 30s 轮询，批量发明文等于让第三方 key 长期驻留浏览器）。测试：`endpoint_test.go`（24 例规范化 + 候选根顺序/去重/`https://v1` 不得退化成 `https:`）、`discover_test.go` 8 例全 httptest（含 `TestDiscoverNeverPosts`、`TestDiscoverRejectsHTMLCaptivePage`、`TestDiscoverAuthBlockedIsNotConfirmed`）、`TestMaskKeyKeepsLongPrefix`/`TestIsMaskedKeyRecognizesLegacyMarks`/`TestCustomChannelTestEndpointLocatesBase`（断言响应无明文）。9 处变异全部确认变红（含「401 当成端点存在」「GET 换 POST」「前端恢复二次脱敏」「isMaskedKey 不认旧形」）。**已知限制**：判据②属推断；候选根只三种（挂在 `/api/v1` 这类猜不到的前缀下定位不了，正解是用户填对根，不是穷举）；探测不缓存；`maskKey` 被 oczen 回显复用；新脱敏会露前 12 字符（辨识度与保密的取舍，用户明确要求）。详见 [`docs/决议项.md`](docs/决议项.md) R121 |
+| R122 | **/v1/models 规范对齐 OpenRouter（supported_parameters 与 reasoning.mandatory），保留既有档位字段且绝不编造未声明属性**（2026-10-22，PR #184）：原生网关（如 OpenRouter）在 `/models` 提供 `supported_parameters` 与 `reasoning.mandatory`。遵循 R49 护栏：未显式声明时绝不编造（`CanDisableThinking == nil` 时 `mandatory` 与 `can_disable_thinking` 必须缺席；`supported_parameters` 仅按已声明能力导出 `tools`/`tool_choice`/`reasoning`/`include_reasoning`/`reasoning_effort`，严禁编造未声明的采样参数；无声明时整个字段缺席）；与 issue #96 既有档位字段（`supported_efforts`/`default_effort`/`can_disable_thinking`）并列共存。单测 `TestModelEntryOpenRouterParameters`。详见 [`docs/决议项.md`](docs/决议项.md) R122 |
 
 > ⚠️ **R71 附带的实测纪律**（也是 §0.1 的来源）：上游校验的是**头族齐全**而非单点
 > （只补 `X-Conversation-ID` 仍被拒）；且 `X-Conversation-ID` 的**取值形态不被校验**
@@ -426,7 +427,7 @@ bash scripts/probe-dump.sh summarize                # 汇总各渠道 usage 字�
 | [README.md](README.md) | 用户文档 |
 | [DEVELOPMENT.md](DEVELOPMENT.md) | 开发者文档（面向 AI Agent） |
 | [AGENTS.md](AGENTS.md) | **本文件**：纪律 + 决议索引 + 关键不变量 + 构建发版 |
-| [docs/决议项.md](docs/决议项.md) | **R1–R121 决议全文**（证据链、反例、已知限制） |
+| [docs/决议项.md](docs/决议项.md) | **R1–R122 决议全文**（证据链、反例、已知限制） |
 | [docs/渠道接入备忘.md](docs/渠道接入备忘.md) | 各渠道协议要点、凭据模型、已知限制与踩坑 |
 | [docs/接口参考.md](docs/接口参考.md) | 面板区块规划 + 管理 API 全量清单 |
 | [docs/模型降级链定义.md](docs/模型降级链定义.md) | **模型降级链的唯一权威定义**：三维归因、错误类型全量归属、两条触发路径、三条硬规则、已知限制（R94） |

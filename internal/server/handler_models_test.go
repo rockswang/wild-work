@@ -117,6 +117,9 @@ func TestModelEntryReasoning(t *testing.T) {
 	if r["can_disable_thinking"] != true {
 		t.Errorf("can_disable_thinking 应为 true，得到 %v", r["can_disable_thinking"])
 	}
+	if r["mandatory"] != false {
+		t.Errorf("mandatory 应为 false (can_disable_thinking=true 时 mandatory=false)，得到 %v", r["mandatory"])
+	}
 	// id 带渠道前缀（其余字段不受影响）
 	if back["id"] != "workbuddy/glm-5.3" {
 		t.Errorf("id 应带渠道前缀，得到 %v", back["id"])
@@ -126,7 +129,7 @@ func TestModelEntryReasoning(t *testing.T) {
 // TestModelEntryReasoningAbsent 上游未声明档位时不得输出 reasoning/supports_reasoning。
 func TestModelEntryReasoningAbsent(t *testing.T) {
 	cases := []provider.ModelInfo{
-		{ID: "plain"}, // 全未声明
+		{ID: "plain"},                              // 全未声明
 		{ID: "bool-only", SupportsReasoning: true}, // 只有 bool（旧数据形状），无档位列表
 	}
 	for _, mi := range cases {
@@ -136,6 +139,9 @@ func TestModelEntryReasoningAbsent(t *testing.T) {
 		}
 		if _, has := entry["supports_reasoning"]; has {
 			t.Errorf("%s 未声明档位时不应输出 supports_reasoning", mi.ID)
+		}
+		if _, has := entry["supported_parameters"]; has {
+			t.Errorf("%s 未声明工具或思考时不应输出 supported_parameters", mi.ID)
 		}
 	}
 }
@@ -161,4 +167,124 @@ func TestModelEntryReasoningMinimal(t *testing.T) {
 	if r["can_disable_thinking"] != false {
 		t.Errorf("can_disable_thinking 应为 false，得到 %v", r["can_disable_thinking"])
 	}
+	if r["mandatory"] != true {
+		t.Errorf("mandatory 应为 true (can_disable_thinking=false 时 mandatory=true)，得到 %v", r["mandatory"])
+	}
+}
+
+// TestModelEntryOpenRouterParameters 校验 OpenRouter 规范与 R49 护栏：
+// 1. supported_parameters 严格由声明能力动态导出，绝不编造未确认的采样参数 (temperature, top_p, max_tokens 等)；
+// 2. CanDisableThinking 为 nil 时，mandatory 与 can_disable_thinking 必须缺席 (严禁编造 mandatory: true)；
+// 3. 既有 issue #96 字段 (supported_efforts, default_effort, can_disable_thinking) 完整保留共存。
+func TestModelEntryOpenRouterParameters(t *testing.T) {
+	t.Run("tools_and_reasoning", func(t *testing.T) {
+		cd := true
+		mi := provider.ModelInfo{
+			ID:               "deepseek-r1",
+			SupportsTools:    true,
+			ReasoningEfforts: []string{"low", "medium", "high"},
+			CanDisableThinking: &cd,
+		}
+		entry := buildModelEntry(provider.WorkBuddy, mi)
+
+		params, ok := entry["supported_parameters"].([]string)
+		if !ok {
+			t.Fatalf("缺少 supported_parameters，得到 %T", entry["supported_parameters"])
+		}
+		expected := []string{"tools", "tool_choice", "reasoning", "include_reasoning", "reasoning_effort"}
+		if len(params) != len(expected) {
+			t.Fatalf("supported_parameters 长度期望 %d，实际 %d (%v)", len(expected), len(params), params)
+		}
+		for i, v := range expected {
+			if params[i] != v {
+				t.Errorf("supported_parameters[%d] 期望 %q，实际 %q", i, v, params[i])
+			}
+		}
+
+		r, ok := entry["reasoning"].(map[string]any)
+		if !ok {
+			t.Fatalf("缺少 reasoning 对象")
+		}
+		// issue #96 字段保持
+		if efforts, ok := r["supported_efforts"].([]string); !ok || len(efforts) != 3 {
+			t.Errorf("supported_efforts 未保留: %v", r["supported_efforts"])
+		}
+		if r["can_disable_thinking"] != true {
+			t.Errorf("can_disable_thinking 期望 true，实际 %v", r["can_disable_thinking"])
+		}
+		// OpenRouter 字段
+		if r["mandatory"] != false {
+			t.Errorf("mandatory 期望 false，实际 %v", r["mandatory"])
+		}
+	})
+
+	t.Run("tools_only", func(t *testing.T) {
+		mi := provider.ModelInfo{
+			ID:            "gpt-4o",
+			SupportsTools: true,
+		}
+		entry := buildModelEntry(provider.WorkBuddy, mi)
+
+		params, ok := entry["supported_parameters"].([]string)
+		if !ok {
+			t.Fatalf("缺少 supported_parameters")
+		}
+		expected := []string{"tools", "tool_choice"}
+		if len(params) != len(expected) || params[0] != "tools" || params[1] != "tool_choice" {
+			t.Errorf("supported_parameters 期望 %v，实际 %v", expected, params)
+		}
+		if _, has := entry["reasoning"]; has {
+			t.Errorf("无思考时不应输出 reasoning")
+		}
+	})
+
+	t.Run("r49_undeclared_guard", func(t *testing.T) {
+		// CanDisableThinking 为 nil 时，绝不能编造 mandatory 或 can_disable_thinking
+		mi := provider.ModelInfo{
+			ID:               "reasoning-undeclared-disable",
+			ReasoningEfforts: []string{"medium"},
+		}
+		entry := buildModelEntry(provider.WorkBuddy, mi)
+
+		r, ok := entry["reasoning"].(map[string]any)
+		if !ok {
+			t.Fatalf("缺少 reasoning 对象")
+		}
+		if _, has := r["mandatory"]; has {
+			t.Errorf("CanDisableThinking 为 nil 时严禁输出 mandatory (违背 R49 原则)")
+		}
+		if _, has := r["can_disable_thinking"]; has {
+			t.Errorf("CanDisableThinking 为 nil 时严禁输出 can_disable_thinking")
+		}
+		if efforts, ok := r["supported_efforts"].([]string); !ok || len(efforts) != 1 || efforts[0] != "medium" {
+			t.Errorf("supported_efforts 异常: %v", r["supported_efforts"])
+		}
+
+		// 检查 supported_parameters 绝不包含未确认的采样参数
+		params, ok := entry["supported_parameters"].([]string)
+		if !ok {
+			t.Fatalf("缺少 supported_parameters")
+		}
+		forbiddenParams := []string{"temperature", "top_p", "top_k", "max_tokens", "frequency_penalty", "presence_penalty"}
+		for _, fp := range forbiddenParams {
+			for _, p := range params {
+				if p == fp {
+					t.Errorf("supported_parameters 严禁编造未在上游声明的采样参数 %q", fp)
+				}
+			}
+		}
+	})
+
+	t.Run("none_declared", func(t *testing.T) {
+		mi := provider.ModelInfo{
+			ID: "simple-text",
+		}
+		entry := buildModelEntry(provider.WorkBuddy, mi)
+		if _, has := entry["supported_parameters"]; has {
+			t.Errorf("无工具与思考时 supported_parameters 必须缺席")
+		}
+		if _, has := entry["reasoning"]; has {
+			t.Errorf("无思考时 reasoning 必须缺席")
+		}
+	})
 }
