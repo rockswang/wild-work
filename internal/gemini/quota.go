@@ -382,22 +382,20 @@ func classifyErr(status int, raw []byte, what string) error {
 // ---------------------------------------------------------------------------
 
 // UserResource 实现 provider.Upstream。
-//
-// ⚠️ 返回 **0**：本渠道没有「可消耗积分」这个概念，配额是窗口百分比（见文件头）。
-// 返回 0 是如实的「本工具口径下没有可消耗积分」，而不是「查询失败」——
-// 配额明细由 UserResourceDetail 的 InfoOnly 条目承载。
+// 返回最少窗口百分比（0~100）。
 func (c *Client) UserResource(a *auth.Auth) (int64, error) {
-	_, _, err := c.UserResourceDetail(a)
-	return 0, err
+	remain, _, err := c.UserResourceDetail(a)
+	return remain, err
 }
 
-// UserResourceDetail 实现 provider.Upstream：返回 (0, 配额窗口条目, error)。
+// UserResourceDetail 实现 provider.Upstream：返回 (最少窗口百分比, 配额窗口条目, error)。
 //
 // 编排（与参考实现同构）：
 //  1. project 取「凭据真值 → 未知则先探测」：配额请求**必须**带正确的 project
 //     （协议 §2.7 第 1 条），拿默认值去问会得到 403；
 //  2. 档位探测（loadCodeAssist）与配额查询**并行**，且**档位失败绝不污染配额结果**——
-//     「账号规格」只是一栏附注，不能因为它挂了就把整行变成错误。
+//     「账号规格」只是一栏附注，不能因为它挂了就把整行变成错误；
+//  3. 余额汇总取所有配额窗口的最少剩余百分比（0~100），如实反映账号最紧张的瓶颈窗口。
 func (c *Client) UserResourceDetail(a *auth.Auth) (int64, []provider.ResourceItem, error) {
 	token := tokenOf(a)
 	if token == "" {
@@ -439,7 +437,20 @@ func (c *Client) UserResourceDetail(a *auth.Auth) (int64, []provider.ResourceIte
 	if qerr != nil {
 		return 0, nil, qerr
 	}
-	return 0, items, nil
+
+	// 计算最少窗口百分比（如 5h 剩 99%，周剩 50% ⇒ 返回 50）
+	var minPercent int64 = 100
+	if len(items) > 0 {
+		for _, it := range items {
+			if it.Remain < minPercent {
+				minPercent = it.Remain
+			}
+		}
+	} else {
+		minPercent = 0
+	}
+
+	return minPercent, items, nil
 }
 
 // tierProbe 档位探测的并行结果。

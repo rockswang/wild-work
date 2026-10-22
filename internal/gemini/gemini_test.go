@@ -434,9 +434,9 @@ func TestQuotaPercentParsing(t *testing.T) {
 	if err != nil {
 		t.Fatalf("UserResourceDetail 失败：%v", err)
 	}
-	// 本渠道没有「可消耗积分」：标量恒 0（配额由 InfoOnly 条目承载）。
-	if remain != 0 {
-		t.Errorf("UserResource 应恒 0（本渠道无积分概念），得 %d", remain)
+	// 配额标量应为最少窗口剩余百分比（min(99, 50, 100) = 50）。
+	if remain != 50 {
+		t.Errorf("UserResource 应为最少窗口百分比（50），得 %d", remain)
 	}
 	if len(items) != 3 {
 		t.Fatalf("应解析 Gemini 组 2 条 + Claude/GPT 组 1 条，得 %d 条：%+v",

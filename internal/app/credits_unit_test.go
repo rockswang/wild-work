@@ -22,9 +22,15 @@ func TestCreditsUnitTokenChannels(t *testing.T) {
 	if a.creditsNAKind(provider.ZCode.String()) {
 		t.Error("ZCode 应走 Token 计数面板；标成 credits_na 会让用量完全看不见")
 	}
+	if got := a.creditsUnit(provider.Gemini.String()); got != "%" {
+		t.Errorf("Gemini creditsUnit = %q，期望 %% (它是配额百分比)", got)
+	}
+	if a.creditsNAKind(provider.Gemini.String()) {
+		t.Error("Gemini 应走配额百分比面板；标成 credits_na 会让用量完全看不见")
+	}
 
 	// 积分渠道抽样：都必须是空串（积分口径），且不能是 NA。
-	for _, k := range []provider.Kind{provider.Minimax, provider.LobsterAI, provider.CodeArts, provider.Gemini, provider.GLM, provider.Raccoon} {
+	for _, k := range []provider.Kind{provider.Minimax, provider.LobsterAI, provider.CodeArts, provider.GLM, provider.Raccoon} {
 		if got := a.creditsUnit(k.String()); got != "" {
 			t.Errorf("%s creditsUnit = %q，期望空串（积分）", k, got)
 		}

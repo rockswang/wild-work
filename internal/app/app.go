@@ -414,6 +414,9 @@ func (a *App) creditsUnit(group string) string {
 	if group == provider.ZCode.String() {
 		return "token"
 	}
+	if group == provider.Gemini.String() {
+		return "%"
+	}
 	return "" // 积分（credits）
 }
 
