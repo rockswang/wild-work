@@ -398,7 +398,12 @@ func (c *Client) FetchModels(a *auth.Auth) ([]provider.ModelInfo, error) {
 	}
 
 	remote, err := c.fetchRemoteModels(a, token)
-	if err != nil || len(remote) == 0 {
+	if err != nil {
+		// 上游拉取失败时打 Warn 日志，并优雅降级返回静态兜底表（保持可用性）
+		log.Printf("gemini: 从上游拉取动态模型目录失败，降级使用静态表: %v", err)
+		return StaticModels(), nil
+	}
+	if len(remote) == 0 {
 		return StaticModels(), nil
 	}
 
@@ -419,19 +424,23 @@ func (c *Client) fetchRemoteModels(a *auth.Auth, token string) ([]provider.Model
 		project = DefaultProject
 	}
 	bodyJSON := fmt.Sprintf(`{"project":%q}`, project)
+	var lastErr error
 	for _, ep := range c.endpoints() {
 		req, err := http.NewRequest(http.MethodPost, ep+EpFetchAvailableModels, strings.NewReader(bodyJSON))
 		if err != nil {
+			lastErr = err
 			continue
 		}
 		identityHeaders(req, token)
 		resp, err := c.HTTP.Do(req)
 		if err != nil {
+			lastErr = err
 			continue
 		}
 		raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 		_ = resp.Body.Close()
 		if resp.StatusCode >= 400 {
+			lastErr = classifyErr(resp.StatusCode, raw, "获取模型目录")
 			continue
 		}
 
@@ -440,7 +449,14 @@ func (c *Client) fetchRemoteModels(a *auth.Auth, token string) ([]provider.Model
 			return models, nil
 		}
 	}
-	return nil, errors.New("gemini: 无法从上游获取模型目录")
+	if lastErr != nil {
+		return nil, lastErr
+	}
+	return nil, &provider.Error{
+		Kind:   provider.ErrServer,
+		Status: http.StatusBadGateway,
+		Msg:    "gemini: 无法从上游获取模型目录",
+	}
 }
 
 // FetchModelPricing 本渠道**没有费率端点**（协议 §2.6/§2.7 全篇无倍率/定价字段），

@@ -644,9 +644,7 @@ func buildAuthURL(stateVal, redirectURI, codeVerifier string) string {
 func randomState() string {
 	b := make([]byte, 16)
 	if _, err := rand.Read(b); err != nil {
-		// 随机源失败：退到时间纳秒（仍然不可预测到"能被外部猜中"的程度，
-		// 但这是降级路径，正常永不发生）。
-		return fmt.Sprintf("%032x", time.Now().UnixNano())
+		panic(fmt.Sprintf("crypto/rand read failed: %v", err))
 	}
 	return hex.EncodeToString(b)
 }

@@ -1999,8 +1999,8 @@ async function startLogin(channel, accountLabel) {
     if (r.manual_callback) {
       if (channel === "gemini") {
         $("lcCallbackHint").textContent =
-          "Google 授权完成后，请将跳转后的网页地址（如 https://antigravity.google/oauth-callback?...）"
-          + "或其中的授权码（code）复制粘贴到下方并提交，网关将自动完成兑换。";
+          "Google 授权完成后，请将跳转后的完整网页地址（含 ?code=...&state=...）"
+          + "复制粘贴到下方并提交，网关将自动校验并换取凭据。";
       } else {
         $("lcCallbackHint").textContent =
           "登录完成后若浏览器停在一条打不开的 127.0.0.1 地址上（上游只允许回调到 127.0.0.1，"

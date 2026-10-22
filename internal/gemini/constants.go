@@ -158,13 +158,16 @@ const (
 
 // Scopes 逐字照抄 Antigravity / Cloud Code 官方客户端登记的作用域：
 // 包含 OpenID、Cloud Platform、UserInfo 及 cclog/experimentsandconfigs。
+// Scopes OAuth 授权申请的作用域清单。
+//
+// ⚠️ 严禁将 ScopeCCLog / ScopeExperiments 加回（详见 issue #167）：
+// 未登记该作用域会导致 Google OAuth 报错 403 restricted_client。
+// 本列表仅保留已在 Google OAuth 客户端中通过登记与白名单放行的最小必要 Scopes。
 var Scopes = []string{
 	ScopeOpenID,
 	ScopeCloudPlatform,
 	ScopeUserInfoEmail,
 	ScopeUserInfoProfile,
-	ScopeCCLog,
-	ScopeExperiments,
 }
 
 // Extra 键名（写进 auth.Auth.Extra 的渠道专有字段）。

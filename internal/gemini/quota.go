@@ -30,6 +30,7 @@
 package gemini
 
 import (
+	"net/http"
 	"encoding/json"
 	"fmt"
 	"math"
@@ -364,10 +365,15 @@ func (c *Client) cacheQuota(key string, items []provider.ResourceItem) {
 
 // classifyErr 把 HTTP 层失败转成类型化的 *provider.Error。
 func classifyErr(status int, raw []byte, what string) error {
+	kind := Classify(status, string(raw))
+	msg := fmt.Sprintf("gemini：%s失败（HTTP %d）：%s", what, status, snippet(raw))
+	if status == http.StatusUnauthorized || status == http.StatusForbidden {
+		msg += "（若为旧版本保存的凭据，建议删除该账号后重新使用 OAuth 登录）"
+	}
 	return &provider.Error{
-		Kind:   Classify(status, string(raw)),
+		Kind:   kind,
 		Status: status,
-		Msg:    fmt.Sprintf("gemini：%s失败（HTTP %d）：%s", what, status, snippet(raw)),
+		Msg:    msg,
 	}
 }
 

@@ -367,28 +367,31 @@ func parseAvailableModelsResponse(raw []byte) []provider.ModelInfo {
 	return nil
 }
 
-// makeModelInfo 构造标准的 ModelInfo
+// makeModelInfo 构造从远端动态拉取的 ModelInfo。
+//
+// 恪守 R49「只透传上游声明，绝不编造」与 R119 能力来源规范：
+// 动态拉取的目录仅承载上游明确返回的 ID 与展示名称。
+// 严禁通过模型名称字串猜测 SupportsReasoning / ReasoningEfforts 等思考能力；
+// 上游目录未下发 ContextWindow / MaxTokens 时不设 ContextFromAPI=true。
+// 若该模型已在 StaticModels() 静态已知表中定义，优先复用静态表经过人工实测校验的能力声明。
 func makeModelInfo(id, displayName string) provider.ModelInfo {
-	info := provider.ModelInfo{
+	// 如果在已知静态表中有定义，直接继承已知实测能力（包含思考档位与开关声明）
+	for _, sm := range StaticModels() {
+		if strings.EqualFold(sm.ID, id) {
+			m := sm
+			if displayName != "" && displayName != id {
+				m.Name = displayName
+			}
+			return m
+		}
+	}
+
+	// 纯动态发现的未知模型：宁缺勿编，仅保留基本标识与上游展示名
+	return provider.ModelInfo{
 		ID:             id,
 		Name:           formatDisplayName(id, displayName),
-		ContextWindow:  ContextWindow,
-		MaxTokens:      MaxOutputTokens,
-		ContextFromAPI: true,
-		SupportsImages: true,
-		SupportsTools:  true,
+		ContextFromAPI: false,
 	}
-	lower := strings.ToLower(id)
-	if strings.Contains(lower, "flash") || strings.Contains(lower, "pro") || strings.Contains(lower, "thinking") || strings.Contains(lower, "argon") || strings.Contains(lower, "sonnet") || strings.Contains(lower, "opus") || strings.Contains(lower, "oss") {
-		info.SupportsReasoning = true
-	}
-	if id == ModelFlash || id == "gemini-3.7-flash-tiered" {
-		info.ReasoningEfforts = []string{TierLow, TierMedium, TierHigh, TierTiered}
-		info.DefaultReasoningEffort = TierMedium
-		canDisable := false
-		info.CanDisableThinking = &canDisable
-	}
-	return info
 }
 
 // mergeModelCatalog 合并动态拉取的模型与静态兜底表

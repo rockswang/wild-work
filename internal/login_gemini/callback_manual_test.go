@@ -11,51 +11,32 @@ import (
 )
 
 func TestSubmitCallbackURLFormats(t *testing.T) {
-	cases := []struct {
-		name     string
-		input    string
-		wantCode string
-	}{
-		{
-			name:     "bare code",
-			input:    "4/0AXlqoi5oy1234567890",
-			wantCode: "4/0AXlqoi5oy1234567890",
-		},
-		{
-			name:     "full url with query code (matching state)",
-			input:    "https://antigravity.google/oauth-callback?code=4/0AXquery123",
-			wantCode: "4/0AXquery123",
-		},
-		{
-			name:     "full url with hash fragment code",
-			input:    "https://antigravity.google/oauth-callback#code=4/0AXhash123&scope=email",
-			wantCode: "4/0AXhash123",
-		},
-		{
-			name:     "query string alone",
-			input:    "code=4/0AXqueryonly&scope=openid",
-			wantCode: "4/0AXqueryonly",
-		},
+	_, _, st := startLogin(t)
+	defer Shutdown()
+
+	// 1. 裸 code 必须被拒绝（遵守 R97② / R104 强制 state 校验）
+	if err := SubmitCallbackURL("4/0AXbarecode123"); err == nil {
+		t.Fatal("SubmitCallbackURL 接受裸 code，违反 R97/R104 state 安全约束")
 	}
 
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			_, _, _ = startLogin(t)
-			defer Shutdown()
+	// 2. 携带错误 state 必须被拒绝
+	badStateURL := "https://antigravity.google/oauth-callback?code=4/0AXquery123&state=wrong-state"
+	if err := SubmitCallbackURL(badStateURL); err == nil {
+		t.Fatalf("SubmitCallbackURL(%q) 期望拒绝，但成功了", badStateURL)
+	}
 
-			err := SubmitCallbackURL(tc.input)
-			if err != nil {
-				t.Fatalf("SubmitCallbackURL(%q) 失败: %v", tc.input, err)
-			}
-			sess := currentSession()
-			if sess == nil {
-				t.Fatal("sess 丢失")
-			}
-			code, _, ok := sess.snapshot()
-			if !ok || code != tc.wantCode {
-				t.Errorf("得到 code %q，期望 %q", code, tc.wantCode)
-			}
-		})
+	// 3. 携带正确 state 的 URL 必须通过
+	goodURL := fmt.Sprintf("https://antigravity.google/oauth-callback?code=4/0AXquery123&state=%s", st.State)
+	if err := SubmitCallbackURL(goodURL); err != nil {
+		t.Fatalf("SubmitCallbackURL(%q) 失败: %v", goodURL, err)
+	}
+	sess := currentSession()
+	if sess == nil {
+		t.Fatal("sess 丢失")
+	}
+	code, _, ok := sess.snapshot()
+	if !ok || code != "4/0AXquery123" {
+		t.Errorf("得到 code %q，期望 4/0AXquery123", code)
 	}
 }
 
@@ -72,7 +53,8 @@ func TestExchangeSendsCodeVerifier(t *testing.T) {
 	withEndpoints(t, tokenSrv.URL, "")
 
 	_, statePath, st := startLogin(t)
-	err := SubmitCallbackURL("4/0AXpkce123")
+	goodURL := fmt.Sprintf("https://antigravity.google/oauth-callback?code=4/0AXpkce123&state=%s", st.State)
+	err := SubmitCallbackURL(goodURL)
 	if err != nil {
 		t.Fatalf("SubmitCallbackURL 失败: %v", err)
 	}

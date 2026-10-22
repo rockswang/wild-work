@@ -34,7 +34,7 @@ func TestGeminiErrorHint(t *testing.T) {
 	}
 }
 
-// TestScopesAntigravity 对照 Antigravity 官方要求的 OAuth scope 清单。
+// TestScopesAntigravity 验证 OAuth scope 清单为最小必要集合（防 403 restricted_client）。
 func TestScopesAntigravity(t *testing.T) {
 	joined := strings.Join(gemini.Scopes, " ")
 	for _, required := range []string{
@@ -42,11 +42,18 @@ func TestScopesAntigravity(t *testing.T) {
 		gemini.ScopeCloudPlatform,
 		gemini.ScopeUserInfoEmail,
 		gemini.ScopeUserInfoProfile,
+	} {
+		if !strings.Contains(joined, required) {
+			t.Errorf("Scopes 缺少必要 scope %s", required)
+		}
+	}
+	// 严禁包含 ScopeCCLog 和 ScopeExperiments，否则触发 Google OAuth 403 restricted_client
+	for _, forbidden := range []string{
 		gemini.ScopeCCLog,
 		gemini.ScopeExperiments,
 	} {
-		if !strings.Contains(joined, required) {
-			t.Errorf("Scopes 缺少 Antigravity 必要 scope %s", required)
+		if strings.Contains(joined, forbidden) {
+			t.Errorf("Scopes 包含未登记/会引发 restricted_client 的 forbidden scope: %s", forbidden)
 		}
 	}
 }
