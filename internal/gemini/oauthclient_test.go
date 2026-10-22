@@ -2,7 +2,6 @@ package gemini
 
 import (
 	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -76,7 +75,7 @@ func TestNoEmbeddedOAuthValueInSource(t *testing.T) {
 	}
 }
 
-// TestOAuthClientFromEnv 守门优先级：环境变量必须**优先于**本机 CLI 提取（自建客户端场景）。
+// TestOAuthClientFromEnv 守门优先级：环境变量必须**优先于**内置凭据（自建客户端场景）。
 func TestOAuthClientFromEnv(t *testing.T) {
 	const (
 		wantID     = "1111111111-fromenv.apps.googleusercontent.com"
@@ -96,12 +95,19 @@ func TestOAuthClientFromEnv(t *testing.T) {
 	}
 }
 
-// TestExtractFromLocalCLI 边界：目录不存在 / 无匹配时**不得 panic、不得返回垃圾**。
-// （本机没装 Gemini CLI 走的就是这条路径：结果为空串，由调用方给出可操作错误。）
-func TestExtractFromLocalCLI(t *testing.T) {
-	t.Setenv("GEMINI_CLI_HOME", filepath.Join(t.TempDir(), "definitely-not-here"))
-	id, secret := extractOAuthClientFromLocalCLI()
-	if id != "" || secret != "" {
-		t.Errorf("不存在的目录应返回空串，实际 id=%q secret=%q", id, secret)
+// TestDefaultAntigravityClientFallback 环境变量未设置时回落到内置 Antigravity 客户端凭据。
+func TestDefaultAntigravityClientFallback(t *testing.T) {
+	t.Setenv(EnvClientID, "")
+	t.Setenv(EnvClientSecret, "")
+	t.Setenv("WILDWORK_GEMINI_DISABLE_DEFAULT_CLIENT", "")
+	oauthClientOnce = sync.Once{}
+	oauthClientVal = localOAuthClient{}
+
+	got := oauthClient()
+	if !strings.HasSuffix(got.ID, ".apps.googleusercontent.com") {
+		t.Errorf("期望默认 client_id 为 google OAuth 格式，实际 = %q", got.ID)
+	}
+	if !strings.HasPrefix(got.Secret, "GOCSPX-") {
+		t.Errorf("期望默认 client_secret 以 GOCSPX- 开头，实际 = %q", got.Secret)
 	}
 }

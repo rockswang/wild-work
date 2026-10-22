@@ -43,6 +43,8 @@ const (
 	EpQuotaSummary = "/v1internal:retrieveUserQuotaSummary"
 	// EpLoadCodeAssist 账号档位 / 项目探测路径。
 	EpLoadCodeAssist = "/v1internal:loadCodeAssist"
+	// EpFetchAvailableModels 远端模型目录与配额探测路径。
+	EpFetchAvailableModels = "/v1internal:fetchAvailableModels"
 
 	// LoadCodeAssistBody 探测请求体**逐字**常量（gemini.ts:97，content-length 恰为 38）。
 	// ⚠️ 刻意**不带** platform / pluginType / cloudaicompanionProject：多一个字段就可能被
@@ -137,9 +139,10 @@ const (
 
 	// CallbackPath 本机回调路径。**与 client 注册值逐字一致**，改了就是 redirect_uri_mismatch。
 	CallbackPath = "/oauth-callback"
-	// RedirectHost 重定向 URI 里的主机名。⚠️ 必须是 `localhost`，不能是 127.0.0.1
-	// （gemini-oauth.ts:44，Google 侧的注册值）。
+	// RedirectHost 重定向 URI 里的主机名。
 	RedirectHost = "localhost"
+	// AntigravityRedirectURI Antigravity OAuth 客户端官方注册的回调重定向地址。
+	AntigravityRedirectURI = "https://antigravity.google/oauth-callback"
 	// DefaultCallbackPort 固定端口兜底。
 	// ⚠️ 默认走**动态端口**（listen :0）；动态分配失败时才退到本端口，
 	// 本端口被占用时再退到另一个空闲端口（gemini-oauth.ts:47、:409-463）。
@@ -149,19 +152,17 @@ const (
 	ScopeCloudPlatform   = "https://www.googleapis.com/auth/cloud-platform"
 	ScopeUserInfoEmail   = "https://www.googleapis.com/auth/userinfo.email"
 	ScopeUserInfoProfile = "https://www.googleapis.com/auth/userinfo.profile"
-	// ScopeCCLog / ScopeExperiments 已从 Scopes 剔除（issue #167，未登记 scope 必 403）；
-	// 常量保留仅作历史对照，勿加回 Scopes。
 	ScopeCCLog       = "https://www.googleapis.com/auth/cclog"
 	ScopeExperiments = "https://www.googleapis.com/auth/experimentsandconfigs"
 )
 
-// Scopes 逐字照抄 CLI 客户端已登记的部分（gemini-oauth.ts:59-66）：`cloud-platform` 必需。
+// Scopes 逐字照抄 Antigravity / Cloud Code 官方客户端登记的作用域：
+// 包含 OpenID、Cloud Platform、UserInfo 及 cclog/experimentsandconfigs。
+// Scopes OAuth 授权申请的作用域清单。
 //
-// ⚠️ 2026-10-19 剔除 `cclog` / `experimentsandconfigs`（issue #167）：这两项是 Cloud Code
-// 自己的内部 scope，旧 CLI 的公开 client 未登记它们 ⇒ 授权页必报 403 restricted_client
-// 「Unregistered scope(s)」。用户实测：收紧后这堵墙消失（后面还撞 client 停用那是另一堵墙，
-// 上游政策问题，见登录错误文案的引导）；而 Cloud Code 端点的鉴权只认 access_token，
-// 不复核 scope 清单，删掉后运行时行为不变。
+// ⚠️ 严禁将 ScopeCCLog / ScopeExperiments 加回（详见 issue #167）：
+// 未登记该作用域会导致 Google OAuth 报错 403 restricted_client。
+// 本列表仅保留已在 Google OAuth 客户端中通过登记与白名单放行的最小必要 Scopes。
 var Scopes = []string{
 	ScopeOpenID,
 	ScopeCloudPlatform,

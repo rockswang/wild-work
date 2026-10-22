@@ -199,6 +199,7 @@ func NewHandler(cfg Config) *Handler {
 	}
 	h := &Handler{cfg: cfg, mux: http.NewServeMux(), sticky: make(map[string]*stickyEntry), ledger: cfg.Ledger, stats: cfg.Stats, fallbacks: cfg.ModelFallbacks, efforts: cfg.ReasoningEfforts}
 	h.mux.HandleFunc("POST /v1/chat/completions", h.withAuth(h.chatCompletions))
+	h.mux.HandleFunc("POST /v1/embeddings", h.withAuth(h.embeddings))
 	h.mux.HandleFunc("POST /v1/images/generations", h.withAuth(h.imagesGenerations))
 	h.mux.HandleFunc("POST /v1/images/edits", h.withAuth(h.imagesEdits))
 	h.mux.HandleFunc("GET /v1/models", h.withAuth(h.models))

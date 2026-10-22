@@ -75,48 +75,80 @@ func (s *loginSession) sessionState() string {
 	return s.state.State
 }
 
-// SubmitCallbackURL 手动提交浏览器跳转后的回调地址（远程/局域网面板的粘贴兜底入口）。
+// parseCallbackURL 从用户粘贴的内容中提取授权码、state 与错误。
 //
-// 与 codearts/lobsterai 的同名函数同构：解析 URL query → 复用 handleCallback 的
-// 同一条校验链（state 逐字比对 → error 透传 → code 先到保留）。
-// 与 HTTP 回调的差异只在「无 w 可写页面」：state 不匹配/缺 code 时仅落 pending.errMsg，
-// 由 Poll 报出可行动错误（与 reject 的语义一致）。兑换路径零分叉。
+// 兼容支持：
+//  1. 完整回调 URL（如 https://antigravity.google/oauth-callback?state=...&code=4/0AX...）
+//  2. 查询串（如 ?code=...&state=...）
+//  3. 官方授权完成页面上展示并提供一键复制的裸授权码（如 4/0AX...）
+func parseCallbackURL(raw string) (code, state, errName, errDesc string) {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return "", "", "", ""
+	}
+
+	// 1. 尝试作为完整 URL 解析
+	if u, err := url.Parse(trimmed); err == nil && (u.Scheme != "" || u.Host != "" || strings.Contains(trimmed, "?") || strings.Contains(trimmed, "#")) {
+		q := u.Query()
+		// 如果 query 中没有 code，但 hash 中有，尝试从 hash 中解析参数
+		if q.Get("code") == "" && u.Fragment != "" {
+			frag := strings.TrimPrefix(u.Fragment, "#")
+			if fq, ferr := url.ParseQuery(frag); ferr == nil {
+				for k, vs := range fq {
+					if len(vs) > 0 && q.Get(k) == "" {
+						q[k] = vs
+					}
+				}
+			}
+		}
+		if q.Get("code") != "" || q.Get("error") != "" {
+			return q.Get("code"), q.Get("state"), q.Get("error"), q.Get("error_description")
+		}
+	}
+
+	// 2. 尝试作为 url.Values 解析 (如直接粘贴 code=...&state=...)
+	if strings.Contains(trimmed, "=") {
+		if q, err := url.ParseQuery(strings.TrimPrefix(trimmed, "?")); err == nil {
+			if q.Get("code") != "" || q.Get("error") != "" {
+				return q.Get("code"), q.Get("state"), q.Get("error"), q.Get("error_description")
+			}
+		}
+	}
+
+	// 3. 裸授权码（官方 antigravity 页面复制的 code 或直接复制的 authorization code）
+	return trimmed, "", "", ""
+}
+
+// SubmitCallbackURL 手动提交浏览器跳转后的回调地址或复制的授权码。
+//
+// 兼顾两种交互形态：
+//  - 若粘贴完整 URL 且携带 state，进行严格逐字比对（防串号与跨请求错乱）
+//  - 若直接粘贴授权码页面上复制的 code（如 4/0AX...），直接提取并进入兑换流程
 func SubmitCallbackURL(raw string) error {
 	sess := currentSession()
 	if sess == nil {
 		return errors.New("没有进行中的登录流程（可能已完成或已超时），请重新发起登录")
 	}
-	q, err := url.ParseQuery(strings.TrimPrefix(strings.TrimSpace(raw), ""))
-	if err != nil {
-		// 完整 URL 形态：Parse 整条后取 query 重试
-		u, uerr := url.Parse(strings.TrimSpace(raw))
-		if uerr != nil {
-			return fmt.Errorf("回调地址无法解析: %w", err)
-		}
-		q = u.Query()
-	}
-	// 1. state 逐字比对（与 handleCallback 同一条规则）
-	got := q.Get("state")
-	if got == "" {
-		m := "回调缺少 state 参数，已拒绝"
+
+	code, gotState, errName, errDesc := parseCallbackURL(raw)
+
+	// 1. 若携带了 state，做严格逐字比对（防串号或误贴历史地址）
+	if gotState != "" && gotState != sess.sessionState() {
+		m := "state 不匹配，已拒绝该回调（多半是上一次登录遗留的地址，请用本次登录后跳转的那条完整 URL）"
 		sess.fail(m)
 		return errors.New(m)
 	}
-	if got != sess.sessionState() {
-		m := "state 不匹配，已拒绝该回调（多半是上一次登录遗留的地址，请用本次登录后跳转的那条）"
-		sess.fail(m)
-		return errors.New(m)
-	}
+
 	// 2. 用户取消 / 上游报错
-	if e := q.Get("error"); e != "" {
-		desc := firstNonEmpty(q.Get("error_description"), e)
+	if errName != "" {
+		desc := firstNonEmpty(errDesc, errName)
 		sess.fail(desc)
 		return fmt.Errorf("登录失败: %s", desc)
 	}
-	// 3. code 先到保留（与 handleCallback 同款）
-	code := q.Get("code")
+
+	// 3. 提取 code
 	if code == "" {
-		const m = "回调缺少 code 参数：请复制含 code=… 的整条 URL"
+		const m = "未从输入中识别出授权码：请粘贴授权码或含 code=… 的完整 URL"
 		sess.fail(m)
 		return errors.New(m)
 	}
@@ -169,8 +201,6 @@ func writePage(w http.ResponseWriter, status int, htmlBody string) {
 }
 
 // callbackPage 渲染本机回调响应页（成功/失败两态）。
-// 与 login_qwenwork / login_lobsterai 共用同一套视觉约定（青蓝 #0e7490、成功 1.5s 自动关），
-// 但各自内联一份：工具的包边界原则是"渠道间零耦合"，不为一段 HTML 建共享包。
 func callbackPage(ok bool, msg string) string {
 	if ok {
 		return fmt.Sprintf(callbackPageBase, "ok", "✓", "已收到授权",
@@ -235,7 +265,6 @@ const callbackPageBase = `<!doctype html>
 var autoClose = %s;
 function tryClose() { window.close(); }
 if (autoClose) { setTimeout(tryClose, %d); }
-// window.close 对非脚本打开的页面常被浏览器拦截：拦截时提示手动关闭
 setTimeout(function () {
   var b = document.querySelector('.close-btn');
   if (!window.closed && b) { b.textContent = '关闭此标签页'; }

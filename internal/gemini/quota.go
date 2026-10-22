@@ -30,6 +30,7 @@
 package gemini
 
 import (
+	"net/http"
 	"encoding/json"
 	"fmt"
 	"math"
@@ -164,6 +165,7 @@ type quotaBucket struct {
 type quotaResponse struct {
 	Groups []struct {
 		DisplayName string        `json:"displayName"`
+		GroupID     string        `json:"groupId"`
 		Buckets     []quotaBucket `json:"buckets"`
 	} `json:"groups"`
 }
@@ -198,60 +200,106 @@ func (c *Client) quotaSummary(a *auth.Auth, project string) ([]provider.Resource
 	return items, nil
 }
 
-// parseQuotaItems 解析配额响应 → ResourceItem 列表（顺序：5 小时窗口 → 周窗口）。
+// parseQuotaItems 解析配额响应 → ResourceItem 列表。
+// 按模型组（Gemini 与 Claude/GPT 等）分别识别 5 小时窗口和周窗口，独立分开显示。
 func parseQuotaItems(raw []byte) ([]provider.ResourceItem, error) {
 	var resp quotaResponse
 	if err := json.Unmarshal(raw, &resp); err != nil {
 		return nil, fmt.Errorf("gemini：配额响应不是 JSON（%v）", err)
 	}
-	var fiveHour, weekly *quotaBucket
+
+	items := make([]provider.ResourceItem, 0, 4)
 	for gi := range resp.Groups {
-		for bi := range resp.Groups[gi].Buckets {
-			b := resp.Groups[gi].Buckets[bi]
-			switch b.BucketID {
-			case BucketFiveHour:
+		grp := resp.Groups[gi]
+		groupPrefix, groupKey := normalizeQuotaGroup(grp.DisplayName, grp.GroupID)
+		if groupPrefix == "" {
+			continue
+		}
+
+		var fiveHour, weekly *quotaBucket
+		for bi := range grp.Buckets {
+			b := grp.Buckets[bi]
+			w := normalizeQuotaWindow(b)
+			switch w {
+			case "5h":
 				if fiveHour == nil {
 					fiveHour = &b
 				}
-			case BucketWeekly:
+			case "weekly":
 				if weekly == nil {
 					weekly = &b
 				}
 			}
 		}
-	}
-	if fiveHour == nil && weekly == nil {
-		// 两个桶都没认出来 ⇒ 真失败，**不伪造 100%**（伪造比报错更误导：用户会以为额度用光了）。
-		return nil, fmt.Errorf("gemini：配额响应里没有 Gemini 配额桶（%s / %s）", BucketFiveHour, BucketWeekly)
-	}
-	items := make([]provider.ResourceItem, 0, 2)
-	for _, b := range []*quotaBucket{fiveHour, weekly} {
-		if b == nil {
-			continue
+
+		for _, b := range []*quotaBucket{fiveHour, weekly} {
+			if b == nil {
+				continue
+			}
+			item, ok := quotaItem(*b, groupPrefix, groupKey)
+			if ok {
+				items = append(items, item)
+			}
 		}
-		item, ok := quotaItem(*b)
-		if !ok {
-			continue // resetTime / remainingFraction 不可用 ⇒ 整条丢弃，不伪造窗口
-		}
-		items = append(items, item)
 	}
+
 	if len(items) == 0 {
-		return nil, fmt.Errorf("gemini：配额桶存在但字段不可用（remainingFraction / resetTime 缺失或不可解析）")
+		return nil, fmt.Errorf("gemini：配额响应里未找到可用配额桶")
 	}
 	return items, nil
 }
 
+// normalizeQuotaGroup 归一化配额组前缀与键名。
+func normalizeQuotaGroup(displayName, groupID string) (prefix, key string) {
+	combined := strings.ToLower(displayName + " " + groupID)
+	if strings.Contains(combined, "gemini") {
+		return "Gemini", "gemini"
+	}
+	if strings.Contains(combined, "claude") || strings.Contains(combined, "gpt") {
+		return "Claude/GPT", "claude_gpt"
+	}
+	trimmed := strings.TrimSpace(displayName)
+	if trimmed == "" {
+		trimmed = strings.TrimSpace(groupID)
+	}
+	if trimmed == "" {
+		return "", ""
+	}
+	return trimmed, strings.ToLower(trimmed)
+}
+
+// normalizeQuotaWindow 识别桶是 5 小时窗口还是周窗口。
+func normalizeQuotaWindow(b quotaBucket) string {
+	w := strings.ToLower(strings.TrimSpace(b.Window))
+	if w == "5h" || w == "session" {
+		return "5h"
+	}
+	if w == "weekly" || w == "7d" {
+		return "weekly"
+	}
+	text := strings.ToLower(b.BucketID)
+	if strings.Contains(text, "5h") || strings.Contains(text, "session") {
+		return "5h"
+	}
+	if strings.Contains(text, "weekly") || strings.Contains(text, "7d") {
+		return "weekly"
+	}
+	return ""
+}
+
 // quotaItem 单个桶 → ResourceItem；ok=false 表示该桶字段不满足硬约束。
-func quotaItem(b quotaBucket) (provider.ResourceItem, bool) {
-	label := ""
-	switch b.BucketID {
-	case BucketFiveHour:
-		label = WindowLabelFiveHour
-	case BucketWeekly:
-		label = WindowLabelWeekly
+func quotaItem(b quotaBucket, groupPrefix, groupKey string) (provider.ResourceItem, bool) {
+	windowType := normalizeQuotaWindow(b)
+	windowLabel := ""
+	switch windowType {
+	case "5h":
+		windowLabel = WindowLabelFiveHour
+	case "weekly":
+		windowLabel = WindowLabelWeekly
 	default:
 		return provider.ResourceItem{}, false
 	}
+
 	if b.RemainingFraction == nil || math.IsNaN(*b.RemainingFraction) || math.IsInf(*b.RemainingFraction, 0) {
 		return provider.ResourceItem{}, false
 	}
@@ -260,18 +308,18 @@ func quotaItem(b quotaBucket) (provider.ResourceItem, bool) {
 		return provider.ResourceItem{}, false
 	}
 	percent := int64(math.Round(clamp01(*b.RemainingFraction) * 100))
+	key := b.BucketID
+	if key == "" {
+		key = groupKey + "_" + windowType
+	}
 	return provider.ResourceItem{
-		// 单位写进名字：ResourceItem 没有单位字段，不写就会把 99 误读成 99 积分。
-		Name: label + "（" + QuotaUnit + "）",
-		// Total/Remain/Used 一律按百分比表达（Total=100 是「窗口总量 = 100%」）。
-		Total:  100,
-		Remain: percent,
-		Used:   100 - percent,
-		// ExpireAt 是窗口重置时刻（上游 resetTime），按 UTC+8 墙钟输出（不变量 18）。
+		// 格式：Gemini 5 小时窗口（%）、Claude/GPT 周窗口（%）
+		Name:     groupPrefix + " " + windowLabel + "（" + QuotaUnit + "）",
+		Total:    100,
+		Remain:   percent,
+		Used:     100 - percent,
 		ExpireAt: reset.In(quotaLoc).Format(time.RFC3339),
-		Key:      b.BucketID,
-		// Usable=true：它是账号真实可用的额度；InfoOnly=true：它**不是积分**，
-		// 不参与 Summarize 小计 / 临期 / ledger 差分（见文件头）。
+		Key:      key,
 		Usable:   true,
 		InfoOnly: true,
 	}, true
@@ -317,10 +365,15 @@ func (c *Client) cacheQuota(key string, items []provider.ResourceItem) {
 
 // classifyErr 把 HTTP 层失败转成类型化的 *provider.Error。
 func classifyErr(status int, raw []byte, what string) error {
+	kind := Classify(status, string(raw))
+	msg := fmt.Sprintf("gemini：%s失败（HTTP %d）：%s", what, status, snippet(raw))
+	if status == http.StatusUnauthorized || status == http.StatusForbidden {
+		msg += "（若为旧版本保存的凭据，建议删除该账号后重新使用 OAuth 登录）"
+	}
 	return &provider.Error{
-		Kind:   Classify(status, string(raw)),
+		Kind:   kind,
 		Status: status,
-		Msg:    fmt.Sprintf("gemini：%s失败（HTTP %d）：%s", what, status, snippet(raw)),
+		Msg:    msg,
 	}
 }
 
@@ -329,22 +382,20 @@ func classifyErr(status int, raw []byte, what string) error {
 // ---------------------------------------------------------------------------
 
 // UserResource 实现 provider.Upstream。
-//
-// ⚠️ 返回 **0**：本渠道没有「可消耗积分」这个概念，配额是窗口百分比（见文件头）。
-// 返回 0 是如实的「本工具口径下没有可消耗积分」，而不是「查询失败」——
-// 配额明细由 UserResourceDetail 的 InfoOnly 条目承载。
+// 返回最少窗口百分比（0~100）。
 func (c *Client) UserResource(a *auth.Auth) (int64, error) {
-	_, _, err := c.UserResourceDetail(a)
-	return 0, err
+	remain, _, err := c.UserResourceDetail(a)
+	return remain, err
 }
 
-// UserResourceDetail 实现 provider.Upstream：返回 (0, 配额窗口条目, error)。
+// UserResourceDetail 实现 provider.Upstream：返回 (最少窗口百分比, 配额窗口条目, error)。
 //
 // 编排（与参考实现同构）：
 //  1. project 取「凭据真值 → 未知则先探测」：配额请求**必须**带正确的 project
 //     （协议 §2.7 第 1 条），拿默认值去问会得到 403；
 //  2. 档位探测（loadCodeAssist）与配额查询**并行**，且**档位失败绝不污染配额结果**——
-//     「账号规格」只是一栏附注，不能因为它挂了就把整行变成错误。
+//     「账号规格」只是一栏附注，不能因为它挂了就把整行变成错误；
+//  3. 余额汇总取所有配额窗口的最少剩余百分比（0~100），如实反映账号最紧张的瓶颈窗口。
 func (c *Client) UserResourceDetail(a *auth.Auth) (int64, []provider.ResourceItem, error) {
 	token := tokenOf(a)
 	if token == "" {
@@ -386,7 +437,20 @@ func (c *Client) UserResourceDetail(a *auth.Auth) (int64, []provider.ResourceIte
 	if qerr != nil {
 		return 0, nil, qerr
 	}
-	return 0, items, nil
+
+	// 计算最少窗口百分比（如 5h 剩 99%，周剩 50% ⇒ 返回 50）
+	var minPercent int64 = 100
+	if len(items) > 0 {
+		for _, it := range items {
+			if it.Remain < minPercent {
+				minPercent = it.Remain
+			}
+		}
+	} else {
+		minPercent = 0
+	}
+
+	return minPercent, items, nil
 }
 
 // tierProbe 档位探测的并行结果。

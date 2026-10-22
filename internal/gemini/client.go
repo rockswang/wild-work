@@ -57,6 +57,9 @@ type Client struct {
 	projCache map[string]string
 	// quotaCache 配额查询缓存（TTL = QuotaCacheTTL），键同上。
 	quotaCache map[string]quotaCacheEntry
+	// modelsCache 远端模型目录缓存。
+	modelsCache []provider.ModelInfo
+	modelsCacheAt time.Time
 }
 
 // quotaCacheEntry 一次成功配额查询的结果与时刻。
@@ -201,7 +204,11 @@ func (c *Client) ChatStream(a *auth.Auth, body []byte) (io.ReadCloser, int, []by
 		return nil, status,
 			localErrorBody(status, "upstream_error", "gemini：project 探测失败，未发推理（"+err.Error()+"）"), nil
 	}
-	out, code, err := buildInternalBody(body, project)
+	c.mu.Lock()
+	cachedModels := c.modelsCache
+	c.mu.Unlock()
+
+	out, code, err := buildInternalBodyWithModels(body, project, cachedModels)
 	if err != nil {
 		return nil, http.StatusBadRequest, localErrorBody(http.StatusBadRequest, code, "gemini："+err.Error()), nil
 	}
@@ -373,9 +380,84 @@ func ParseTokenGrant(raw []byte, previousRefreshToken string) (TokenGrant, error
 // provider.Upstream：模型清单 / 定价
 // ---------------------------------------------------------------------------
 
-// FetchModels 实现 provider.Upstream：**纯静态表**，不发任何上游请求
-// （协议 §2.6：用户 2026-10-03 拍板静态表，不拉远端目录）。
-func (c *Client) FetchModels(_ *auth.Auth) ([]provider.ModelInfo, error) { return StaticModels(), nil }
+// FetchModels 实现 provider.Upstream：从上游 fetchAvailableModels 端点动态拉取模型目录，
+// 失败或无凭据时自动回退至静态表 StaticModels()，并做内存缓存（TTL 5分钟）。
+func (c *Client) FetchModels(a *auth.Auth) ([]provider.ModelInfo, error) {
+	c.mu.Lock()
+	if len(c.modelsCache) > 0 && time.Since(c.modelsCacheAt) < 5*time.Minute {
+		cached := make([]provider.ModelInfo, len(c.modelsCache))
+		copy(cached, c.modelsCache)
+		c.mu.Unlock()
+		return cached, nil
+	}
+	c.mu.Unlock()
+
+	token := tokenOf(a)
+	if token == "" {
+		return StaticModels(), nil
+	}
+
+	remote, err := c.fetchRemoteModels(a, token)
+	if err != nil {
+		// 上游拉取失败时打 Warn 日志，并优雅降级返回静态兜底表（保持可用性）
+		log.Printf("gemini: 从上游拉取动态模型目录失败，降级使用静态表: %v", err)
+		return StaticModels(), nil
+	}
+	if len(remote) == 0 {
+		return StaticModels(), nil
+	}
+
+	merged := mergeModelCatalog(remote, StaticModels())
+
+	c.mu.Lock()
+	c.modelsCache = merged
+	c.modelsCacheAt = time.Now()
+	c.mu.Unlock()
+
+	return merged, nil
+}
+
+// fetchRemoteModels 请求 /v1internal:fetchAvailableModels
+func (c *Client) fetchRemoteModels(a *auth.Auth, token string) ([]provider.ModelInfo, error) {
+	project, _ := c.resolveProject(a)
+	if project == "" {
+		project = DefaultProject
+	}
+	bodyJSON := fmt.Sprintf(`{"project":%q}`, project)
+	var lastErr error
+	for _, ep := range c.endpoints() {
+		req, err := http.NewRequest(http.MethodPost, ep+EpFetchAvailableModels, strings.NewReader(bodyJSON))
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		identityHeaders(req, token)
+		resp, err := c.HTTP.Do(req)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+		_ = resp.Body.Close()
+		if resp.StatusCode >= 400 {
+			lastErr = classifyErr(resp.StatusCode, raw, "获取模型目录")
+			continue
+		}
+
+		models := parseAvailableModelsResponse(raw)
+		if len(models) > 0 {
+			return models, nil
+		}
+	}
+	if lastErr != nil {
+		return nil, lastErr
+	}
+	return nil, &provider.Error{
+		Kind:   provider.ErrServer,
+		Status: http.StatusBadGateway,
+		Msg:    "gemini: 无法从上游获取模型目录",
+	}
+}
 
 // FetchModelPricing 本渠道**没有费率端点**（协议 §2.6/§2.7 全篇无倍率/定价字段），
 // 故返回空切片——面板显示「未知」，而不是把缺失当成「免费」。
@@ -700,4 +782,148 @@ func (c *Client) persistProject(a *auth.Auth, info codeAssistInfo) {
 	if err := a.SaveAtomic(); err != nil {
 		log.Printf("gemini：project/档位写回凭据失败 uid=%s err=%v", a.UID, err)
 	}
+}
+
+// ---------------------------------------------------------------------------
+// 扩展多模态能力接口：Embeddings 与 Imagen 生图
+// ---------------------------------------------------------------------------
+
+// EmbedTexts 实现 server.EmbeddingsProvider 接口：调用 /v1internal:embedContent 进行向量化。
+func (c *Client) EmbedTexts(a *auth.Auth, model string, texts []string, dimensions int) ([][]float64, int, error) {
+	token := tokenOf(a)
+	if token == "" {
+		return nil, 0, &provider.Error{Kind: provider.ErrSessionDead, Msg: "gemini: 账号未授权"}
+	}
+	project, _ := c.resolveProject(a)
+	if project == "" {
+		project = DefaultProject
+	}
+
+	embeddings := make([][]float64, 0, len(texts))
+	totalTokens := 0
+
+	for _, text := range texts {
+		reqBody := map[string]any{
+			"project": project,
+			"model":   model,
+			"content": map[string]any{
+				"parts": []map[string]any{{"text": text}},
+			},
+		}
+		if dimensions > 0 {
+			reqBody["outputDimensionality"] = dimensions
+		}
+		rawReq, err := json.Marshal(reqBody)
+		if err != nil {
+			return nil, 0, err
+		}
+
+		var lastErr error
+		success := false
+		for _, ep := range c.endpoints() {
+			url := ep + "/v1internal:embedContent"
+			req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(rawReq))
+			if err != nil {
+				lastErr = err
+				continue
+			}
+			identityHeaders(req, token)
+			resp, err := c.HTTP.Do(req)
+			if err != nil {
+				lastErr = err
+				continue
+			}
+			bodyRaw, _ := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
+			_ = resp.Body.Close()
+
+		if resp.StatusCode >= 400 {
+				lastErr = classifyErr(resp.StatusCode, bodyRaw, "embedContent")
+				continue
+			}
+
+			var result struct {
+				Embedding struct {
+					Values []float64 `json:"values"`
+				} `json:"embedding"`
+			}
+			if err := json.Unmarshal(bodyRaw, &result); err != nil {
+				lastErr = err
+				continue
+			}
+			embeddings = append(embeddings, result.Embedding.Values)
+			totalTokens += len(strings.Fields(text))
+			success = true
+			break
+		}
+		if !success {
+			if lastErr != nil {
+				return nil, 0, lastErr
+			}
+			return nil, 0, fmt.Errorf("gemini: embedContent 失败")
+		}
+	}
+	return embeddings, totalTokens, nil
+}
+
+// GenerateImage 实现 server.ImageGeneratorProvider 接口：调用 /v1internal:predict 进行 Imagen 生图。
+func (c *Client) GenerateImage(a *auth.Auth, prompt, size string, n int) ([]string, []string, error) {
+	token := tokenOf(a)
+	if token == "" {
+		return nil, nil, &provider.Error{Kind: provider.ErrSessionDead, Msg: "gemini: 账号未授权"}
+	}
+	project, _ := c.resolveProject(a)
+	if project == "" {
+		project = DefaultProject
+	}
+
+	reqBody := map[string]any{
+		"project": project,
+		"instances": []map[string]any{
+			{"prompt": prompt},
+		},
+		"parameters": map[string]any{
+			"sampleCount": n,
+			"aspectRatio": size,
+		},
+	}
+	rawReq, err := json.Marshal(reqBody)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	for _, ep := range c.endpoints() {
+		url := ep + "/v1internal:predict"
+		req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(rawReq))
+		if err != nil {
+			continue
+		}
+		identityHeaders(req, token)
+		resp, err := c.HTTP.Do(req)
+		if err != nil {
+			continue
+		}
+		bodyRaw, _ := io.ReadAll(io.LimitReader(resp.Body, 10<<20))
+		_ = resp.Body.Close()
+
+		if resp.StatusCode >= 400 {
+			return nil, nil, classifyErr(resp.StatusCode, bodyRaw, "predict/imagen")
+		}
+
+		var result struct {
+			Predictions []struct {
+				BytesBase64Encoded string `json:"bytesBase64Encoded"`
+				MimeType           string `json:"mimeType"`
+			} `json:"predictions"`
+		}
+		if err := json.Unmarshal(bodyRaw, &result); err == nil && len(result.Predictions) > 0 {
+			b64List := make([]string, 0, len(result.Predictions))
+			revisedList := make([]string, 0, len(result.Predictions))
+			for _, p := range result.Predictions {
+				b64List = append(b64List, p.BytesBase64Encoded)
+				revisedList = append(revisedList, prompt)
+			}
+			return b64List, revisedList, nil
+		}
+	}
+	return nil, nil, fmt.Errorf("gemini: imagen 生图未返回有效图像")
 }

@@ -39,6 +39,7 @@ func clearOAuthClientEnv(t *testing.T) {
 
 	_ = os.Unsetenv(gemini.EnvClientID)
 	_ = os.Unsetenv(gemini.EnvClientSecret)
+	_ = os.Setenv("WILDWORK_GEMINI_DISABLE_DEFAULT_CLIENT", "1")
 	// 指向不存在的目录：提取器必然返回空串，用例结果不依赖本机是否装了 CLI。
 	_ = os.Setenv("GEMINI_CLI_HOME", filepath.Join(t.TempDir(), "no-cli-here"))
 	// 清缓存后再读，才能拿到"空凭据"这一真实状态。
@@ -58,6 +59,7 @@ func clearOAuthClientEnv(t *testing.T) {
 		restore(gemini.EnvClientID, oldID, idSet)
 		restore(gemini.EnvClientSecret, oldSecret, secretSet)
 		restore("GEMINI_CLI_HOME", oldHome, homeSet)
+		_ = os.Unsetenv("WILDWORK_GEMINI_DISABLE_DEFAULT_CLIENT")
 		gemini.ResetOAuthClientCacheForTest()
 	})
 }
@@ -92,24 +94,16 @@ func TestStartMissingOAuthClientIsActionable(t *testing.T) {
 	}
 
 	msg := err.Error()
-	// ① 必须点名「查了哪些位置」，用户才能自查（修复前一个字都没有）。
-	// 断言用"扫描过"这个句式 + 一个必然存在的路径片段（node_modules），而不是 GEMINI_CLI_HOME：
-	// 后者只在用户**真的设了**该变量时才会出现在路径列表里。
-	if !strings.Contains(msg, "已查过的本机位置") || !strings.Contains(msg, "node_modules") {
-		t.Errorf("文案应列出扫描过的 CLI 路径，实际：%s", msg)
-	}
-	// ② 必须给出**可执行**的获取途径，而不只是变量名。
+	// ① 必须给出可执行的自建客户端获取途径。
 	for _, want := range []string{
-		"npm install",              // 装官方 CLI（自动提取）
-		"console.cloud.google.com", // 自建 OAuth 客户端
-		gemini.CallbackPath,        // 回调地址必须注册成 /oauth-callback
-		"随机端口",                     // 回调端口是动态的，用户得知道要登记 http://localhost
+		"console.cloud.google.com",  // 自建 OAuth 客户端
+		gemini.AntigravityRedirectURI, // 回调地址
 	} {
 		if !strings.Contains(msg, want) {
 			t.Errorf("文案缺少可操作要素 %q，实际：%s", want, msg)
 		}
 	}
-	// ③ 零 token 纪律：不得把 secret 一类值回显进文案（AGENTS.md §0.2）。
+	// ② 零 token 纪律：不得把 secret 一类值回显进文案（AGENTS.md §0.2）。
 	if strings.Contains(msg, "GOCSPX") {
 		t.Errorf("错误文案不得回显凭据：%s", msg)
 	}

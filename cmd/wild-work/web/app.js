@@ -904,6 +904,10 @@ function creditsText(a) {
   // Token 计量渠道（credits_unit="token"，如 ZCode）：同一位置改显示 **Token 计数**。
   // 与积分分开统计——它**不进**积分汇总合计（见 renderSummary），
   // 但保留临期角标（token 桶同样有到期时间，来自内部 ResourceItem.ExpireAt）。
+  // 配额百分比渠道（credits_unit="%"，如 Gemini）：显示最少窗口百分比
+  if (a.credits_unit === "%" || a.credits_unit === "percent" || a.group === "gemini") {
+    return `<span class="credit-num">${a.credits}%</span><span title="配额窗口剩余比例（显示最少窗口百分比，点击查看完整明细）">剩余配额</span>`;
+  }
   if (a.credits_unit === "token") {
     let html = `<span class="credit-num">${fmtTokens(a.credits)}</span>`
       + `<span title="本渠道额度以 token 计量，与积分分开统计">tokens</span>`;
@@ -944,6 +948,14 @@ function renderSummary() {
     if (!c) { c = byCh[g] = { n: 0, credits: 0, expiring: 0, unusable: 0, stale: 0, na: false, isToken: false, tokens: 0 }; }
     c.n++;
     if (a.credits_na) { c.na = true; continue; }
+    // 百分比计量渠道（如 Gemini）：取各账号最少窗口百分比，不并入积分合计
+    if (a.credits_unit === "%" || a.credits_unit === "percent" || a.group === "gemini") {
+      c.isPercent = true;
+      if (c.percent === undefined || (a.credits || 0) < c.percent) {
+        c.percent = (a.credits || 0);
+      }
+      continue;
+    }
     // Token 计量渠道单列：只累加 token 数，**不并入**积分合计（与积分分开统计）。
     if (a.credits_unit === "token") { c.isToken = true; c.tokens += a.credits || 0; c.expiring += a.expiring_credits || 0; continue; }
     c.credits += a.credits || 0;
@@ -971,11 +983,14 @@ function renderSummary() {
     // R17 口径：口径过期的数字不当真值——全渠道待刷新时不进合计
     // （否则"待刷新"的旧值会悄悄抬高合计，用户看到的数字无从解释）。
     // Token 计量渠道不进积分合计（这就是「和积分分开统计」的落点）。
-    if (!c.na && !c.isToken && !allStale) { total += c.credits; totalExp += c.expiring; }
-    if (!c.na && !c.isToken && allStale) staleChs++;
+    if (!c.na && !c.isToken && !c.isPercent && !allStale) { total += c.credits; totalExp += c.expiring; }
+    if (!c.na && !c.isToken && !c.isPercent && allStale) staleChs++;
     let body;
     if (c.na) {
       body = `<span class="credit-na">不适用</span>`;
+    } else if (c.isPercent) {
+      body = `<span class="cs-num">${c.percent}%</span>`
+        + `<span class="cs-tok" title="本渠道额度为配额百分比，不计入「合计」">配额</span>`;
     } else if (c.isToken) {
       // Token 计数：以 tokens 为单位单列，明示它不是积分。
       body = `<span class="cs-num">${fmtTokens(c.tokens)}</span>`
@@ -1248,9 +1263,15 @@ function channelCredits(kind) {
     if (a.credits_na) return null; // 匿名渠道无额度概念
     has = true;
     if (a.credits_unit === "token") unit = "token";
+    if (a.credits_unit === "%" || a.credits_unit === "percent" || a.group === "gemini") {
+      unit = "%";
+      if ((a.credits || 0) < minPercent) minPercent = a.credits || 0;
+    }
     sum += a.credits || 0;
   }
-  return has ? { bal: sum, unit } : null;
+  if (!has) return null;
+  if (unit === "%") return { bal: minPercent, unit: "%" };
+  return { bal: sum, unit };
 }
 
 // tabBalText 渠道 tab 余额角标文案（按计量单位切换：token 与积分分开显示）。
@@ -1691,9 +1712,12 @@ async function refreshOne(uid) {
     const r = await api("/api/account/refresh", { uid });
     // 单位随账号切换：token 计量渠道（如 ZCode）不叫「积分」（否则上亿 token 被读成积分）。
     const acc = (state.accounts || []).find((x) => x.uid === uid);
+    const isPct = acc && (acc.credits_unit === "%" || acc.credits_unit === "percent" || acc.group === "gemini");
     toast(acc && acc.credits_unit === "token"
       ? `刷新成功：剩余 ${fmtTokens(r.remain)} tokens`
-      : `刷新成功：剩余积分 ${r.remain}`);
+      : (isPct
+        ? `刷新成功：剩余配额 ${r.remain}%`
+        : `刷新成功：剩余积分 ${r.remain}`));
     delete detailCache[uid]; // 顶层已更新，旧明细缓存须作废，否则「新顶层+旧弹层」
     loadState();
   } catch (e) { toast(e.message); }
@@ -1997,10 +2021,15 @@ async function startLogin(channel, accountLabel) {
     // 想全自动：把该端口固定（config.login.lobsterai_callback_port）并在浏览器所在机器上
     // 建一条 `ssh -L 127.0.0.1:<port>:127.0.0.1:<port> <网关>` 转发，之后无需粘贴。
     if (r.manual_callback) {
-      $("lcCallbackHint").textContent =
-        "登录完成后若浏览器停在一条打不开的 127.0.0.1 地址上（上游只允许回调到 127.0.0.1，"
-        + "从别的机器打开面板时必然如此）：把那条完整 URL（含 ? 之后的全部参数）复制到下面提交，网关会立刻换取凭据。"
-        + "浏览器与网关同一台机器时无需理会此项；若已在浏览器所在机器建好端口转发，也会自动完成。";
+      if (channel === "gemini") {
+        $("lcCallbackHint").textContent =
+          "Google 授权完成后，复制页面上显示的授权码或地址栏完整 URL 粘贴到下方，点击「提交回调」即可完成登录。";
+      } else {
+        $("lcCallbackHint").textContent =
+          "登录完成后若浏览器停在一条打不开的 127.0.0.1 地址上（上游只允许回调到 127.0.0.1，"
+          + "从别的机器打开面板时必然如此）：把那条完整 URL（含 ? 之后的全部参数）复制到下面提交，网关会立刻换取凭据。"
+          + "浏览器与网关同一台机器时无需理会此项；若已在浏览器所在机器建好端口转发，也会自动完成。";
+      }
       $("lcCallbackRow").classList.remove("hidden");
     } else {
       $("lcCallbackRow").classList.add("hidden");
@@ -4314,7 +4343,7 @@ function renderPlatformTable(s) {
       `<span class="st-plat-no">${i + 1}</span>` +
       `<span class="st-plat-slot">${chBadge(r.group)}</span>` +
       `<span class="st-plat-accts">${fmtCredits(r.accounts)}</span>` +
-      stPlatNum("st-plat-credits", r.credits, "分") +
+      stPlatNum("st-plat-credits", r.credits, r.group === "gemini" ? "%" : "分") +
       stPlatNum("st-plat-in", r.credit_in) +
       stPlatNum("st-plat-out", r.credit_used) +
       stPlatNum("st-plat-expd", r.credit_expired) +
@@ -4412,7 +4441,8 @@ function renderRotation(rot) {
   for (const rv of rot) {
     // 单位随渠道切换：token 计量渠道（如 ZCode）显示 tokens，不再一律写「分」。
     const isTok = groupUnit(rv.group) === "token";
-    const bal = (v) => (isTok ? `${fmtTokens(v)} tokens` : `${fmtCredits(v)}分`);
+    const isPct = rv.group === "gemini" || groupUnit(rv.group) === "%";
+    const bal = (v) => (isTok ? `${fmtTokens(v)} tokens` : (isPct ? `${v}%` : `${fmtCredits(v)}分`));
     const cur = rv.current
       ? `使用中 <b>${esc(rv.current.nickname)}</b>（粘性 ${esc(rv.current.sticky || "0")}，余额 ${bal(rv.current.credits)}）`
       : `<span class="st-rot-none">暂无使用记录</span>`;
