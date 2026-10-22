@@ -45,7 +45,7 @@
 
 ---
 
-## 1. 决议项索引（R1–R124）
+## 1. 决议项索引（R1–R126）
 
 **全文（含证据链、反例、已知限制）见 [`docs/决议项.md`](docs/决议项.md)** —— 改动相关代码前必读对应条目。
 
@@ -156,6 +156,8 @@
 | R122 | **自定义渠道面板八项改进：标识可改名（必须级联引用配置）、明文眼睛、识别详情独立成行、导入与手填合并 tab panel、大目录上限、「关闭」带保存语义、费率页「显示全部模型」**（2026-10-22，用户逐条提出 m01521）：① **渠道标识可改名**——标识**就是** `provider.Kind`（`main.go` 用它拼 `state-custom-<name>.json`、虚拟账号 UID、`stats.RegisterChannelKind`），只比新旧两表**无法区分「改名」与「删一个+新增一个」** ⇒ 面板显式提交 `renames:[{new,old}]`；后端 `setCustomChannels` **密钥按新名查不到必须回退查旧名**（否则脱敏串按新名找不回现值 ⇒ 真密钥被空串覆盖落盘，最致命）；`renameCustomRefs` 联动 `compat.model_map`/`default_channel`/`model_fallback`(From+To)/`reasoning_efforts`(键)——这几类**只校形状不校渠道存在性**，不联动就是「配置还在、永久静默失效」；改完必须推 `fbSyncer`/`efSyncer`（`server.Handler` 里是**另一份内存副本**）；旧 state 文件 `os.Rename(...,".old")` 留档、**不搬到新名**（旧文件 UID 是 `custom-<旧>`，搬过去等于塞进对不上号的条目）；前端弹 `confirm` 如实列代价。② API Key 加**眼睛**：与「点复制」同一结论通道（`custom_channel_key` 单条取），明文只活在弹窗开→关那段时间，`closeChannelEditor` 清框+`ceKeyPlain`+回 `password`；新增态就地切 text **不发请求**。③ 识别详情 `#ceHint` **独立成行**（一长串结论和输入框同行会把框挤没）。④ 三弹窗合并成 **tab panel** `#modelPickOverlay`（`上游列表`/`手动添加·编辑`；**手填页签不打上游**）。⑤ **「点导入不是每次都能列出模型列表」是真缺陷**：旧 `io.LimitReader(resp.Body, 1<<20)` 把 OpenRouter 一类 3~4MiB 目录拦腰截断 ⇒ 报「不是合法 JSON」⇒ `probeBodyCap = 8<<20` + `probeTimeout = 45s`（旧 15s 走 sgproxy 常破），超限**明确报错**不给半截清单；`apiTails` 补 `/models`（粘的是目录地址，不剥会拼出 `/models/models`）。⑥ 导入列表改**行尾 ＋/− 即时增删**，删「全选/全不选/导入选中」三步（中间那步没有意义）。⑦ **「关闭」补保存语义**：脏则先 `saveCustomChannels()`、**失败不关窗**，成功后 `Promise.all([loadState(), loadFees()])` 让新 provider 当场进模型列表。⑧ 费率页接入点行后 **`显示全部模型` switch**：打开才**现拉**（`/api/fees` 30s 轮询不得变常开）、比前剥 `ch/` 前缀（R52）、**只展示不写盘**。判据：全部**代码推理 + httptest 实证**，未打上游（「OpenRouter 3~4MiB」是造样本，属**推断**）。回归：`internal/app/custom_rename_test.go`（`TestCustomChannelRenameCascade`/`TestCustomChannelRenameInvalidDropped`）、`discover_test.go`（`TestDiscoverHandlesLargeModelList`/`TestDiscoverDirectoryTailIsStripped`）、`endpoint_test.go` 补 6 例、`ui-static-check` 改写 17 条（**两条有意反转**：「标识编辑态不可改」→「可改且提交 renames」、「导入行 div+for/id 勾选」→「不得再有 checkbox/label」）。**16 处变异全部确认变红**。已知限制：**历史流水仍记旧渠道名**（`ledger.UsageEntry.Ch` 写死 `rt.Kind.String()`，不改写历史=不伪造账本）、旧前缀模型立即 `400 unknown channel` 且**不做 Router alias**、`stats.RegisterChannelKind` 只增不删、探测不缓存、「全部模型」不代勾选。详见 [`docs/决议项.md`](docs/决议项.md) R122 |
 | R123 | **合入外部 PR 时，决议项/文档类冲突一律不阻塞合并：PR 带来的条目自动顺延到 master 当前最大号之后，同步改号四处；代码冲突才算真冲突**（2026-10-22，用户 m02207 定）：`docs/决议项.md` 与 `AGENTS.md` 是**追加型**文件，多人并行时必然同抢一个号（实例：PR #189 与 #190 都自登记 R122，而 R122 已被 master `4ee7802` 占用），过去每次评审都把它当阻塞项汇报，浪费回合且诱发「先合了再说」的错号入库。**纪律**：① **master 的号永不重排**，PR 带来的条目一律改写成 master 当前最大号 +1（多个 PR 条目按提交顺序递增）；② 改号必须同步**四处**：`AGENTS.md` §1 索引表行、`docs/决议项.md` 表体行、两处范围标记（`AGENTS.md` 的 `## 1. 决议项索引（R1–RNNN）` 与 §6 文档表的 `R1–RNNN 决议全文`、`docs/决议项.md:1` 标题），以及**正文里对该条自身的自引用**（如「详见 R122」）；③ 冲突处理原则：追加型文档取**并集**（两边行都保留、按号排序），**不是二选一**——`--ours/--theirs` 都会丢条目；④ markdown 表格**行行相连**，插行不得带空行（空行会把表截断成两半，R122 踩过）；⑤ **只有代码/接口冲突才算真冲突**，评估报告里不得把文档号冲突列成阻塞项；⑥ **例外**：若 PR 的条目实质推翻 master 已定条目（改同一处实现的结论），那不是编号问题，必须显式提出让用户拍板（§0.2「不推翻已定决议」）。详见 [`docs/决议项.md`](docs/决议项.md) R123 |
 | R124 | **`/v1/models` 补 `supported_parameters` 与 `reasoning.mandatory`（合入外部 PR #189，作者 reno；**剔掉了本仓并未实现的 `include_reasoning`**）**（2026-10-22）：出站模型面按**已声明能力**导出 `supported_parameters`（`SupportsTools` ⇒ `tools`/`tool_choice`；有思考档位 ⇒ `reasoning`/`reasoning_effort`），`reasoning.mandatory = !*CanDisableThinking` **且仅在 `CanDisableThinking != nil` 时出现**，两者皆无 ⇒ 整个字段缺席（R49「只透传声明，绝不编造」在模型元数据面的落地）。与 PR 原样的唯一差异：`include_reasoning` 全仓**零处理点**（入站只吃 `reasoning_effort` 与 Responses 的 `reasoning` 对象）⇒ 宣告一个我们不接的参数会让客户端照它发并被静默忽略，故剔除并加护栏断言。决议号按 **R123** 从 PR 自登记的 R122 顺延。详见 [`docs/决议项.md`](docs/决议项.md) R124 |
+| R125 | **Gemini 渠道全面升级为 Antigravity OAuth 标准并支持模型动态拉取与多窗口配额**（2026-10-22，issue #167、PR #182、PR #190）：转向公开客户端 PKCE 授权码流程（Antigravity 官方白名单回调 `https://antigravity.google/oauth-callback`）；移除未登记 scope 防 403；支持完整回调 URL 与官方直接显示的授权码（`4/0AX...`）；动态拉取严格恪守 R49/R119，不猜测未声明能力；隔离 5h 与周配额窗口。详见 [`docs/决议项.md`](docs/决议项.md) R125 |
+| R126 | **扩展标准端点支持 Embeddings 向量化与 Imagen 生图**（2026-10-22，PR #190 续）：新增标准端点 `POST /v1/embeddings`（定义 `EmbeddingsProvider` 扩展接口）；扩展 `POST /v1/images/generations` 支持 Gemini/Imagen 生图分流至上游 `/v1internal:predict`；接入 `/v1internal:embedContent` 提供开箱即用向量化能力。详见 [`docs/决议项.md`](docs/决议项.md) R126 |
 
 > ⚠️ **R71 附带的实测纪律**（也是 §0.1 的来源）：上游校验的是**头族齐全**而非单点
 > （只补 `X-Conversation-ID` 仍被拒）；且 `X-Conversation-ID` 的**取值形态不被校验**
@@ -436,7 +438,7 @@ bash scripts/probe-dump.sh summarize                # 汇总各渠道 usage 字�
 | [README.md](README.md) | 用户文档 |
 | [DEVELOPMENT.md](DEVELOPMENT.md) | 开发者文档（面向 AI Agent） |
 | [AGENTS.md](AGENTS.md) | **本文件**：纪律 + 决议索引 + 关键不变量 + 构建发版 |
-| [docs/决议项.md](docs/决议项.md) | **R1–R124 决议全文**（证据链、反例、已知限制） |
+| [docs/决议项.md](docs/决议项.md) | **R1–R126 决议全文**（证据链、反例、已知限制） |
 | [docs/渠道接入备忘.md](docs/渠道接入备忘.md) | 各渠道协议要点、凭据模型、已知限制与踩坑 |
 | [docs/接口参考.md](docs/接口参考.md) | 面板区块规划 + 管理 API 全量清单 |
 | [docs/模型降级链定义.md](docs/模型降级链定义.md) | **模型降级链的唯一权威定义**：三维归因、错误类型全量归属、两条触发路径、三条硬规则、已知限制（R94） |
