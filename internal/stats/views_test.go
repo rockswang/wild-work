@@ -301,8 +301,8 @@ func TestTraeAllocationDeductsExpire(t *testing.T) {
 	now := time.Now()
 	s.ApplyPoll([]Account{{UID: "t1", Group: "traework", Credits: 1000}}, now)
 	s.ApplyPoll([]Account{{UID: "t1", Group: "traework", Credits: 700}}, now.Add(time.Minute)) // 差值 300
-	s.AddUsage("traework/a", 2000, 1000, 0, 0, 0, 0, false, now)                               // 3000 token
-	s.AddUsage("traework/b", 500, 500, 0, 0, 0, 0, false, now)                                 // 1000 token
+	s.AddUsage("traework/a", 2000, 1000, 0, 0, 0, false, now)                               // 3000 token
+	s.AddUsage("traework/b", 500, 500, 0, 0, 0, false, now)                                 // 1000 token
 
 	// trae 系作废 100（traecode 键也应归一计入）→ 分摊基数 300−100=200
 	s.ApplyLedgerExpire(todayKey(now), map[string]int64{"traecode": 100})
