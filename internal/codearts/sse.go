@@ -56,18 +56,27 @@ func BenefitDay(now time.Time) string { return now.In(benefitLoc).Format("2006-0
 // 流内嗅探 / 归一
 // ---------------------------------------------------------------------------
 
-// streamTap 逐行处理上游 SSE：DONE 归一、内嵌错误帧转标准 error 帧、model 回填。
+// streamTap 逐行处理上游 SSE：DONE 归一、内嵌错误帧转标准 error 帧、model 回填、
+// DSML 文本转 tool_calls（R144）。
 type streamTap struct {
 	src     *bufio.Reader
 	model   string
 	pending []byte
 	// errPayload 最后一帧错误（**转化后**的标准 error 帧载荷）；空串 = 无错误。
 	errPayload string
+	// dsml 流式 DSML 过滤器（R144）：仅 DSML 模型启用，其它为 nil（零开销）。
+	dsml *dsmlStreamFilter
 }
 
 // newStreamTap 包装读取流。
 func newStreamTap(r io.Reader, model string) *streamTap {
-	return &streamTap{src: bufio.NewReaderSize(r, 64*1024), model: strings.TrimSpace(model)}
+	t := &streamTap{src: bufio.NewReaderSize(r, 64*1024), model: strings.TrimSpace(model)}
+	// DSML 模型（deepseek-v4-flash/pro）的 delta.content 是工具调用文本，
+	// 需在转发前转换；其它模型不启用，保持原有逐字节透传行为。
+	if isDSMLModel(deriveModelName(t.model)) {
+		t.dsml = &dsmlStreamFilter{}
+	}
+	return t
 }
 
 // Read 一次吐出一段（保证 SSE 行边界完整）。
@@ -119,10 +128,59 @@ func (t *streamTap) transform(line []byte) []byte {
 		t.errPayload = frame
 		return []byte("data: " + frame + "\n")
 	}
+	// R144：DSML 模型的 delta.content 是工具调用文本，需转换后再下发。
+	// applyDSML 就地改写 obj 的 delta.content，并返回需追加的工具调用帧。
+	extra := t.applyDSML(obj)
+	if extra != "" {
+		// obj 已被改写，必须重新序列化，不能用原 payload。
+		if b, err := json.Marshal(obj); err == nil {
+			payload = string(b)
+		}
+	}
 	if t.model != "" {
 		payload = string(rewriteModelLine([]byte(payload), t.model))
 	}
-	return []byte("data: " + payload + "\n")
+	return []byte("data: " + payload + "\n" + extra)
+}
+
+// applyDSML 就地改写本帧的 delta.content，返回需要**额外追加**的一行 SSE（工具调用帧）。
+// 返回空串 = 无额外帧，调用方沿用原 payload。
+//
+// 三种情况：
+//   - t.dsml == nil（非 DSML 模型）：立即返回空串，零开销。
+//   - 透传态：把 content 换成过滤器放行的文本（通常相等）。
+//   - 块闭合：content 置空，返回 tool_calls 帧。
+func (t *streamTap) applyDSML(obj map[string]any) string {
+	if t.dsml == nil {
+		return ""
+	}
+	choices, _ := obj["choices"].([]any)
+	if len(choices) == 0 {
+		return ""
+	}
+	ch, _ := choices[0].(map[string]any)
+	if ch == nil {
+		return ""
+	}
+	delta, _ := ch["delta"].(map[string]any)
+	if delta == nil {
+		return ""
+	}
+	content, _ := delta["content"].(string)
+	// 无内容且过滤器不在中间态：本帧与 DSML 无关，原样放行。
+	if content == "" && t.dsml.headProbe == "" && !t.dsml.inBlock {
+		return ""
+	}
+	text, frame := t.dsml.feed(content)
+	delta["content"] = text
+	if frame == nil {
+		return ""
+	}
+	b, err := json.Marshal(frame)
+	if err != nil {
+		return ""
+	}
+	return "data: " + string(b) + "\n"
 }
 
 // errorFrameOf 判定该帧是否是「HTTP 200 内嵌业务错误」，是则返回标准 error 帧载荷。
@@ -252,6 +310,11 @@ func (c *Client) Aggregate(r io.Reader, model string) (map[string]any, error) {
 	}
 	if err != nil {
 		return nil, err
+	}
+	// R144：DSML 模型的 content 是 <|DSML|tool_calls> 文本而非标准 tool_calls，
+	// 这里转回来，否则客户端收不到工具调用（实测见决议 R144）。
+	if resp != nil {
+		parseDSMLResponse(resp)
 	}
 	if model != "" {
 		resp["model"] = model
