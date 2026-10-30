@@ -239,20 +239,33 @@ func convertAnthropicMessage(role string, content any, idx int) ([]any, error) {
 		msg := map[string]any{"role": "assistant", "tool_calls": toolCalls}
 		msg["content"] = strings.Join(texts, "\n") // 工具调用与文本可并存
 		out = append([]any{msg}, out...)           // assistant 消息必须排在 tool 结果之前
-	} else if len(texts) > 0 || len(imgBlocks) > 0 {
-		var content any
-		if len(imgBlocks) > 0 {
-			blocks := make([]any, 0, len(texts)+len(imgBlocks))
-			for _, t := range texts {
-				blocks = append(blocks, map[string]any{"type": "text", "text": t})
-			}
-			blocks = append(blocks, imgBlocks...)
-			content = blocks
-		} else {
-			content = strings.Join(texts, "\n")
-		}
-		out = append([]any{map[string]any{"role": base, "content": content}}, out...)
+		return out, nil
 	}
+
+	// 非 assistant：out 里只可能是 tool 结果，且已按出现顺序排列。
+	//
+	// 关键不变量：Chat 协议要求 assistant.tool_calls 之后**紧跟**同批 role:tool，
+	// 中间插入任何消息都算配对断裂。Claude Code 每轮把「工具结果 + 新指令」放在
+	// 同一条 user 消息里（[tool_result, tool_result, text]）；修复前此处用
+	// prepend 把 text 插到结果之前，出站变成 user→tool→tool，上游按
+	// 「tool calls and tool results do not match」（workbuddy code 11148）整条拒收，
+	// 且因为错误跟着请求体走，换号重试必然同样失败，表现为会话彻底顶死。
+	// 文本块属于「工具执行完之后的新一轮用户输入」，必须排在结果之后。
+	if len(texts) == 0 && len(imgBlocks) == 0 {
+		return out, nil // 只有工具结果：不额外造空消息
+	}
+	var body any
+	if len(imgBlocks) > 0 {
+		blocks := make([]any, 0, len(texts)+len(imgBlocks))
+		for _, t := range texts {
+			blocks = append(blocks, map[string]any{"type": "text", "text": t})
+		}
+		blocks = append(blocks, imgBlocks...)
+		body = blocks
+	} else {
+		body = strings.Join(texts, "\n")
+	}
+	out = append(out, map[string]any{"role": base, "content": body})
 	return out, nil
 }
 
