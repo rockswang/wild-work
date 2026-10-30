@@ -13,6 +13,7 @@
 package codearts
 
 import (
+	"bufio"
 	"bytes"
 	"crypto/rand"
 	"encoding/hex"
@@ -50,8 +51,20 @@ type Client struct {
 	FirstTokenTimeout time.Duration
 	ChunkTimeout      time.Duration
 
-	catMu sync.RWMutex // 见 models.go（动态目录 + benefit 集合的进程内缓存）
+	catMu sync.RWMutex // 见 models.go（动态目录 + maas/builtin 集合的进程内缓存）
 	cat   *catalogCache
+	// capMu/unusable/unusableLoaded 「不可用模型」摘除记录（见 models.go 的 markUnusable）。
+	// 持久化到 UnusableFile（data/models-codearts.json），**无过期**：81009.404/002002009
+	// 是账号权限结论，等多久都不会自愈；重登（WriteAuthFile 成功）时清空。
+	capMu          sync.RWMutex
+	unusable       map[string]time.Time
+	unusableLoaded bool
+	// UnusableFile 摘除记录落盘路径（main 装配时设为 <stateDir>/models-codearts.json）；
+	// 空 = 不落盘（单测/未装配时的进程内存态）。
+	//
+	// ⚠️ 必须是**独立文件**，不得与 pool 的 state-codearts.json 共用：pool.saveLocked
+	// 整文件覆写且不认识本键，共用会让记录被一次积分刷新抹掉（线上实测 2026-10-26）。
+	UnusableFile string
 }
 
 // 编译期断言：本包对外的能力契约（Lead 的接线依赖 provider.Upstream 全部 10 个方法；
@@ -169,32 +182,47 @@ func (c *Client) ChatStream(a *auth.Auth, body []byte) (io.ReadCloser, int, []by
 	if berr != nil {
 		return nil, http.StatusBadRequest, badParamsBody(berr), nil
 	}
-	benefit := c.isBenefitModel(model)
+	maas := c.maasTypeFor(model)
 
-	rc, status, raw, err := c.doChat(ac, out, sess, benefit)
+	rc, status, raw, err := c.doChat(ac, out, sess, maas)
 	if err != nil {
 		return nil, 0, nil, err
 	}
-	if status >= 400 && benefit && reNoBenefitPackage.MatchString(string(raw)) {
-		// 该账号没有 benefit 包：去掉 maas_type 重试一次（协议 §2.4 表末行）。
-		rc2, status2, raw2, err2 := c.doChat(ac, out, sess, false)
-		if err2 != nil {
-			return nil, 0, nil, err2
+	if status >= 400 {
+		// 非 2xx 路径（协议 §2.4 表末行）：若带了 maas_type 且上游说该权益不存在，
+		// 去掉头重试一次。
+		if maas != "" && reNoBenefitPackage.MatchString(string(raw)) {
+			return c.doChat(ac, out, sess, "")
 		}
-		return rc2, status2, raw2, nil
+		return rc, status, raw, nil
 	}
-	return rc, status, raw, nil
+	// HTTP 200 路径的**防御性兜底**：上游可能把 4004.200 装在流内（实测形态）。
+	// 判据修好后本账号不再发该头、此分支不可达；保留它是为了「将来若真有必须带头的模型，
+	// 仍能在任何字节写给客户端之前自愈」。刻意不为它写「重试成功」的断言（那是在测假设）。
+	if maas != "" {
+		peeked, flip, perr := peekLackBenefit(rc)
+		if perr != nil {
+			_ = rc.Close()
+			return nil, 0, nil, perr
+		}
+		if flip {
+			_ = rc.Close()
+			return c.doChat(ac, out, sess, "") // 不带 maas_type 重发一次
+		}
+		return peeked, status, nil, nil
+	}
+	return rc, status, nil, nil
 }
 
-// doChat 发一次对话请求。benefit=true 时 maas_type 参与签名并随请求发出。
-func (c *Client) doChat(ac *Account, body []byte, sess sessionIDs, benefit bool) (io.ReadCloser, int, []byte, error) {
+// doChat 发一次对话请求。maas 非空时作为签名头 maas_type 一并发出。
+func (c *Client) doChat(ac *Account, body []byte, sess sessionIDs, maas string) (io.ReadCloser, int, []byte, error) {
 	req, err := http.NewRequest(http.MethodPost, c.chatURL(), bytes.NewReader(body))
 	if err != nil {
 		return nil, 0, nil, err
 	}
 	var signedExtra map[string]string
-	if benefit {
-		signedExtra = map[string]string{HeaderMaaSType: MaaSTypeBenefit}
+	if maas != "" {
+		signedExtra = map[string]string{HeaderMaaSType: maas}
 	}
 	if err := signAndApply(req, ac, body, "application/json", signedExtra, time.Now()); err != nil {
 		return nil, 0, nil, err
@@ -297,4 +325,48 @@ func envDurationMS(name string, def time.Duration) time.Duration {
 		return def
 	}
 	return time.Duration(ms) * time.Millisecond
+}
+
+// maxPeekBytes peek 首帧的字节上限。SSE 首个数据帧通常几百字节；超上限即视为
+// 「不是错误帧」并原样回放——绝不把整条流缓冲进内存。
+const maxPeekBytes = 8 << 10
+
+// replayReadCloser 把已读前缀与剩余流拼起来，Close 仍作用在底层响应体。
+type replayReadCloser struct {
+	io.Reader
+	closer io.Closer
+}
+
+func (r *replayReadCloser) Close() error { return r.closer.Close() }
+
+// peekLackBenefit 读响应体**首个** data 帧，判断是不是 4004.200（benefit not found）。
+//
+// 为什么必须在 ChatStream 里做：该错误以 HTTP 200 下发，重试只有发生在任何字节
+// 写向客户端之前才有效；放进 streamTap 就晚了（响应头已写出，只能记日志）。
+//
+// flip=true  ⇒ 调用方 Close 后去掉 maas_type 重发；
+// flip=false ⇒ 返回可读 body（已读前缀原样回放，客户端行为零变化）。
+func peekLackBenefit(rc io.ReadCloser) (io.ReadCloser, bool, error) {
+	br := bufio.NewReaderSize(rc, 8*1024)
+	var head bytes.Buffer
+	for head.Len() < maxPeekBytes {
+		line, err := br.ReadString('\n')
+		if line != "" {
+			head.WriteString(line)
+			trimmed := strings.TrimSpace(line)
+			if strings.HasPrefix(trimmed, "data:") {
+				payload := strings.TrimSpace(strings.TrimPrefix(trimmed, "data:"))
+				if payload != "" && payload != "[DONE]" {
+					if reNoBenefitPackage.MatchString(payload) {
+						return nil, true, nil
+					}
+					break // 首帧不是目标错误 ⇒ 立刻回放，不读第二帧
+				}
+			}
+		}
+		if err != nil {
+			break
+		}
+	}
+	return &replayReadCloser{Reader: io.MultiReader(bytes.NewReader(head.Bytes()), br), closer: rc}, false, nil
 }

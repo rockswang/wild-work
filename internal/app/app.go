@@ -22,6 +22,7 @@ import (
 	"wild-work/internal/backuplink"
 	"wild-work/internal/cdp"
 	"wild-work/internal/cline"
+	"wild-work/internal/codearts"
 	"wild-work/internal/comate"
 	"wild-work/internal/config"
 	"wild-work/internal/custom"
@@ -1409,6 +1410,14 @@ func (a *App) completeCodeArtsLogin(r logincodearts.Result) {
 		return
 	}
 	log.Printf("codearts 登录凭证已保存 uid=%s file=%s", r.UID, filepath.Base(fp))
+	// 重新登录 = 账号权限可能已变更 ⇒ 清空「不可用模型」摘除记录（R143）。
+	// 这是唯一的重置入口：81009.404/002002009 的摘除是持久化的、不自动过期。
+	if rt := a.runtime(provider.CodeArts); rt != nil {
+		if c, ok := rt.Upstream.(*codearts.Client); ok {
+			c.ClearUnusable()
+			log.Printf("codearts 已清空不可用模型摘除记录")
+		}
+	}
 	a.reloadAccounts()
 	a.finishLogin()
 	a.afterAccountAdded(provider.CodeArts)
