@@ -295,6 +295,8 @@ type Stats struct {
 	modelDays map[string]map[string]*modelEntry // 历史日 -> 模型 -> 消耗（跨天归档）
 
 	models    map[string]*modelEntry
+	// tput 吞吐滑动窗口（纯内存、不落盘，见 usage.go 的 tputMeter）。
+	tput      *tputMeter
 	milestone int
 
 	toasts []Toast
@@ -329,6 +331,7 @@ func New(dataDir string, logf func(format string, args ...any)) (*Stats, error) 
 		reqDays:        map[string]int64{},
 		modelDays:      map[string]map[string]*modelEntry{},
 		models:         map[string]*modelEntry{},
+		tput:           newTputMeter(),
 		ring:           make([]ReqRow, 0, ringCap),
 		logf:           logf,
 	}
@@ -997,7 +1000,7 @@ func (s *Stats) Snapshot(now time.Time) Snapshot {
 		}
 	}
 
-	models := s.modelStatsLocked()
+	models := s.modelStatsLocked(now)
 	platforms := s.platformRowsLocked(now)
 
 	var totalCredits int64

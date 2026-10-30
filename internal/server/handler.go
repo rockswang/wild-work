@@ -279,6 +279,9 @@ func NewHandler(cfg Config) *Handler {
 
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) { h.mux.ServeHTTP(w, r) }
 
+// stickyMaxReqs 粘性路由连续成功轮换阈值（默认 50）。
+const stickyMaxReqs = 50
+
 // stickyKey 粘性路由 key（按渠道独立）
 func (h *Handler) stickyKey(kind provider.Kind) string { return kind.String() }
 
@@ -305,6 +308,12 @@ func (h *Handler) pickWithSticky(rt *Runtime, model string) *auth.Auth {
 			// 仍被粘住 ⇒ 每个请求都白打一次必 401 的上游探测。
 			// （MonkeyCode 实测：全日志 16 条 session_dead 401，且一次刷新都没发起。）
 			if ok && !status.Cooling && !status.Disabled && !status.SessionDead && !modelCooled {
+				// R146：粘性账号今天没有额度到期、而池内有账号今天有 ⇒ 立刻让位，
+				// 并把粘性改钉到那个账号（会话粘性不丢）。低流量下 50 次阈值可能横跨数小时，
+				// 快过期的额度等不起。
+				if alt := h.yieldForExpiringToday(rt, model, sticky.uid, time.Now()); alt != nil {
+					return alt
+				}
 				log.Printf("sticky route platform=%s uid=%s count=%d/%d",
 					rt.Kind, sticky.uid, sticky.reqCount, sticky.maxReqs)
 				return acct
@@ -328,6 +337,45 @@ func (h *Handler) pickWithSticky(rt *Runtime, model string) *auth.Auth {
 	h.stickyMu.Unlock()
 	log.Printf("new sticky route platform=%s uid=%s maxReqs=%d", rt.Kind, acct.UID, h.cfg.StickyMaxRequests)
 	return acct
+}
+
+// expiresToday unix 到期时刻是否落在「今天」桶（R105 单一口径：自然日 + 次日 00:00 的抖动缓冲）。
+// 0 或负值 = 无到期信息，返回 false。
+func expiresToday(unixSec int64, now time.Time) bool {
+	if unixSec <= 0 {
+		return false
+	}
+	return provider.ExpireBucketOf(time.Unix(unixSec, 0).Format(time.RFC3339), now) == provider.BucketToday
+}
+
+// yieldForExpiringToday 粘性让位（R146）：粘性账号今天没有额度到期、而池内最优账号今天有，
+// 就把粘性改钉到最优账号并返回它。返回 nil 表示维持粘性。
+//
+// 必须与「会话粘性」共存：让位只发生一次，之后 sticky 记录指向新账号（reqCount 归零），
+// 后续请求继续走同一账号，直到 50 次阈值或它变得不健康。
+func (h *Handler) yieldForExpiringToday(rt *Runtime, model, stickyUID string, now time.Time) *auth.Auth {
+	best := rt.Pool.PickForModel(model)
+	if best == nil || best.UID == stickyUID {
+		return nil
+	}
+	stExp, okSt := rt.Pool.EarliestExpireOf(stickyUID)
+	bsExp, okBs := rt.Pool.EarliestExpireOf(best.UID)
+	if !okSt || !okBs {
+		return nil
+	}
+	// 两者都今天到期时保持粘性：否则两个账号会按到期时刻反复互抢，会话被拆碎。
+	stToday := !stExp.IsZero() && expiresToday(stExp.Unix(), now)
+	bsToday := !bsExp.IsZero() && expiresToday(bsExp.Unix(), now)
+	if !bsToday || stToday {
+		return nil
+	}
+
+	h.stickyMu.Lock()
+	h.sticky[h.stickyKey(rt.Kind)] = &stickyEntry{uid: best.UID, maxReqs: stickyMaxReqs}
+	h.stickyMu.Unlock()
+	log.Printf("sticky yield platform=%s from=%s to=%s reason=expiring_today",
+		rt.Kind, stickyUID, best.UID)
+	return best
 }
 
 // stickySuccess 粘性路由成功：递增请求计数。
@@ -799,6 +847,13 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			statRow.Time = now.Format("01-02 15:04:05")
 			statRow.TTFBMs = sw.ttfbMs
 			statRow.TotalSec = now.Sub(sw.start).Seconds()
+			// 单行 tok/s 用**端到端**口径（token ÷ 总耗时）：这一行要回答
+			// 「这个请求我等了多久才等到这些 token」，因此排队与 prefill 必须
+			// 计入分母。旧口径（减去 TTFB）会给 33 秒只吐 93 token 的请求标
+			// 309 tok/s，与实际感知完全相反（R147）。
+			if statRow.Tok > 0 && statRow.TotalSec > 0 {
+				statRow.TokPerSec = float64(statRow.Tok) / statRow.TotalSec
+			}
 			if statRow.Status == 0 {
 				statRow.Status = http.StatusOK
 			}
@@ -1194,16 +1249,17 @@ func (h *Handler) serveRotation(
 					Credit: usageCredit(usage)})
 			}
 			// 运行统计：模型维度记账（有 usage 才计，对齐 sidecar 的 u.found 语义）。
-			// 吞吐仅在流式下有意义：genSec = 总耗时 − TTFB；引擎内对 ≤50ms 的样本只计 TTFB。
 			if h.stats != nil {
 				pt, ct, _ := usageTokens(usage)
 				if pt > 0 || ct > 0 {
-					gen := time.Since(sw.start).Seconds() - float64(sw.ttfbMs)/1000
-					h.stats.AddUsage(acctModel, pt, ct, usageCredit(usage), sw.ttfbMs, gen, cu.cached, cu.reported, time.Now())
+					h.stats.AddUsage(acctModel, pt, ct, usageCredit(usage), sw.ttfbMs, cu.cached, cu.reported, time.Now())
+					// 滑动窗口吞吐：把 completion token 按「每秒写帧数占比」摊到秒桶，
+					// 面板显示窗口内平均 tok/s。为什么不在这里算比值：分母用
+					// 「总耗时 − TTFB」会把排队/prefill 整段抹掉（实测小浣熊夸大
+					// 3.56×），而单请求比值本身也无法表达「某一秒吐出多少」——
+					// 上游吞吐每秒都在变（见 docs/adr/accepted/r132-*.md）。
+					h.stats.AddTput(acctModel, ct, sw.chunks, time.Now())
 					statRow.Tok = ct
-					if gen > 0 {
-						statRow.TokPerSec = float64(ct) / gen
-					}
 				}
 				statRow.Credit = usageCredit(usage)
 			}
@@ -1299,9 +1355,10 @@ func (h *Handler) serveRotation(
 			u, _ := resp["usage"].(map[string]any)
 			pt, ct, _ := usageTokens(u)
 			if pt > 0 || ct > 0 {
-				gen := time.Since(sw.start).Seconds() - float64(sw.ttfbMs)/1000
 				cu := cacheUsageOf(u)
-				h.stats.AddUsage(acctModel, pt, ct, usageCredit(u), sw.ttfbMs, gen, cu.cached, cu.reported, time.Now())
+				h.stats.AddUsage(acctModel, pt, ct, usageCredit(u), sw.ttfbMs, cu.cached, cu.reported, time.Now())
+				// 非流式一次性写回：无分帧时序可依，故不产生窗口速率样本
+				// （前端显示「—」比显示一个端到端假速率更诚实）。
 				statRow.Tok = ct
 			}
 			statRow.Credit = usageCredit(u)
@@ -1609,12 +1666,18 @@ func usageCredit(u map[string]any) float64 {
 }
 
 // statWriter 记录首字节写出时刻（TTFB 口径：客户端等到的第一个响应字节，
-// 含状态行/响应头——WriteHeader/Write/Flush 三者先到先记）。
+// 含状态行/响应头——WriteHeader/Write/Flush 三者先到先记），并顺带按秒统计
+// 写出的帧数（流式吞吐滑动窗口的唯一数据源）。
 type statWriter struct {
 	http.ResponseWriter
 	start   time.Time
 	ttfbMs  int64
 	written bool
+	// chunks unix 秒 -> 该秒写出的非空 Write 次数。
+	// 一次 SSE 帧 = 一次 Write（streamCore/各渠道 Stream 都是逐帧 Write），
+	// 故这是「token 投递按秒分布」的代理量：token 精确值只有末帧 usage 才有，
+	// 完成后按本表占比把 completion token 摊到各秒（见 stats.AddTput）。
+	chunks map[int64]int
 }
 
 func (sw *statWriter) noteFirstByte() {
@@ -1631,6 +1694,13 @@ func (sw *statWriter) WriteHeader(code int) {
 
 func (sw *statWriter) Write(p []byte) (int, error) {
 	sw.noteFirstByte()
+	// 空写不计帧：JSON 空帧与心跳不该算成一次 token 投递。
+	if len(p) > 0 {
+		if sw.chunks == nil {
+			sw.chunks = map[int64]int{}
+		}
+		sw.chunks[time.Now().Unix()]++
+	}
 	return sw.ResponseWriter.Write(p)
 }
 

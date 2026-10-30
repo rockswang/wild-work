@@ -10,7 +10,7 @@ import (
 func TestAddUsageClampsAndUnknownModel(t *testing.T) {
 	s := newTestStats(t)
 	now := time.Now()
-	s.AddUsage("", -5, -10, -1.5, -100, -1, 0, false, now)
+	s.AddUsage("", -5, -10, -1.5, -100, 0, false, now)
 	snap := s.Snapshot(now)
 	if snap.Tokens != 0 || snap.CreditOutExact != 0 {
 		t.Fatalf("负值帧应全钳 0: tokens=%d exact=%v", snap.Tokens, snap.CreditOutExact)
@@ -21,8 +21,8 @@ func TestAddUsageClampsAndUnknownModel(t *testing.T) {
 	if snap.Models[0].AvgTTFBMs != 0 || snap.Models[0].PerfSamples != 1 {
 		t.Fatalf("TTFB 负值应钳 0 但仍计样本: %+v", snap.Models[0])
 	}
-	if snap.Models[0].AvgTokPerSec != 0 {
-		t.Fatalf("负生成耗时不应计入吞吐: %+v", snap.Models[0])
+	if snap.Models[0].TokPerSec != 0 {
+		t.Fatalf("负生成/无投递样本不应有窗口速率: %+v", snap.Models[0])
 	}
 }
 
@@ -50,10 +50,10 @@ func TestTokenUsageWindows(t *testing.T) {
 	s := newTestStats(t)
 	base := time.Date(2026, 10, 20, 12, 0, 0, 0, time.Local)
 	old := base.AddDate(0, 0, -40)                             // 落在 30 日窗口外、计入 all
-	s.AddUsage("workbuddy/m", 20, 10, 0, 0, 0, 0, false, old)  // 30 token
-	s.AddUsage("workbuddy/m", 30, 20, 0, 0, 0, 0, false, base) // 50 token（今日=base）
+	s.AddUsage("workbuddy/m", 20, 10, 0, 0, 0, false, old)  // 30 token
+	s.AddUsage("workbuddy/m", 30, 20, 0, 0, 0, false, base) // 50 token（今日=base）
 	day2 := base.AddDate(0, 0, 1)
-	s.AddUsage("workbuddy/m", 10, 10, 0, 0, 0, 0, false, day2) // 20 token（跨天归档 base）
+	s.AddUsage("workbuddy/m", 10, 10, 0, 0, 0, false, day2) // 20 token（跨天归档 base）
 
 	snap := s.Snapshot(day2)
 	tu := snap.TokenUsage
@@ -74,57 +74,29 @@ func TestTokenUsageWindows(t *testing.T) {
 	}
 }
 
-// 模型性能均值：TTFB 取算术平均；吞吐按时长加权（生成 token ÷ 生成耗时）；
-// 无生成耗时/无输出的请求只计入 TTFB；亚 50ms 伪影样本不计吞吐。
-func TestModelPerfStats(t *testing.T) {
+// 模型 TTFB 均值：算术平均；样本数 = 参与平均的成功请求数。
+// 吞吐不在本结构（按秒分桶滑动窗口，见 tput_test.go）。
+func TestModelTTFBStats(t *testing.T) {
 	s := newTestStats(t)
 	now := time.Now()
-	// m1：两次流式（TTFB 600/400 → 均值 500ms；吞吐 (100+300)/(2+3) = 80 tok/s）
-	s.AddUsage("workbuddy/m1", 10, 100, 0.5, 600, 2, 0, false, now)
-	s.AddUsage("workbuddy/m1", 10, 300, 0.5, 400, 3, 0, false, now)
-	// m2：非流式无生成耗时（genSec=0）→ 只计 TTFB，不参与吞吐
-	s.AddUsage("workbuddy/m2", 5, 0, 0.1, 1000, 0, 0, false, now)
+	s.AddUsage("workbuddy/m1", 10, 100, 0.5, 600, 0, false, now)
+	s.AddUsage("workbuddy/m1", 10, 300, 0.5, 400, 0, false, now)
+	s.AddUsage("workbuddy/m2", 5, 0, 0.1, 1000, 0, false, now)
 
 	snap := s.Snapshot(now)
 	byName := map[string]ModelStat{}
 	for _, m := range snap.Models {
 		byName[m.Model] = m
 	}
-	m1 := byName["workbuddy/m1"]
-	if m1.AvgTTFBMs != 500 || m1.PerfSamples != 2 {
+	if m1 := byName["workbuddy/m1"]; m1.AvgTTFBMs != 500 || m1.PerfSamples != 2 {
 		t.Fatalf("m1 平均 TTFB = %dms 样本=%d, want 500ms/2", m1.AvgTTFBMs, m1.PerfSamples)
 	}
-	if m1.AvgTokPerSec != 80 {
-		t.Fatalf("m1 平均 tok/s = %v, want 80（按时长加权）", m1.AvgTokPerSec)
-	}
-	m2 := byName["workbuddy/m2"]
-	if m2.AvgTTFBMs != 1000 || m2.PerfSamples != 1 {
+	if m2 := byName["workbuddy/m2"]; m2.AvgTTFBMs != 1000 || m2.PerfSamples != 1 {
 		t.Fatalf("m2 平均 TTFB = %dms 样本=%d, want 1000ms/1", m2.AvgTTFBMs, m2.PerfSamples)
 	}
-	if m2.AvgTokPerSec != 0 {
-		t.Fatalf("m2 无生成耗时不应有吞吐: %v", m2.AvgTokPerSec)
-	}
-
-	// 亚 50ms 伪影样本只计 TTFB，不计吞吐（防分母趋零抬高均值）
-	s.AddUsage("workbuddy/m3", 10, 9000, 0, 20, 0.0007, 0, false, now) // 亚阈值：若计入=1.29e7 tok/s
-	s.AddUsage("workbuddy/m3", 10, 500, 0, 20, 1, 0, false, now)       // 正常流式样本 500 tok/s
-	for _, m := range s.Snapshot(now).Models {
-		if m.Model != "workbuddy/m3" {
-			continue
-		}
-		if m.AvgTTFBMs != 20 || m.PerfSamples != 2 {
-			t.Fatalf("m3 TTFB/样本 = %dms/%d, want 20ms/2（伪影样本计 TTFB）", m.AvgTTFBMs, m.PerfSamples)
-		}
-		if m.AvgTokPerSec != 500 {
-			t.Fatalf("m3 平均 tok/s = %v, want 500（亚 50ms 样本不计吞吐）", m.AvgTokPerSec)
-		}
-	}
-	// 边界：恰好 50ms 计入
-	s.AddUsage("workbuddy/m4", 10, 1000, 0, 100, 0.05, 0, false, now)
-	for _, m := range s.Snapshot(now).Models {
-		if m.Model == "workbuddy/m4" && m.AvgTokPerSec != 20000 {
-			t.Fatalf("m4 恰 50ms 应计入吞吐: %v", m.AvgTokPerSec)
-		}
+	// 只记消耗、无流式投递 ⇒ 窗口速率为 0（前端显示「—」）
+	if m1 := byName["workbuddy/m1"]; m1.TokPerSec != 0 {
+		t.Fatalf("未投递样本不应有窗口速率: %v", m1.TokPerSec)
 	}
 }
 
@@ -147,9 +119,9 @@ func TestTraeCreditAllocation(t *testing.T) {
 		{UID: "w1", Group: "workbuddy", Credits: 900},
 	}, now.Add(2*time.Minute))
 
-	s.AddUsage("traework/a", 2000, 1000, 0, 0, 0, 0, false, now) // 3000 token
-	s.AddUsage("traework/b", 500, 500, 0, 0, 0, 0, false, now)   // 1000 token
-	s.AddUsage("workbuddy/m", 1000, 1000, 5, 0, 0, 0, false, now)
+	s.AddUsage("traework/a", 2000, 1000, 0, 0, 0, false, now) // 3000 token
+	s.AddUsage("traework/b", 500, 500, 0, 0, 0, false, now)   // 1000 token
+	s.AddUsage("workbuddy/m", 1000, 1000, 5, 0, 0, false, now)
 
 	snap := s.Snapshot(now)
 	byName := map[string]ModelStat{}
@@ -179,7 +151,7 @@ func TestTraeCreditAllocationNoConsumption(t *testing.T) {
 	s := newTestStats(t)
 	now := time.Now()
 	s.ApplyPoll([]Account{{UID: "t1", Group: "traework", Credits: 1000}}, now)
-	s.AddUsage("traework/a", 10, 10, 0, 0, 0, 0, false, now)
+	s.AddUsage("traework/a", 10, 10, 0, 0, 0, false, now)
 	for _, m := range s.Snapshot(now).Models {
 		if m.Credit != 0 {
 			t.Fatalf("%s 无差值消耗时积分应为 0，实际 %v", m.Model, m.Credit)
@@ -202,9 +174,9 @@ func TestTraeCreditAllocationIncludesTraeCode(t *testing.T) {
 		{UID: "w1", Group: "workbuddy", Credits: 900},
 	}, now.Add(time.Minute)) // tw 差值 300
 
-	s.AddUsage("traework/a", 2000, 1000, 0, 0, 0, 0, false, now) // 3000 token
-	s.AddUsage("traecode/c", 500, 500, 0, 0, 0, 0, false, now)   // 1000 token → 须同池参与
-	s.AddUsage("workbuddy/m", 1000, 1000, 5, 0, 0, 0, false, now)
+	s.AddUsage("traework/a", 2000, 1000, 0, 0, 0, false, now) // 3000 token
+	s.AddUsage("traecode/c", 500, 500, 0, 0, 0, false, now)   // 1000 token → 须同池参与
+	s.AddUsage("workbuddy/m", 1000, 1000, 5, 0, 0, false, now)
 
 	snap := s.Snapshot(now)
 	byName := map[string]ModelStat{}
@@ -232,9 +204,9 @@ func TestPlatformRowsMergeTraeCode(t *testing.T) {
 		{UID: "t1", Group: "traework", Credits: 800},
 		{UID: "w1", Group: "workbuddy", Credits: 500},
 	}, now)
-	s.AddUsage("traework/a", 100, 100, 0, 0, 0, 0, false, now) // 200 token
-	s.AddUsage("traecode/c", 200, 200, 0, 0, 0, 0, false, now) // 400 token
-	s.AddUsage("workbuddy/m", 50, 50, 0, 0, 0, 0, false, now)  // 100 token
+	s.AddUsage("traework/a", 100, 100, 0, 0, 0, false, now) // 200 token
+	s.AddUsage("traecode/c", 200, 200, 0, 0, 0, false, now) // 400 token
+	s.AddUsage("workbuddy/m", 50, 50, 0, 0, 0, false, now)  // 100 token
 
 	rows := s.Snapshot(now).Platforms
 	byGroup := map[string]PlatformRow{}
@@ -289,9 +261,9 @@ func TestModelStatsSortedByCredit(t *testing.T) {
 	s := newTestStats(t)
 	now := time.Now()
 	s.ApplyPoll([]Account{{UID: "w1", Group: "workbuddy", Credits: 1000}}, now)
-	s.AddUsage("workbuddy/low", 100, 100, 1, 0, 0, 0, false, now)
-	s.AddUsage("workbuddy/high", 100, 100, 9, 0, 0, 0, false, now)
-	s.AddUsage("workbuddy/mid", 500, 500, 5, 0, 0, 0, false, now)
+	s.AddUsage("workbuddy/low", 100, 100, 1, 0, 0, false, now)
+	s.AddUsage("workbuddy/high", 100, 100, 9, 0, 0, false, now)
+	s.AddUsage("workbuddy/mid", 500, 500, 5, 0, 0, false, now)
 	snap := s.Snapshot(now)
 	if len(snap.Models) != 3 || snap.Models[0].Model != "workbuddy/high" ||
 		snap.Models[1].Model != "workbuddy/mid" || snap.Models[2].Model != "workbuddy/low" {

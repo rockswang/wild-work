@@ -563,7 +563,7 @@ const FAKE_STATS = {
     group: "lobsterai", accounts: 0, credits: 0, credit_in: 0, credit_out: 0,
     credit_expired: 0, credit_used: 0, tokens: 0, expire_7d: 0, expire_today: 0, expire_tomorrow: 0,
   }],
-  models: [{ model: "traework/DeepSeek-V4", reqs: 3, tokens: 5000, credit: 12.5, avg_ttfb_ms: 800, avg_tok_per_sec: 45.2, perf_samples: 3 }],
+  models: [{ model: "traework/DeepSeek-V4", reqs: 3, tokens: 5000, credit: 12.5, avg_ttfb_ms: 800, tok_per_sec: 45.2, tput_window_sec: 60, perf_samples: 3 }],
   // hours_left 与 days_left 故意不同步（5.7h ⇒ days_left=0）：断言「剩余」列优先用
   // 精确小时数。若接成 days_left，会渲染成「今日到期」而看不出还剩 5.7 小时。
   // 两行：① 能外推（forecast=45，预计作废 55）；② **无法外推**（forecast=-1，
@@ -666,7 +666,12 @@ check("预计作废量 = 额度−外推消耗（55分）", stExpiry.includes("�
 
 const stModels = document.getElementById("stModels").innerHTML;
 check("Trae 系模型积分为估算（≈ 前缀）", stModels.includes("≈12.50"));
-check("模型平均速度含 tok/s 与 TTFB", stModels.includes("45.2 tok/s") && stModels.includes("800ms"));
+check("模型当前速度含 tok/s 与 TTFB（滑动窗口口径）", stModels.includes("45.2 tok/s") && stModels.includes("800ms"));
+// R147：窗口内无投递（tok_per_sec=0）必须显示「—」，绝不允许渲染 "0 tok/s"
+// ——0 会被读成「模型卡死」，而实际含义是「最近窗口内没有流式请求」。
+T.renderModels([{ model: "x/y", reqs: 1, tokens: 10, credit: 0, avg_ttfb_ms: 0, tok_per_sec: 0, tput_window_sec: 60, perf_samples: 1 }]);
+const stModelsEmpty = document.getElementById("stModels").innerHTML;
+check("窗口无样本显示「—」而非 0 tok/s", stModelsEmpty.includes("—") && !stModelsEmpty.includes("0 tok/s"), stModelsEmpty.slice(0, 300));
 
 T.renderAbnormal(FAKE_STATS.abnormal);
 const stAbnormal = document.getElementById("stAbnormal").innerHTML;

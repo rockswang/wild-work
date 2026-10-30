@@ -14,10 +14,10 @@ func TestAddUsageCacheUtilization(t *testing.T) {
 	s := newTestStats(t)
 	now := time.Now()
 	// workbuddy 两笔上报：命中 80/100，命中 0/300
-	s.AddUsage("workbuddy/m1", 100, 10, 0, 0, 0, 80, true, now)
-	s.AddUsage("workbuddy/m1", 300, 20, 0, 0, 0, 0, true, now)
+	s.AddUsage("workbuddy/m1", 100, 10, 0, 0, 80, true, now)
+	s.AddUsage("workbuddy/m1", 300, 20, 0, 0, 0, true, now)
 	// glm 一笔未上报（不参与缓存口径）
-	s.AddUsage("glm/m2", 100, 30, 0, 0, 0, 0, false, now)
+	s.AddUsage("glm/m2", 100, 30, 0, 0, 0, false, now)
 
 	snap := s.Snapshot(now)
 	byModel := map[string]ModelStat{}
@@ -41,7 +41,7 @@ func TestAddUsageCacheUtilization(t *testing.T) {
 func TestAddUsageCacheClampsNegative(t *testing.T) {
 	s := newTestStats(t)
 	now := time.Now()
-	s.AddUsage("workbuddy/m1", 100, 10, 0, 0, 0, -5, true, now)
+	s.AddUsage("workbuddy/m1", 100, 10, 0, 0, -5, true, now)
 	m := s.Snapshot(now).Models[0]
 	if m.CR != 0 {
 		t.Errorf("负命中应钳 0，实际 %d", m.CR)
@@ -55,9 +55,9 @@ func TestAddUsageCacheClampsNegative(t *testing.T) {
 func TestCacheSurvivesDayRollover(t *testing.T) {
 	s := newTestStats(t)
 	base := time.Now()
-	s.AddUsage("workbuddy/m1", 200, 10, 0, 0, 0, 50, true, base)
+	s.AddUsage("workbuddy/m1", 200, 10, 0, 0, 50, true, base)
 	// 次日再记：应触发今日口径重置
-	s.AddUsage("workbuddy/m1", 100, 10, 0, 0, 0, 10, true, base.Add(24*time.Hour))
+	s.AddUsage("workbuddy/m1", 100, 10, 0, 0, 10, true, base.Add(24*time.Hour))
 	m := s.Snapshot(base.Add(24 * time.Hour)).Models[0]
 	if m.CR != 10 || m.CRCov != 100 {
 		t.Fatalf("跨天后缓存口径应重置为今日值，实际 %d/%d", m.CR, m.CRCov)
@@ -75,9 +75,9 @@ func TestCacheSurvivesRestart(t *testing.T) {
 	}
 	now := time.Now()
 	// workbuddyai：上报 569 次，命中 180355328 / 分母 183851354（线上量级）
-	s.AddUsage("workbuddyai/deepseek-v4.1-flash", 183851354, 783024, 0, 4522, 4085, 180355328, true, now)
+	s.AddUsage("workbuddyai/deepseek-v4.1-flash", 183851354, 783024, 0, 4522, 180355328, true, now)
 	// workbuddy：上报但 0 命中（必须恢复成 0% 而非「—」）
-	s.AddUsage("workbuddy/step-5-preview", 549, 5465, 0, 10159, 19, 0, true, now)
+	s.AddUsage("workbuddy/step-5-preview", 549, 5465, 0, 10159, 0, true, now)
 	s.FlushNow()
 
 	s2, err := New(dir, nil)

@@ -153,7 +153,7 @@ func TestDayRollArchives(t *testing.T) {
 	s := newTestStats(t)
 	day1 := time.Date(2026, 10, 20, 12, 0, 0, 0, time.Local)
 	s.ApplyPoll([]Account{acct1(1000)}, day1)
-	s.AddUsage("workbuddy/m1", 30, 20, 0.5, 400, 2, 0, false, day1)
+	s.AddUsage("workbuddy/m1", 30, 20, 0.5, 400, 0, false, day1)
 	if snap := s.Snapshot(day1); snap.Tokens != 50 {
 		t.Fatalf("今日 tokens = %d, want 50", snap.Tokens)
 	}

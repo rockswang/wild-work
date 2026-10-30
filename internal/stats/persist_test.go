@@ -144,9 +144,9 @@ func TestModelPersistence(t *testing.T) {
 	}
 	// 用真实「今日」驱动（day 守卫以 New 时的本地日为基准，固定日期会被判跨天残留）
 	day1 := time.Now()
-	s.AddUsage("workbuddy/m1", 30, 20, 0.5, 600, 2, 0, false, day1)
-	s.AddUsage("workbuddy/m1", 10, 5, 0.25, 400, 1, 0, false, day1)
-	s.AddUsage("traework/m2", 100, 50, 0, 900, 5, 0, false, day1)
+	s.AddUsage("workbuddy/m1", 30, 20, 0.5, 600, 0, false, day1)
+	s.AddUsage("workbuddy/m1", 10, 5, 0.25, 400, 0, false, day1)
+	s.AddUsage("traework/m2", 100, 50, 0, 900, 0, false, day1)
 	s.FlushNow()
 
 	// 重启：今日模型 + 今日全局计数（tokens/reqs/exact）恢复
@@ -179,9 +179,9 @@ func TestModelPersistence(t *testing.T) {
 	if mm := s3.modelDays[todayKey(day1)]; len(mm) != 2 || mm["workbuddy/m1"].reqs != 2 || mm["workbuddy/m1"].tokens != 65 {
 		t.Fatalf("归档数据重启后不完整: %+v", mm)
 	}
-	// 性能采样随消耗一起归档
-	if a := s3.modelDays[todayKey(day1)]["workbuddy/m1"]; a.perfCnt != 2 || a.ttfbSumMs != 1000 || a.genTokens != 25 {
-		t.Fatalf("归档性能采样不完整: %+v", a)
+	// TTFB 采样随消耗一起归档（吞吐是 60 秒滑动窗口，不落盘，故不在归档断言内）
+	if a := s3.modelDays[todayKey(day1)]["workbuddy/m1"]; a.perfCnt != 2 || a.ttfbSumMs != 1000 {
+		t.Fatalf("归档 TTFB 采样不完整: %+v", a)
 	}
 }
 

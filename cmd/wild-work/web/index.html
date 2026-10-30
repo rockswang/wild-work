@@ -126,7 +126,7 @@
     <div class="tab-body" id="tabToken">
       <div id="usageChart" class="chart-box">图表库加载中…</div>
       <table class="table" id="tblModels">
-        <thead><tr><th>模型</th><th>渠道</th><th class="num">请求数</th><th class="num">Token</th><th class="num">日均</th><th class="num" title="缓存命中 token ÷ 该模型「上报了缓存字段」的请求的 prompt token（加总口径，非逐请求平均）。上游不提供该维度时显示「—」。">缓存</th><th class="num" title="成功请求实测均值（来自运行统计引擎）：tok/s = 生成 token ÷ 生成耗时（按时长加权）；TTFB = 首字节耗时算术平均">平均速度</th></tr></thead>
+        <thead><tr><th>模型</th><th>渠道</th><th class="num">请求数</th><th class="num">Token</th><th class="num">日均</th><th class="num" title="缓存命中 token ÷ 该模型「上报了缓存字段」的请求的 prompt token（加总口径，非逐请求平均）。上游不提供该维度时显示「—」。">缓存</th><th class="num" title="最近 60 秒滑动窗口速率（来自运行统计引擎，按秒分桶）：窗口内投递 token 合计 ÷ 60；TTFB = 首字节耗时算术平均。窗口内无流式请求时显示「—」。">当前速度</th></tr></thead>
         <tbody></tbody>
       </table>
     </div>
