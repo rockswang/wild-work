@@ -181,9 +181,35 @@ func (c *Client) ChatStream(a *auth.Auth, body []byte) (io.ReadCloser, int, []by
 		if err2 != nil {
 			return nil, 0, nil, err2
 		}
-		return rc2, status2, raw2, nil
+		// 换包重试路径同样要收尾归还坑位（R145）：重试成功后由 withSessionRelease
+		// 在流结束/关闭时还坑；重试也被拒则立刻还，不留悬挂坑位。
+		if status2 >= 400 {
+			c.releaseSession(ac, sess.userSessionID)
+			return rc2, status2, raw2, nil
+		}
+		return c.withSessionRelease(rc2, ac, sess.userSessionID), status2, raw2, nil
 	}
-	return rc, status, raw, nil
+	if status >= 400 {
+		// 非 2xx 也算「这次会话没占用或已结束」，同样归还坑位（R145）。
+		// 不归还的话，400/429 这类被拒请求会不会占坑只能靠上游实现，不赌。
+		c.releaseSession(ac, sess.userSessionID)
+		return rc, status, raw, nil
+	}
+	return c.withSessionRelease(rc, ac, sess.userSessionID), status, nil, nil
+}
+
+// withSessionRelease 给成功响应的 body 套上「读完/关闭即发 idle 心跳」（R145）。
+//
+// 必须挂在返回给调用方的那一层：handler 透传时会在收到 [DONE] 后 Close，
+// 若只在 EOF 处发心跳，大量请求的坑位会被漏放（实测线上正是这种累积形态）。
+func (c *Client) withSessionRelease(rc io.ReadCloser, ac *Account, sid string) io.ReadCloser {
+	if rc == nil {
+		return nil
+	}
+	return &sessionReleaser{
+		ReadCloser: rc,
+		fire:       func() { c.releaseSession(ac, sid) },
+	}
 }
 
 // doChat 发一次对话请求。benefit=true 时 maas_type 参与签名并随请求发出。
