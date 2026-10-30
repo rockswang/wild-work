@@ -234,6 +234,10 @@ func (c *Client) Stream(w http.ResponseWriter, r io.Reader, model string) (map[s
 	var usage map[string]any
 	err := upstream.StreamCapture(w, tap, func(u map[string]any) { usage = u })
 	if tap.errPayload != "" {
+		// 上游明确说这个模型本账号用不了 ⇒ 进摘除窗口（R143），面板不再列出它。
+		if reUnusableModel.MatchString(tap.errPayload) {
+			c.markUnusable(bareModelName(model), 0)
+		}
 		return usage, newStreamError(tap.errPayload, time.Now())
 	}
 	return usage, err
@@ -248,6 +252,10 @@ func (c *Client) Aggregate(r io.Reader, model string) (map[string]any, error) {
 	tap := newStreamTap(r, model)
 	resp, err := upstream.Aggregate(tap)
 	if tap.errPayload != "" {
+		// 上游明确说这个模型本账号用不了 ⇒ 进摘除窗口（R143）。
+		if reUnusableModel.MatchString(tap.errPayload) {
+			c.markUnusable(bareModelName(model), 0)
+		}
 		return nil, newStreamError(tap.errPayload, time.Now())
 	}
 	if err != nil {

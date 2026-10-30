@@ -25,11 +25,13 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"wild-work/internal/auth"
+	"wild-work/internal/pool"
 	"wild-work/internal/provider"
 )
 
@@ -764,16 +766,10 @@ func TestUserResourceAuthFailureClassified(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 // TestFetchModelsMergeAndBenefitSet 目录合并、日期后缀归一、视觉模型隐藏，
-// 且 benefit 集合只记**未改写**的 id。
+// 且 maas_type 判据按 builtin 优先（R143）。
 func TestFetchModelsMergeAndBenefitSet(t *testing.T) {
 	var builtinSigned string
 	mux := http.NewServeMux()
-	// benefit 目录挂在 BenefitBase 上：用同一台 server 模拟，只换 Client.BenefitBase。
-	mux.HandleFunc("/api/v1/gateway/config", func(w http.ResponseWriter, r *http.Request) {
-		_, _ = io.WriteString(w, `{"result":{"models":[
-			{"model_id":"deepseek-v4.1-flash","model_name":"DeepSeek V4.1 Flash"},
-			{"model_id":"deepseek-v4-flash-0731","model_name":"DS V4 0731"}]}}`)
-	})
 	mux.HandleFunc("/v1/model/builtin", func(w http.ResponseWriter, r *http.Request) {
 		builtinSigned = SignedHeaderNames(r.Header.Get("Authorization"))
 		if got := r.Header.Get(HeaderAgentType); got != AgentTypePromptCenter {
@@ -791,7 +787,6 @@ func TestFetchModelsMergeAndBenefitSet(t *testing.T) {
 	defer srv.Close()
 
 	c := NewWithBase(srv.URL)
-	c.BenefitBase = srv.URL
 	models, err := c.FetchModels(makeAuth("u1"))
 	if err != nil {
 		t.Fatalf("FetchModels: %v", err)
@@ -825,19 +820,16 @@ func TestFetchModelsMergeAndBenefitSet(t *testing.T) {
 		t.Errorf("GET 请求的 content-type/agent-type 不得参与签名: %s", builtinSigned)
 	}
 
-	// benefit 集合：只记未改写 id。
-	ben := c.benefitModels()
-	if !ben["deepseek-v4.1-flash"] {
-		t.Error("deepseek-v4.1-flash 必须在 benefit 集合")
+	// 判据换成 builtin 优先（R143）：builtin 命中的模型一律不发 maas_type。
+	if got := c.maasTypeFor("GLM-5.2"); got != "" {
+		t.Errorf("builtin 命中的模型不得发 maas_type，得到 %q", got)
 	}
-	if ben["deepseek-v4-flash-0731"] {
-		t.Error("带日期后缀的 id 不得进 benefit 集合（后端是不同模型）")
+	if got := c.maasTypeFor("glm-5.3-flash"); got != "" {
+		t.Errorf("builtin 命中的 glm-5.3-flash 不得发 maas_type，得到 %q", got)
 	}
-	if ben["deepseek-v4-flash"] {
-		t.Error("无后缀的 deepseek-v4-flash 未被远端声明，不该由静态表之外的路径凭空加入")
-	}
-	if !c.isBenefitModel("deepseek-v4.1-flash") {
-		t.Error("isBenefitModel 应命中远端集合")
+	// maas 映射本渠道恒空（gatewayConfig 那条老 API 未实现，见 FetchModels 注释）。
+	if len(c.maasModels()) != 0 {
+		t.Errorf("maas 映射应恒空，得到 %v", c.maasModels())
 	}
 }
 
@@ -856,8 +848,9 @@ func TestFetchModelsFallsBackToStatic(t *testing.T) {
 	if len(models) != len(staticCatalog) {
 		t.Fatalf("应回退静态表 %d 条，得到 %d", len(staticCatalog), len(models))
 	}
-	if !c.isBenefitModel("glm-5.3-flash") {
-		t.Error("静态兜底 benefit 集合应生效")
+	// 目录全挂时**不得**凭静态名单发 maas_type（那份名单正是 4004.200 的来源，R143 已删）。
+	if got := c.maasTypeFor("glm-5.3-flash"); got != "" {
+		t.Errorf("目录全挂时不得凭静态名单发 maas_type，得到 %q", got)
 	}
 }
 
@@ -1029,6 +1022,9 @@ func TestChatStreamBenefitHeaderAndRetry(t *testing.T) {
 	defer srv.Close()
 
 	c := NewWithBase(srv.URL)
+	// 前置：造出「首次带 maas_type」的状态。判据改成 builtin 优先后不再自动命中该模型（R143），
+	// 故这里显式写入 maas 映射；断言一字不改。
+	c.storeCatalog(nil, map[string]string{"deepseek-v4.1-flash": "benefit"}, nil)
 	rc, status, raw, err := c.ChatStream(makeAuth("u1"), []byte(`{"model":"deepseek-v4.1-flash","messages":[{"role":"user","content":"x"}]}`))
 	if err != nil {
 		t.Fatalf("ChatStream: %v", err)
@@ -1385,5 +1381,266 @@ func TestWriteAuthFileAndLoad(t *testing.T) {
 	raw := readFile(t, fp)
 	if !strings.Contains(raw, `"access_key_id": "AK9"`) {
 		t.Fatalf("落盘缺少 Extra 字段:\n%s", raw)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// 8. maas_type 判据（R143）
+// ---------------------------------------------------------------------------
+
+// TestMaasTypeFollowsBuiltinCatalog 判据必须与官方 isCurrentModelBenefitType 同构
+// （2026-10-26 实读 .deb 26.10.0 的 extension.js）：
+//
+//	① builtin 目录命中的模型恒不发 maas_type —— 实测 deepseek-v4.1-flash 就在 builtin，
+//	   带 maas_type: benefit 回 4004.200、不带就正常出词（A/B 见 `docs/决议项.md` R143）；
+//	② 只出现在 gatewayConfig 的模型才发，且值取 channel 名（非恒定 "benefit"）；
+//	③ 两份目录都没有 ⇒ 不发（不猜，这是原 staticBenefit 的死因）。
+func TestMaasTypeFollowsBuiltinCatalog(t *testing.T) {
+	// ⚠️ 关键构造：both 模型**同时出现在两份目录里**。没有它，「builtin 优先」那行
+	// 是等价变异（去掉后测试仍绿）——第一版用例就是这么漏的，靠变异验证才发现。
+	maas := map[string]string{
+		"some-new":            "examination",
+		"deepseek-v4.1-flash": "benefit", // 与 builtin 重叠：必须被 builtin 压掉
+	}
+	builtin := map[string]bool{"deepseek-v4.1-flash": true, "GLM-5.2": true}
+
+	c := New()
+	// ③ 无目录证据 ⇒ 不发。
+	if got := c.maasTypeFor("deepseek-v4.1-flash"); got != "" {
+		t.Errorf("无目录证据时不得发 maas_type，得到 %q", got)
+	}
+	c.storeCatalog(nil, maas, builtin)
+	// ① builtin 优先：同一模型两份目录都有 ⇒ 必须不发（这是唯一能观测到优先级的用例）。
+	if got := c.maasTypeFor("deepseek-v4.1-flash"); got != "" {
+		t.Errorf("两份目录都列出时必须由 builtin 压掉 maas_type，得到 %q", got)
+	}
+	if got := c.maasTypeFor("GLM-5.2"); got != "" {
+		t.Errorf("builtin 命中的 GLM-5.2 必须不发 maas_type，得到 %q", got)
+	}
+	// ② 仅网关列出 ⇒ 发 channel 值。
+	if got := c.maasTypeFor("some-new"); got != "examination" {
+		t.Errorf("网关列出的模型应发 channel 值，得到 %q", got)
+	}
+}
+
+// TestPeekLackBenefit peek 兜底的单元测试。
+//
+// ⚠️ 刻意**不**构造「重试成功」的端到端断言：判据修好后本账号永不发 maas_type，
+// 该重试分支不可达；断言一个不会发生的行为等于测假设。这里只锁两件必然成立的事：
+//
+//	① 首个 data 帧命中 4004.200 ⇒ flip=true；
+//	② 未命中的首帧必须**逐字节回放**（否则正常对话会被吞掉一帧）。
+func TestPeekLackBenefit(t *testing.T) {
+	// ① 命中。
+	hit := io.NopCloser(strings.NewReader(
+		`data:{"error_code":"InferHub.4004.200","error_msg":"benefit not found"}` + "\n"))
+	if _, flip, err := peekLackBenefit(hit); err != nil || !flip {
+		t.Fatalf("命中 4004.200 应 flip=true，得到 flip=%v err=%v", flip, err)
+	}
+
+	// ② 未命中：首帧正文逐字节回放，且后续帧仍在。
+	src := `data:{"choices":[{"delta":{"content":"你好"},"index":0}]}` + "\n" +
+		`data:{"choices":[{"delta":{"content":"世界"},"index":0}]}` + "\n" +
+		"data: [DONE]\n"
+	rc, flip, err := peekLackBenefit(io.NopCloser(strings.NewReader(src)))
+	if err != nil || flip {
+		t.Fatalf("正文首帧不该 flip，得到 flip=%v err=%v", flip, err)
+	}
+	got, _ := io.ReadAll(rc)
+	if string(got) != src {
+		t.Errorf("回放必须逐字节一致\n got=%q\nwant=%q", string(got), src)
+	}
+
+	// 首帧就是 [DONE]（空流）：不 flip，且 [DONE] 必须回放。
+	empty := "data: [DONE]\n"
+	rc2, flip2, err2 := peekLackBenefit(io.NopCloser(strings.NewReader(empty)))
+	if err2 != nil || flip2 {
+		t.Fatalf("[DONE] 首帧不该 flip，得到 flip=%v err=%v", flip2, err2)
+	}
+	got2, _ := io.ReadAll(rc2)
+	if string(got2) != empty {
+		t.Errorf("[DONE] 必须回放，得到 %q", string(got2))
+	}
+}
+
+// TestUnusableModelHiddenFromCatalog 实测两例：deepseek-v4-pro 回 81009.404、
+// glm-5.3-flash 回 002002009。留在 /v1/models 里只会让客户端点了必错（R143）。
+func TestUnusableModelHiddenFromCatalog(t *testing.T) {
+	c := New()
+	c.markUnusable("deepseek-v4-pro", 0)
+	c.markUnusable("glm-5.3-flash", 0)
+	got := c.filterUsable([]provider.ModelInfo{
+		{ID: "deepseek-v4-pro"}, {ID: "glm-5.3-flash"}, {ID: "GLM-5.2"},
+	})
+	if len(got) != 1 || got[0].ID != "GLM-5.2" {
+		t.Fatalf("应只剩 GLM-5.2，得到 %v", got)
+	}
+
+	// 永久语义（2026-10-26 用户决定）：**不再有过期回归**，标了就一直在，
+	// 只有 ClearUnusable（重新登录）才清。
+
+	// 静态兜底同样被过滤：server 层目录为空时会回退它，不过滤就会把不可用模型塞回来。
+	for _, m := range c.staticModels() {
+		if m.ID == "deepseek-v4-pro" || m.ID == "glm-5.3-flash" {
+			t.Errorf("静态兜底也必须过滤不可用模型，却包含 %s", m.ID)
+		}
+	}
+}
+
+// TestUnusableModelRegex 判据必须覆盖实测的两类报文，且不误伤正常正文。
+func TestUnusableModelRegex(t *testing.T) {
+	for _, s := range []string{
+		`{"error_code":"InferHub.ModelArts.81009.404","error_msg":"Invalid model."}`,
+		`{"error_code":"InferHub.002002009.404","error_msg":"The model is not registered, please request other model"}`,
+	} {
+		if !reUnusableModel.MatchString(s) {
+			t.Errorf("应命中不可用判据: %s", s)
+		}
+	}
+	// 正常正文里出现「model」字样不该命中。
+	for _, s := range []string{
+		`{"choices":[{"delta":{"content":"this model is great"}}]}`,
+		`{"error_code":"InferHub.4291.200","error_msg":"quota exhausted"}`,
+	} {
+		if reUnusableModel.MatchString(s) {
+			t.Errorf("不得误伤: %s", s)
+		}
+	}
+}
+
+// TestUnusableIsPersistent 摘除必须落盘且**不自动过期**（用户 2026-10-26 决定改永久，
+// 取代原 6h 窗口）：81009.404/002002009 是账号权限结论，不会自己好，窗口语义只会每 6 小时
+// 向用户暴露一次必错选项。
+func TestUnusableIsPersistent(t *testing.T) {
+	dir := t.TempDir()
+	fp := filepath.Join(dir, "state-codearts.json")
+	c := New()
+	c.UnusableFile = fp
+
+	c.markUnusable("deepseek-v4-pro", 0) // 0 = 永久
+	if !c.isUnusable("deepseek-v4-pro") {
+		t.Fatal("标记后应立即可见")
+	}
+
+	// 换一个全新 Client（模拟重启）读同一文件：摘除必须还在。
+	c2 := New()
+	c2.UnusableFile = fp
+	if !c2.isUnusable("deepseek-v4-pro") {
+		t.Error("重启后摘除必须仍然生效（持久化到 state 文件）")
+	}
+	if c2.isUnusable("GLM-5.2") {
+		t.Error("未标记的模型不得被误伤")
+	}
+
+	// 显式清空（重新登录路径）。
+	c2.ClearUnusable()
+	if c2.isUnusable("deepseek-v4-pro") {
+		t.Error("清空后应恢复可见")
+	}
+	c3 := New()
+	c3.UnusableFile = fp
+	if c3.isUnusable("deepseek-v4-pro") {
+		t.Error("清空必须落盘：新进程不得再读到旧记录")
+	}
+}
+
+// TestUnusableSurvivesCorruptState 状态文件损坏时不得 panic，也不得凭残缺数据摘除。
+func TestUnusableSurvivesCorruptState(t *testing.T) {
+	dir := t.TempDir()
+	fp := filepath.Join(dir, "state-codearts.json")
+	if err := os.WriteFile(fp, []byte("{not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c := New()
+	c.UnusableFile = fp
+	if c.isUnusable("deepseek-v4-pro") {
+		t.Error("损坏文件不得被当作有效摘除记录")
+	}
+	c.markUnusable("glm-5.3-flash", 0)
+	if !c.isUnusable("glm-5.3-flash") {
+		t.Error("损坏后应能正常重建")
+	}
+}
+
+// TestUnusableNotTriggeredByTransientErrors 判据**绝不误伤**可用模型：
+// 只有上游明确回「这个模型对本账号不存在/未注册」才标记，网络与临时故障一律不标记。
+//
+// 这是用户 2026-10-26 担心的点（「网络抖动会不会把 deepseek-v4.1-flash 误判成不可用？」），
+// 故用真实 Stream 路径端到端验证，而不是只测正则。
+func TestUnusableNotTriggeredByTransientErrors(t *testing.T) {
+	// 上游回 HTTP 200 + 流内 error 帧，但都是**临时性**故障。
+	cases := []struct{ code, msg, why string }{
+		{"InferHub.429", "too many requests", "429 限流"},
+		{"InferHub.4291.200", "quota exhausted", "额度用尽（账号级，不是模型不存在）"},
+		{"InferHub.500", "internal server error", "上游 5xx"},
+		{"InferHub.503", "service unavailable, please try again", "上游 503"},
+		{"InferHub.504", "gateway timeout", "上游超时"},
+		{"TM.00001041", "system busy, please retry later", "排队繁忙"},
+		{"81111", "service busy", "繁忙"},
+		{"InferHub.ModelArts.4004.401", "model overloaded, retry later", "模型过载（临时）"},
+		{"APIG.0308", "The throttling threshold has been reached", "网关限流"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.code, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "text/event-stream")
+				frame := `{"error_code":"` + tc.code + `","error_msg":"` + tc.msg + `"}`
+				_, _ = io.WriteString(w, "data:"+frame+"\n\ndata: [DONE]\n\n")
+			}))
+			defer srv.Close()
+
+			c := NewWithBase(srv.URL)
+			rc, _, _, err := c.ChatStream(makeAuth("u1"),
+				[]byte(`{"model":"deepseek-v4.1-flash","messages":[{"role":"user","content":"x"}],"stream":true}`))
+			if err != nil {
+				// ChatStream 在 peek 阶段可能直接报错，同样不算标记。
+				if c.isUnusable("deepseek-v4.1-flash") {
+					t.Fatalf("%s：%v 期间不得标记模型不可用", tc.why, err)
+				}
+				return
+			}
+			defer rc.Close()
+			if got, _ := io.ReadAll(rc); len(got) == 0 {
+				t.Logf("%s：空响应", tc.why)
+			}
+			_, _ = c.Stream(httptest.NewRecorder(),
+				strings.NewReader(`data:{"error_code":"`+tc.code+`","error_msg":"`+tc.msg+`"}`+"\n\ndata: [DONE]\n\n"),
+				"deepseek-v4.1-flash")
+			if c.isUnusable("deepseek-v4.1-flash") {
+				t.Fatalf("%s（%s %s）把可用模型误标成不可用", tc.why, tc.code, tc.msg)
+			}
+		})
+	}
+}
+
+// TestUnusableNotClobberedByPoolSave 回归：摘除记录**不得**被同目录的账号状态写入抹掉。
+//
+// 线上实测 2026-10-26：摘除记录写进 data/state-codearts.json 的 unusable_models 键，
+// 但只要 pool 发生一次保存（签到/积分刷新/冷却），pool.saveLocked 就用
+// json.MarshalIndent(整个 stateFile) 整文件覆写，它不认识这个键 ⇒ 记录消失、
+// 被摘除的模型重新出现在 /v1/models。
+//
+// 单机单测当时是绿的，因为测试里只有 Client 一个写入者，没有 pool 参与——
+// 这正是「测了但没测到真实竞争」的典型。故本测试**必须**让两个写入者都上场。
+func TestUnusableNotClobberedByPoolSave(t *testing.T) {
+	dir := t.TempDir()
+	poolFp := filepath.Join(dir, "state-codearts.json")
+
+	// 两个写入者用**各自**的文件（修法 A）：pool 管账号状态，Client 管模型摘除。
+	c := New()
+	c.UnusableFile = filepath.Join(dir, "models-codearts.json")
+
+	c.markUnusable("deepseek-v4-pro", 0)
+
+	// 模拟 pool 保存账号状态（这一步在旧实现里会覆写整个 state 文件）。
+	p := pool.New(poolFp)
+	p.Add(&auth.Auth{UID: "u1"})
+	p.SetCreditDetail("u1", 100, 0, 0, time.Now()) // 内部 saveLocked → 整文件覆写
+
+	// 摘除记录必须仍在，且**换进程也读得到**。
+	c2 := New()
+	c2.UnusableFile = c.UnusableFile
+	if !c2.isUnusable("deepseek-v4-pro") {
+		t.Fatal("pool 保存账号状态后，模型摘除记录被抹掉了（两个写入者共用了同一个文件）")
 	}
 }

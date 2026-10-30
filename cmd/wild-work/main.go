@@ -429,6 +429,13 @@ func main() {
 	// CodeArts：对话走华为 snap-access（HMAC 签名）且长思考常见；非流式 client 留总超时兜底，
 	// StreamHTTP 不设 Timeout（R35），两者共用 Transport。
 	caUp := codearts.New()
+	// 不可用模型摘除记录落盘（R143）：81009.404/002002009 是账号权限结论、不会自愈，
+	// 故持久化且无过期；重新登录成功后由 login 路径 ClearUnusable 清空。
+	//
+	// ⚠️ **绝不能**写进 state-codearts.json：那个文件由 pool.saveLocked 整文件覆写
+	// （它不认识额外键），一次积分刷新/签到就会把摘除记录抹掉——线上实测 2026-10-26，
+	// 表现为被摘除的模型重启后重新出现。两个写入者必须各用各的文件。
+	caUp.UnusableFile = filepath.Join(stateDir, "models-codearts.json")
 	caUp.HTTP.Timeout = time.Duration(cfg.Upstream.TimeoutSeconds) * time.Second
 	caUp.StreamHTTP.Transport = caUp.HTTP.Transport
 	glmUp := glm.New()
@@ -657,7 +664,8 @@ func main() {
 		// Gemini：真多账号渠道 ⇒ 不置 SingleAccount。
 		provider.Gemini: {Kind: provider.Gemini, Pool: gemPool, Upstream: gemUp, StaticModels: gemini.StaticModels()},
 		// CodeArts：真多账号渠道 ⇒ 不置 SingleAccount。
-		provider.CodeArts: {Kind: provider.CodeArts, Pool: caPool, Upstream: caUp, StaticModels: codearts.StaticModels()},
+		provider.CodeArts: {Kind: provider.CodeArts, Pool: caPool, Upstream: caUp, StaticModels: codearts.StaticModels(),
+			ModelFilter: caUp.FilterUnusable},
 	}
 	appRuntimes := map[provider.Kind]*app.Runtime{
 		provider.WorkBuddy:   {Kind: provider.WorkBuddy, Pool: wbPool, Upstream: wbUp, Scheduler: wbSch},
