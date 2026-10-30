@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"sort"
@@ -14,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	"wild-work/internal/auth"
 	"wild-work/internal/monkeycode"
 	"wild-work/internal/officeace"
 	"wild-work/internal/provider"
@@ -365,22 +367,18 @@ func (a *App) importLoomy() (*ImportLocalResult, error) {
 	if uid == "" {
 		uid = "default"
 	}
-	// Loomy 无 refresh 端点，且 session 是客户端登录时申请 14 天有效期的短期凭据。
-	// 用 updatedAt + 14d 估算到期时刻：避免 NeedsRefreshLocked 因 ExpiresAt<=0 恒真
-	// 而触发一个必然失败的刷新。
-	base := payload.UpdatedAt
-	if base > 1e12 { // 毫秒 → 秒
-		base /= 1000
-	}
-	if base <= 0 {
-		base = time.Now().Unix()
-	}
+	// Loomy 无 refresh 端点，session 由客户端登录时申请（名义 14 天），且上游响应
+	// **不带**到期时间戳 —— 本地无论如何都只能估算。而估算值一旦到期，
+	// NeedsRefreshLocked 即恒真，触发一个必然失败的刷新（internal/loomy.RefreshToken
+	// 恒返回 session_dead）。故与 monkeycode / officeace 同口径：写**远期哨兵**，
+	// 表示「本凭据不由 expiresAt 驱动刷新」；真正的 session 失效由对话/积分请求的
+	// 401 兜底，不在本地凭过期时间预判。
 	doc := authDoc{
 		Auth: authSection{
 			AccessToken: session,
 			// 故意留空：scheduler 对 refreshToken 为空的账号会跳过保活（不会产生无意义失败）。
 			RefreshToken: "",
-			ExpiresAt:    base + 14*24*3600,
+			ExpiresAt:    time.Now().AddDate(50, 0, 0).Unix(),
 			Domain:       "/api/v1",
 			ApiHost:      "https://loomyad.xunfei.cn",
 		},
@@ -394,8 +392,44 @@ func (a *App) importLoomy() (*ImportLocalResult, error) {
 	a.afterAccountAdded(provider.Loomy)
 	return &ImportLocalResult{
 		Channel: "loomy", UID: uid, File: filepath.Base(file),
-		Note: "Loomy 无 refresh 端点（session 约 14 天），到期后需在客户端重新登录并再次导入",
+		Note: "Loomy 无 refresh 端点（session 由客户端登录时申请）；失效后需在客户端重新登录并再次导入",
 	}, nil
+}
+
+// healLoomyExpiry 启动自愈：历史版本的 Loomy 凭据把 `expiresAt` 写成了**估算值**
+// （导入路径 `updatedAt+14d`、短信登录路径 `now+14d`）。估算值到期后
+// `auth.NeedsRefreshLocked` 恒真 → 触发一个必然失败的刷新
+// （`internal/loomy.RefreshToken` 恒返回 session_dead），表现为面板红字
+// 「loomy: token refresh failed」且该账号不再参与 10 分钟自动积分刷新。
+//
+// 而 Loomy **无 refresh 端点**，任何短期 `expiresAt` 都只会走到这条死路，故启动时把
+// 存量 `loomy-*.json` 里的非远期哨兵 `expiresAt` 一次性归一为**远期哨兵**，与新写入
+// 口径（importLoomy / login_loomy）对齐。已是哨兵的不改写（幂等）；改盘后由调用方
+// reloadAccounts 刷新内存池。
+func (a *App) healLoomyExpiry() {
+	auths, err := auth.LoadLoomyDir(a.cfg.AuthDir)
+	if err != nil {
+		log.Printf("启动自愈：Loomy 凭据目录扫描失败：%v", err)
+		return
+	}
+	sentinel := time.Now().AddDate(50, 0, 0).Unix()
+	fixed := 0
+	for _, au := range auths {
+		if isFarFutureExpiry(au.ExpiresAt) {
+			continue
+		}
+		au.ExpiresAt = sentinel
+		if err := au.SaveAtomic(); err != nil {
+			// 单个文件写入失败不致命：如实记录并跳过，不中断启动。
+			log.Printf("启动自愈：Loomy 凭据归一化失败（%s）：%v", filepath.Base(au.FilePath), err)
+			continue
+		}
+		fixed++
+	}
+	if fixed > 0 {
+		log.Printf("启动自愈：已将 %d 个 Loomy 凭据的估算 expiresAt 归一为远期哨兵", fixed)
+		a.reloadAccounts()
+	}
 }
 
 // loomyClientSessionPath 定位 Loomy 客户端会话文件（自适应多候选）。

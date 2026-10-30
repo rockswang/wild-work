@@ -290,12 +290,15 @@ func (s *session) login(client *http.Client, phone, code, msgid string) (Result,
 
 	r := Result{
 		AccessToken: sess,
-		ExpiresAt:   time.Now().Add(sessionTTLSeconds * time.Second).Unix(),
-		Domain:      apiDomain,
-		ApiHost:     apiHost,
-		UID:         uid,
-		Phone:       phone,
-		Nickname:    maskPhone(phone),
+		// Loomy 无 refresh 端点、上游响应不带到期时间戳，本地只能估算 —— 而估算值一旦
+		// 到期即触发必然失败的刷新（见 internal/loomy.RefreshToken）。故写**远期哨兵**，
+		// 表示「本凭据不由 expiresAt 驱动刷新」，与导入路径/auth 侧哨兵口径一致。
+		ExpiresAt: time.Now().AddDate(50, 0, 0).Unix(),
+		Domain:    apiDomain,
+		ApiHost:   apiHost,
+		UID:       uid,
+		Phone:     phone,
+		Nickname:  maskPhone(phone),
 	}
 
 	s.mu.Lock()

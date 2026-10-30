@@ -78,13 +78,15 @@ const flowTTL = 4 * time.Minute
 // Result 登录成功后拿到的凭据与账号信息（与「从本机客户端导入」落盘形态一致）。
 //
 // Loomy 的凭据只有 `session`（32 位 hex，向服务端声明 14 天有效期），
-// **没有任何 refresh 端点**，故 RefreshToken 恒为空、ExpiresAt 由本地按 14 天推算。
+// **没有任何 refresh 端点**，故 RefreshToken 恒为空、ExpiresAt 写**远期哨兵**
+// （不由 expiresAt 驱动刷新；真正失效由请求 401 兜底）。
 type Result struct {
 	// AccessToken 即 Loomy 的 session（推理与积分接口都用它）。
 	AccessToken string
 	// RefreshToken 恒为空：Loomy 无续期机制（留空还能让 scheduler 跳过无意义的保活）。
 	RefreshToken string
-	// ExpiresAt 是 session 的到期时刻（**Unix 秒**，本地按 14 天推算）。
+	// ExpiresAt 是 session 的到期时刻（**Unix 秒**）。Loomy 恒为**远期哨兵**
+	// （见 http.go 登录处）：无续期端点时，短期估算值只会触发必然失败的刷新。
 	ExpiresAt int64
 	// Domain / ApiHost 写进 auth 文件，供 internal/loomy 组装出站请求。
 	Domain  string

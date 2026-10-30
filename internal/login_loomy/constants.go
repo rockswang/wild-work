@@ -48,11 +48,13 @@ const (
 
 	// smsCodeTTLSeconds 短信验证码有效期（秒）。
 	smsCodeTTLSeconds = 300
-	// sessionTTLSeconds 登录会话有效期（秒）= 14 天。
+	// sessionTTLSeconds 登录请求里向服务端**声明**的会话有效期（秒）= 14 天。
 	//
-	// 依据 ofm loomy-oauth.ts:32-39：`session` 是向服务端**声明** expire 得来的
-	// （客户端 account-service.js:391 的 `expire: 14 * 24 * 3600`），
-	// 响应里**不带**到期时间戳，故凭据的 expiresAt 只能由本地按此推算。
+	// 依据 ofm loomy-oauth.ts:32-39：`session` 是向服务端声明 expire 得来的
+	// （客户端 account-service.js:391 的 `expire: 14 * 24 * 3600`）。
+	// ⚠️ 该值仅用于**登录请求体**（见 http.go 的 `"expire"` 字段）；响应里**不带**到期
+	// 时间戳，凭据的 `expiresAt` **不再**由此推算 —— Loomy 无 refresh 端点，任何短期
+	// 估算值到期都会触发必然失败的刷新，故凭据一律写远期哨兵（见 http.go / SaveAuth）。
 	sessionTTLSeconds = 1_209_600
 
 	// accountModelID / accountVersion / accountDeviceID 账号请求体 base 段。

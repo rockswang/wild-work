@@ -243,6 +243,8 @@ func New(opts Options) (*App, error) {
 	log.SetOutput(&logWriter{app: a})
 	a.loadPricingCache()
 	a.healRaccoonProtocol()
+	// Loomy 凭据历史估算 expiresAt 归一化（无 refresh 端点时短期值只会触发必失败刷新）。
+	a.healLoomyExpiry()
 	return a, nil
 }
 
