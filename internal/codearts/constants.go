@@ -72,24 +72,43 @@ const (
 	EpBuiltinModels = "/v1/model/builtin"
 	// EpBenefitConfig benefit 模型目录（挂在 BenefitBase 下）。
 	EpBenefitConfig = "/api/v1/gateway/config"
+	// EpChatSessionHeartbeat 会话坑位心跳（**决定性修复 R145**）。
+	//
+	// 上游对每个账号有「并发会话数上限 3」的硬限制（实测 body：
+	// `{"error_code":"TM.00001041","error_msg":"并发会话数已达上限(3个)…"}`）。
+	// 该限制的实际计数键是 `user-session-id` 头，坑位**不会被对话流结束自动释放**；
+	// 唯一释放手段是官方 agentkernelServer 的 ChatSessionHeartbeat：
+	//   PUT {Base}/snap-manager/v1/chat-session/heartbeat?status=idle   （user-session-id 头）
+	// 实测（§0.1 单发 A/B，同一凭据同一 body 只改这一处）：
+	//   · 不盖心跳、每请求新 id ⇒ 第 3~4 次必 400 TM.00001041；
+	//   · 每次对话毕对该 sid 发一次 idle 心跳 ⇒ 连打 8 次全 200；
+	//   · 同一 sid 反复用但不盖心跳 ⇒ 也全 200（坑位按 sid 计，复用一个 id 只占 1 坑）。
+	// 官方源码取证：extension 的 ChatSessionHeartbeat 服务（`/snap-manager/v1/chat-session/heartbeat`、
+	// status 走 query 参数、`user-session-id` 头取会话 id、busy 每 30s 一次、idle 收尾一次）。
+	EpChatSessionHeartbeat = "/snap-manager/v1/chat-session/heartbeat"
 )
 
 // 参与 / 不参与签名的头名（协议 §2.2）。**小写字面量**是签名侧的键名；
 // 出站用 Go 的 Header.Set（会自动规范成 X-Sdk-Date 形态），两者不冲突。
 const (
-	hdrHost           = "host"
-	hdrSDKDate        = "x-sdk-date"
-	hdrContentSHA256  = "x-sdk-content-sha256"
-	hdrSecurityToken  = "x-security-token"
-	hdrContentType    = "content-type"
-	hdrAuthorization  = "Authorization"
-	HeaderMaaSType    = "maas_type"
-	HeaderAgentType   = "Agent-Type"
-	HeaderXLanguage   = "X-Language"
-	HeaderChatID      = "Chat-Id"
-	HeaderSessionID   = "Session-Id"
-	HeaderLang        = "lang"
-	HeaderSnapTraceID = "x-snap-traceid"
+	hdrHost          = "host"
+	hdrSDKDate       = "x-sdk-date"
+	hdrContentSHA256 = "x-sdk-content-sha256"
+	hdrSecurityToken = "x-security-token"
+	hdrContentType   = "content-type"
+	hdrAuthorization = "Authorization"
+	HeaderMaaSType   = "maas_type"
+	HeaderAgentType  = "Agent-Type"
+	HeaderXLanguage  = "X-Language"
+	HeaderChatID     = "Chat-Id"
+	HeaderSessionID  = "Session-Id"
+	// HeaderUserSessionID 会话坑位计数键（R145）。官方 agentkernelServer 在 chat 与心跳
+	// **两处都发**，缺了它上游无法把坑位与会话对上 ⇒ 每个请求独占一个新坑且永不释放，
+	// 累积到 3 即 `TM.00001041`（实测）。心跳端点靠它定位要释放的会话。
+	// ⚠️ 与 x-ot-* 同纪律：必须**签名后追加**，进 canonical 会 401 APIG.0301。
+	HeaderUserSessionID = "user-session-id"
+	HeaderLang          = "lang"
+	HeaderSnapTraceID   = "x-snap-traceid"
 )
 
 // 业务常量。
@@ -152,6 +171,9 @@ const (
 const (
 	// requestTimeout 控制面（目录 / 积分 / 活动）请求总超时。
 	requestTimeout = 60 * time.Second
+	// heartbeatTimeout 会话 idle 心跳的超时（R145）。心跳是善后动作，卡住只会拖住
+	// 客户端 Close，故给短值；失败按日志记录，不影响已流完的响应。
+	heartbeatTimeout = 10 * time.Second
 	// oauthTimeout STS 换取 / 续期的总超时。
 	oauthTimeout = 30 * time.Second
 	// DefaultFirstTokenTimeout 首 token 超时（协议 §2.4：参考实现 300 000 ms）。
