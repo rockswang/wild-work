@@ -2142,11 +2142,14 @@ func (a *App) CancelGLMAutoLogin() error {
 // 「新增账号」直接顶成旧终态（表现为「点了没反应」）。
 func (a *App) StartOfficeAceLogin() (string, error) {
 	a.muOALogin.Lock()
+	// 必须 defer 释放：本函数有三条返回路径（已有流程 / 启动失败 / 成功），
+	// 早期版本在**成功路径**漏了 Unlock，导致 muOALogin 被永久持有
+	// ——此后 GetOfficeAceLoginStatus / CancelOfficeAceLogin / 再次 Start 全部阻塞，
+	// 前端轮询超时后把「账号已添加成功」误报成「登录失败」，只能重启进程恢复。
+	defer a.muOALogin.Unlock()
 	if a.oaLogin != nil {
 		if st, _ := a.oaLogin.Status(); oaLoginActive(st) {
-			url := a.oaLogin.URL()
-			a.muOALogin.Unlock()
-			return url, errors.New("已有 OfficeAce 登录流程进行中，请先完成或取消")
+			return a.oaLogin.URL(), errors.New("已有 OfficeAce 登录流程进行中，请先完成或取消")
 		}
 		// 上一轮已到终态：清空，让本次新建的会话立刻成为唯一可见状态。
 		// 刻意在上锁期间清空 —— 否则并发的 GetOfficeAceLoginStatus 会读到旧会话。
@@ -2158,7 +2161,6 @@ func (a *App) StartOfficeAceLogin() (string, error) {
 		log.Printf("officeace 自助登录完成，账号池已重载 uid=%s", r.UID)
 	})
 	if err != nil {
-		a.muOALogin.Unlock()
 		return "", err
 	}
 	a.oaLogin = sess
