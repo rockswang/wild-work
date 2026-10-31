@@ -239,20 +239,30 @@ func convertAnthropicMessage(role string, content any, idx int) ([]any, error) {
 		msg := map[string]any{"role": "assistant", "tool_calls": toolCalls}
 		msg["content"] = strings.Join(texts, "\n") // 工具调用与文本可并存
 		out = append([]any{msg}, out...)           // assistant 消息必须排在 tool 结果之前
-	} else if len(texts) > 0 || len(imgBlocks) > 0 {
-		var content any
-		if len(imgBlocks) > 0 {
-			blocks := make([]any, 0, len(texts)+len(imgBlocks))
-			for _, t := range texts {
-				blocks = append(blocks, map[string]any{"type": "text", "text": t})
-			}
-			blocks = append(blocks, imgBlocks...)
-			content = blocks
-		} else {
-			content = strings.Join(texts, "\n")
-		}
-		out = append([]any{map[string]any{"role": base, "content": content}}, out...)
+		return out, nil
 	}
+	// 走到这里说明 out 里只可能有 role=tool 消息（本条消息的工具结果）。
+	// 关键不变量：Chat 协议要求 assistant.tool_calls 之后**紧跟**同批 role:tool，
+	// 中间插任何一条别的消息都会被上游判「tool calls and tool results do not match」
+	// （workbuddy code 11148；qoder 系只回信封层 "Error in upstream response"）。
+	// 原先这里用 prepend 把文本插到结果之前，出站顺序变成 user→tool→tool，
+	// 正是 Claude Code「工具结果 + 新一轮指令」同条消息时打不开会话的成因。
+	// 文本/图片属于「工具执行完之后的新一轮用户输入」，必须排在结果之后。
+	if len(texts) == 0 && len(imgBlocks) == 0 {
+		return out, nil // 纯工具结果：不再凭空造一条空 user
+	}
+	var body any
+	if len(imgBlocks) > 0 {
+		blocks := make([]any, 0, len(texts)+len(imgBlocks))
+		for _, t := range texts {
+			blocks = append(blocks, map[string]any{"type": "text", "text": t})
+		}
+		blocks = append(blocks, imgBlocks...)
+		body = blocks
+	} else {
+		body = strings.Join(texts, "\n")
+	}
+	out = append(out, map[string]any{"role": base, "content": body})
 	return out, nil
 }
 
