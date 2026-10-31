@@ -29,6 +29,7 @@
       </div>
     </div>
     <div class="top-icons">
+      <span class="icon-link hidden" id="btnUpdateNotice" title="发现新版本" style="color:var(--warn);position:relative;font-weight:bold">🆙<span class="update-dot" style="position:absolute;top:0;right:0;width:6px;height:6px;background:var(--danger);border-radius:50%"></span></span>
       <span class="icon-link gear" id="btnSettings" title="设置">⚙</span>
       <span class="icon-link" id="btnHelp" title="帮助">?</span>
       <span class="icon-link" id="btnAbout" title="关于">i</span>
@@ -831,13 +832,61 @@
   </div>
 </div>
 
+
+<!-- 自动更新弹层（R84: 遵循 modal-wide 720px 标准档位；R90: 说明收敛为 ? 角标） -->
+<div class="overlay hidden" id="updateOverlay" style="z-index:110">
+  <div class="modal modal-wide" id="updateModal">
+    <div class="modal-title">
+      <span id="updateModalTitle">系统自动更新</span><span class="help-mark" onclick="event.preventDefault()">?<span class="help-pop"><b>自动更新机制</b><br>· 支持 GitHub 官方直连与加速代理多源探测；<br>· 强制校验 SHA256 完整性摘要，防止文件损坏或中间人篡改；<br>· 下载就绪后由您自主决定重启时机（<b>重启将中断当前进行的对话/请求任务</b>，请在空闲时重启生效）。</span></span>
+      <button class="modal-close-btn" id="btnUpdateModalClose" title="关闭">✕</button>
+    </div>
+    <div class="modal-body" style="padding:14px 0">
+      <div style="display:flex;align-items:baseline;gap:8px;margin-bottom:12px">
+        <span style="font-size:16px;font-weight:600" id="updateTargetVer">v...</span>
+        <span class="hint" id="updateCurrentVer" style="margin:0">（当前 v...）</span>
+        <span class="badge" id="updateSizeBadge" style="margin-left:auto;background:var(--card-hover)"></span>
+      </div>
+
+      <!-- 更新中断提醒横条（就绪等待重启时展示） -->
+      <div id="updateReadyNotice" class="hidden" style="background:rgba(234,179,8,0.1);border:1px solid var(--warn);border-radius:6px;padding:10px 12px;margin-bottom:12px;color:var(--warn);font-size:12px;line-height:1.5">
+        ⚠️ <b>新版本已就绪！</b>点击「立即重启生效」将完成平滑切换。<b>重启将中断当前正在进行的对话请求任务</b>，请确认当前无在办请求后再执行重启。
+      </div>
+
+      <div id="updateChangelogBox" style="background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:12px 14px;max-height:220px;overflow-y:auto;font-size:12px;line-height:1.6;color:var(--text-sec);margin-bottom:12px"></div>
+      
+      <!-- 进度条（下载中展示） -->
+      <div id="updateProgressArea" class="hidden" style="margin-bottom:12px">
+        <div style="display:flex;justify-content:space-between;font-size:12px;margin-bottom:4px">
+          <span id="updateProgressStatus" class="hint">正在下载...</span>
+          <span id="updateProgressPercent" style="font-weight:600">0%</span>
+        </div>
+        <div style="background:var(--card-hover);height:6px;border-radius:3px;overflow:hidden">
+          <div id="updateProgressBar" style="background:var(--primary);width:0%;height:100%;transition:width 0.2s"></div>
+        </div>
+        <div style="display:flex;justify-content:space-between;font-size:11px;color:var(--muted);margin-top:4px">
+          <span id="updateSpeed">0 KB/s</span>
+          <span id="updateBytes">0 / 0 MB</span>
+        </div>
+      </div>
+
+      <div id="updateErrorBox" class="risk-tip hidden" style="margin-bottom:12px"></div>
+    </div>
+    <div class="modal-actions" style="justify-content:flex-end;gap:8px">
+      <button class="btn small" id="btnUpdateBrowser" title="去浏览器打开 GitHub Release 详情">打开发布页</button>
+      <button class="btn small" id="btnUpdateLater">稍后提醒</button>
+      <button class="btn small" id="btnUpdateIgnore">忽略此版本</button>
+      <button class="btn small primary" id="btnUpdateAction">立即更新</button>
+    </div>
+  </div>
+</div>
+
 <!-- 关于弹层 -->
 <div class="overlay hidden" id="aboutOverlay">
   <div class="modal" style="text-align:center">
     <img class="logo" src="./logo64.png" alt="logo" style="width:64px;height:64px;margin-bottom:12px">
     <div class="modal-title">wild-work</div>
     <div class="modal-body" style="color:var(--muted)">
-      <p>版本 <span id="aboutVer"></span></p>
+      <p>版本 <span id="aboutVer"></span> <button class="btn small" id="btnCheckUpdate" style="margin-left:8px;padding:1px 8px;font-size:11px">检查更新</button></p>
       <p>多渠道账号聚合工具</p>
       <p>基于 WorkBuddy + TraeWork + Qoder 上游</p>
       <p style="margin-top:8px;font-size:12px">仅供个人学习使用</p>
