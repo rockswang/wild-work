@@ -869,6 +869,33 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			// 全号排队：给合规的重试信号（与 body 里的 retry_after_seconds 一致）。
 			w.Header().Set("Retry-After", "30")
 		}
+		// 429 软限流透传前也补 Retry-After。
+		//
+		// 动机（实测 2026-10-31）：raccoon 的 429 报文里没有任何重置时间戳
+		// （{"code":"user_model_rate_limited","message":"您的模型请求频率超限，请稍后重试"}），
+		// 故 softRateCooldown 落回固定窗口，而客户端拿不到重试信号后自己按默认策略退避
+		// （实测 22s）→ 正好撞进冷却窗口 → 又吃一次 429。
+		// 把同一信号透给客户端：上游给了就照抄，没给就兜底 60s（与 SoftCooldown 同值）。
+		//
+		// 为什么兜底 60s 而不是官方指数退避的首次值 1s（2026-10-31 实测修正）：
+		// 官方 429 后**立刻放弃**（is_fatal=True、2.5s 结束、total_tokens=0），根本不走它
+		// 自己那套 1s/2s/4s 退避；真正恢复靠「静默等窗口过去」——实测我方最后一次 429
+		// （14:12:12）之后，官方客户端到 14:53:30 仍在 429，直到 15:15 才恢复，即窗口是
+		// 分钟级。给 1s 会让客户端每秒一撞、把窗口越撞越长。
+		//
+		// ⚠️ 只在本分支**尚未**设过 Retry-After 时生效：排队（ErrQueued）也是 429 且上一步
+		// 已按上游 retry_after_seconds 给了 30，覆盖它会把排队语义改坏（下一个号并非限流，
+		// 重试节奏应与排队提示一致）。实测踩到：不加这个判断时
+		// TestAllQueuedReturns429WithRetryAfter 从 30 变成 1。
+		if res.lastKind == provider.ErrSoftRate || res.lastStatus == http.StatusTooManyRequests {
+			if w.Header().Get("Retry-After") == "" {
+				retry := "60"
+				if ra, ok := clientRetryAfter(res.lastBody); ok {
+					retry = ra
+				}
+				w.Header().Set("Retry-After", retry)
+			}
+		}
 		transparentError(w, res.lastStatus, res.lastBody)
 		return
 	}
@@ -1993,6 +2020,30 @@ func (h *Handler) softRateCooldown(body string) time.Duration {
 		d = softRateResetMaxCap
 	}
 	return d
+}
+
+// clientRetryAfter 透传给客户端的 Retry-After 秒数。
+//
+// 优先用上游响应体里的重置时间戳（与 softRateCooldown 同一判据，不重复实现）；
+// 未命中返回 ok=false，调用方回退 60s（见调用点注释的实测理由）。
+// 上限取 60s —— 限流窗口一般就在这个量级，给更大的值只会让客户端白等。
+func clientRetryAfter(body []byte) (string, bool) {
+	ts, ok := softRateResetTs(string(body))
+	if !ok {
+		return "", false
+	}
+	d := time.Until(ts)
+	if d <= 0 {
+		return "", false
+	}
+	secs := int(d.Seconds() + 0.5)
+	if secs < 1 {
+		secs = 1
+	}
+	if secs > 60 {
+		secs = 60
+	}
+	return strconv.Itoa(secs), true
 }
 
 // softRateResetTs 提取限流响应体中的重置时间戳（UTC+8 墙钟）；未命中返回 false。
