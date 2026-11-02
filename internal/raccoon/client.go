@@ -170,11 +170,16 @@ func (c *Client) do(method, url string, a *auth.Auth, body []byte) (*http.Respon
 	if err != nil {
 		return nil, nil, err
 	}
-	if body != nil {
-		req.Header.Set("Content-Type", "application/json")
-	}
-	req.Header.Set("Accept", "application/json")
-	req.Header.Set("Authorization", "Bearer "+accessToken(a))
+	// 出站头统一走 ApplyHeaders（官方 box-agent LLM 路径的形态）。
+	//
+	// do() 用于签到/目录/余额等**网页业务 API**，官方这些端点走渲染层那套头，与 LLM
+	// 端点不同；但本渠道的对齐目标一直是「让上游看到官方客户端」，故两类端点共用一套头
+	// 以保持代码单一来源（两类端点的差异记载见 headers.go 文件头）。
+	//
+	// orgCode 传空串：个人账号无企业码（auth.Auth 结构里也没有该字段）。
+	// session key 用 "web"：这不是 LLM 端点，官方这些请求不带会话语义；按账号分桶
+	// （不带模型），避免不同账号共用同一个 web 会话。
+	ApplyHeaders(req, accessToken(a), "", gatewayOSVersion(), sessionFor(sessionKeyOf(a, "web")), newTurnID())
 	resp, err := c.httpClient().Do(req)
 	if err != nil {
 		return nil, nil, err
@@ -310,9 +315,25 @@ func (c *Client) ChatStream(a *auth.Auth, body []byte) (rc io.ReadCloser, status
 	if err != nil {
 		return nil, 0, nil, err
 	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Accept", "application/json")
-	req.Header.Set("Authorization", "Bearer "+accessToken(a))
+	// 出站头对齐官方 LLM 请求形态（UA=AsyncOpenAI/Python、X-Stainless-*、x-client-*、
+	// X-RACCOON-Session-ID/Turn-ID）。
+	//
+	// 不手写 Accept —— openai SDK 会发 Accept: application/json，但那是 SDK 行为。
+	// session id 按「账号 + 模型」分桶并 24h 轮换；turn id 每请求新建。
+	//
+	// ⚠️ 这两个头**必须一起上**：上游原本完全不发 X-RACCOON-Session-ID，若只引入身体头而
+	// 让 session 每请求新建，上游就会看到「同一账号短时间冒出上百个新会话」——这正是
+	// 429 的触发条件（见下方 429 段落）。
+	sessID, sessNew := sessionForEx(sessionKeyOf(a, modelOf(orig)))
+	// 把会话 ID 与「是否新建」写进 app.log。
+	//
+	// 动机：本渠道的 429 归因（会话稳定性）只能靠「同一账号+模型是否复用同一 sess-」验证，
+	// 而该值此前只在出站头里、日志看不到，等于关键决策点无法事后核对。打 info 级（不是
+	// debug）：会话新建是低频事件、复用是高频事件，两者都只在每请求一行，可与轮换计数
+	// 按时间戳对照。**不打 token**：只打账号 uid、模型名与会话 ID（后者本就是发往上游的
+	// 非敏感随机串）。
+	log.Printf("raccoon session: uid=%s model=%q sid=%s new=%t", accountKey(a), modelOf(orig), sessID, sessNew)
+	ApplyHeaders(req, accessToken(a), "", gatewayOSVersion(), sessID, newTurnID())
 	// 用无总超时的 client：长思考请求不受整请求上限约束（见 Client.StreamHTTP）。
 	resp, err := c.streamClient().Do(req)
 	if err != nil {
