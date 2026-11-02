@@ -48,19 +48,30 @@ func isDSMLModel(model string) bool { return reDSMLModel.MatchString(strings.Tri
 type sessionIDs struct {
 	chatID    string
 	sessionID string
+	// userSessionID 会话坑位计数键（`user-session-id` 头）。与 Session-Id 取**同一个值**；
+	// 上游「并发会话数已达上限(3个)」按它计数（R145 实测），且**只能靠 idle 心跳释放**。
+	// ⚠️ 它必须**签名后追加**（实测：进 canonical 会 401 APIG.0301），故放在 unsigned 侧。
+	userSessionID string
 }
 
 // newSessionIDs 生成一对会话标识。
+//
+// user-session-id 与 Session-Id 取**同一个值**：官方 getInferhubHcHeaders() 里两者都默认取
+// 会话 id（`t?.["user-session-id"] || Fo()`），而心跳端点的坑位计数键正是 `user-session-id`。
+// R145 实测：不盖这个头时上游按「每次新会话 id」占坑，3 个坑位用满即 `TM.00001041`；
+// 盖上且收尾发 idle 心跳后连打 8 次全 200。
 func newSessionIDs() sessionIDs {
-	return sessionIDs{chatID: randomHex(16), sessionID: randomHex(16)}
+	sid := randomHex(16)
+	return sessionIDs{chatID: randomHex(16), sessionID: sid, userSessionID: sid}
 }
 
 // headers 对话端点的未签名头（协议 §2.2 表）。
 func (s sessionIDs) headers() map[string]string {
 	return map[string]string{
-		HeaderChatID:    s.chatID,
-		HeaderSessionID: s.sessionID,
-		HeaderLang:      "en",
+		HeaderChatID:        s.chatID,
+		HeaderSessionID:     s.sessionID,
+		HeaderUserSessionID: s.userSessionID,
+		HeaderLang:          "en",
 	}
 }
 

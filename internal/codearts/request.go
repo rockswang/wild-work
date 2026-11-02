@@ -7,6 +7,7 @@ package codearts
 
 import (
 	"bytes"
+	"context"
 	"io"
 	"net/http"
 	"strings"
@@ -31,11 +32,18 @@ func signAndApply(req *http.Request, ac *Account, body []byte, contentType strin
 // doSigned 执行一次已签名请求并读回响应体（供控制面接口使用）。
 func (c *Client) doSigned(client *http.Client, ac *Account, method, rawURL, contentType string,
 	body []byte, signedExtra, unsigned map[string]string) (int, []byte, error) {
+	return c.doSignedCtx(context.Background(), client, ac, method, rawURL, contentType,
+		body, signedExtra, unsigned)
+}
+
+// doSignedCtx 同 doSigned，但带 context（会话心跳等善后动作需要独立超时）。
+func (c *Client) doSignedCtx(ctx context.Context, client *http.Client, ac *Account,
+	method, rawURL, contentType string, body []byte, signedExtra, unsigned map[string]string) (int, []byte, error) {
 	var rd io.Reader
 	if body != nil {
 		rd = bytes.NewReader(body)
 	}
-	req, err := http.NewRequest(method, rawURL, rd)
+	req, err := http.NewRequestWithContext(ctx, method, rawURL, rd)
 	if err != nil {
 		return 0, nil, err
 	}

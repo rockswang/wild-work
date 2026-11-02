@@ -221,6 +221,12 @@ func TestMaaSTypeParticipatesInSignature(t *testing.T) {
 func TestAgentTypeExcludedFromSignature(t *testing.T) {
 	var gotAuth, gotAgent, gotLang, gotChatID, gotSession string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// 只记录对话请求：R145 起 ChatStream 会在流结束/关闭时对同一 Base 发一次
+		// 会话心跳（PUT …/chat-session/heartbeat），它会覆盖下面这些变量。
+		if strings.HasSuffix(r.URL.Path, EpChatSessionHeartbeat) {
+			_, _ = io.WriteString(w, `{"status":"ok"}`)
+			return
+		}
 		gotAuth = r.Header.Get("Authorization")
 		gotAgent = r.Header.Get(HeaderAgentType)
 		gotLang = r.Header.Get(HeaderLang)
@@ -240,7 +246,8 @@ func TestAgentTypeExcludedFromSignature(t *testing.T) {
 	_ = rc.Close()
 
 	signed := SignedHeaderNames(gotAuth)
-	for _, bad := range []string{"agent-type", "x-language", "chat-id", "session-id", "lang"} {
+	// R145：user-session-id 也必须签名后追加 —— 实测进 canonical 会 401 APIG.0301（心跳端点同纪律）。
+	for _, bad := range []string{"agent-type", "x-language", "chat-id", "session-id", "lang", "user-session-id"} {
 		if strings.Contains(signed, bad) {
 			t.Fatalf("%s 不得参与签名，SignedHeaders=%s", bad, signed)
 		}
