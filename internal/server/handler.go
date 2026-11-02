@@ -61,6 +61,17 @@ type Runtime struct {
 	//   - 其余分类：统一不罚账号（ErrHardCredit 无余额概念、ErrSessionDead 不可重登）。
 	SingleAccount bool
 
+	// ModelFilter 模型目录的**出口过滤**钩子（nil = 不过滤）。
+	//
+	// 为什么需要它：本结构自带 models 缓存（dynamicModelsTTL = 1h），而渠道内部的
+	// 目录缓存是另一层（如 codearts 的 catalogTTL）。渠道把某个模型标成不可用时，
+	// 只能清自己那层，**碰不到这里的 rt.models** ⇒ 被摘除的模型最长还会继续列出 1 小时
+	// （线上实测 2026-10-26：摘除记录已落盘，/v1/models 仍显示）。
+	//
+	// 故把过滤收敛到唯一出口：本字段在「缓存命中返回」和「新拉取写入」两条路都要过一遍。
+	// 由渠道装配层注入（当前仅 codearts），server 不需要认识具体渠道。
+	ModelFilter func([]provider.ModelInfo) []provider.ModelInfo
+
 	mu       sync.RWMutex
 	models   []provider.ModelInfo
 	fetched  time.Time
@@ -479,7 +490,9 @@ func (h *Handler) modelList() []map[string]any {
 		}
 		infos := h.fetchRuntimeModels(rt)
 		if len(infos) == 0 {
-			infos = rt.StaticModels
+			// 静态兜底同样要过出口过滤：staticCatalog 里就含被摘除的模型
+			// （deepseek-v4-pro / glm-5.3-flash），不过滤就等于把摘除撤销。
+			infos = applyModelFilter(rt.ModelFilter, rt.StaticModels)
 		}
 		for _, mi := range infos {
 			out = append(out, buildModelEntry(k, mi))
@@ -589,12 +602,15 @@ func buildModelEntry(k provider.Kind, mi provider.ModelInfo) map[string]any {
 }
 
 func (h *Handler) fetchRuntimeModels(rt *Runtime) []provider.ModelInfo {
+	// 先取出口过滤函数（nil = 不过滤）。缓存命中与新拉取都要过它，否则
+	// 渠道层刚摘除的模型会被本层的 1h 缓存继续列出（见 Runtime.ModelFilter 注释）。
+	filter := rt.ModelFilter
 	if rt.Kind == provider.WorkBuddy { // 兼容旧单平台缓存观察点
 		dynamicModelsCache.RLock()
 		if len(dynamicModelsCache.ids) > 0 && time.Since(dynamicModelsCache.fetched) < dynamicModelsTTL {
 			out := dynamicModelsCache.ids
 			dynamicModelsCache.RUnlock()
-			return out
+			return applyModelFilter(filter, out)
 		}
 		if !dynamicModelsCache.lastFail.IsZero() && time.Since(dynamicModelsCache.lastFail) < modelsFetchFailCooldown {
 			dynamicModelsCache.RUnlock()
@@ -606,14 +622,14 @@ func (h *Handler) fetchRuntimeModels(rt *Runtime) []provider.ModelInfo {
 	if len(rt.models) > 0 && time.Since(rt.fetched) < dynamicModelsTTL {
 		out := rt.models
 		rt.mu.RUnlock()
-		return out
+		return applyModelFilter(filter, out)
 	}
 	if rt.Kind != provider.WorkBuddy && !rt.lastFail.IsZero() && time.Since(rt.lastFail) < modelsFetchFailCooldown {
 		rt.mu.RUnlock()
 		return nil
 	}
 	rt.mu.RUnlock()
-	// 多账号回退（R133）：模型目录是**渠道维度**的，而 Pick 只取一个账号。
+	// 多账号回退（R143）：模型目录是**渠道维度**的，而 Pick 只取一个账号。
 	// 只要池里有一个「拉不到目录」的账号——comate 未开通模型时 /models 返回
 	// items=[]，token 失效时返回 401——单次 Pick 抽中它的那一刻，整条渠道的
 	// 模型面就归零并进入 5min 负缓存。实测事故：加了第二个 WPS 账号后
@@ -686,7 +702,15 @@ func (h *Handler) fetchRuntimeModels(rt *Runtime) []provider.ModelInfo {
 		dynamicModelsCache.lastFail = time.Time{}
 		dynamicModelsCache.Unlock()
 	}
-	return infos
+	return applyModelFilter(filter, infos)
+}
+
+// applyModelFilter 出口过滤的薄封装：filter 为 nil 时原样返回（零开销，不受影响渠道）。
+func applyModelFilter(filter func([]provider.ModelInfo) []provider.ModelInfo, models []provider.ModelInfo) []provider.ModelInfo {
+	if filter == nil {
+		return models
+	}
+	return filter(models)
 }
 
 func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
@@ -1775,7 +1799,7 @@ func (h *Handler) ChannelModels() map[provider.Kind][]provider.ModelInfo {
 		}
 		infos := h.fetchRuntimeModels(rt)
 		if len(infos) == 0 {
-			infos = rt.StaticModels
+			infos = applyModelFilter(rt.ModelFilter, rt.StaticModels)
 		}
 		out[k] = infos
 	}
@@ -1801,10 +1825,10 @@ func (h *Handler) CachedChannelModels() map[provider.Kind][]provider.ModelInfo {
 		models := rt.models
 		rt.mu.RUnlock()
 		if len(models) > 0 {
-			out[k] = models
+			out[k] = applyModelFilter(rt.ModelFilter, models)
 			continue
 		}
-		out[k] = rt.StaticModels
+		out[k] = applyModelFilter(rt.ModelFilter, rt.StaticModels)
 	}
 	return out
 }

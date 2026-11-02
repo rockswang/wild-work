@@ -292,14 +292,6 @@ func tailPrefixAny(s string, needles []string) string {
 	return best
 }
 
-// deriveModelName 去掉 "渠道/" 前缀，返回真实模型名（isDSMLModel 只认裸名）。
-func deriveModelName(model string) string {
-	if i := strings.LastIndex(model, "/"); i >= 0 {
-		return model[i+1:]
-	}
-	return model
-}
-
 // hasToolCalls 报告 message 里是否已有非空 tool_calls。
 // 用反射式的长度探测而非单一类型断言：upstream.Aggregate 内部可能保存
 // []map[string]any，而我们自己写入的是 []any，两种形态都要认。

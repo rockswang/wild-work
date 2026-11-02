@@ -73,7 +73,7 @@ func newStreamTap(r io.Reader, model string) *streamTap {
 	t := &streamTap{src: bufio.NewReaderSize(r, 64*1024), model: strings.TrimSpace(model)}
 	// DSML 模型（deepseek-v4-flash/pro）的 delta.content 是工具调用文本，
 	// 需在转发前转换；其它模型不启用，保持原有逐字节透传行为。
-	if isDSMLModel(deriveModelName(t.model)) {
+	if isDSMLModel(bareModelName(t.model)) {
 		t.dsml = &dsmlStreamFilter{}
 	}
 	return t
@@ -292,6 +292,10 @@ func (c *Client) Stream(w http.ResponseWriter, r io.Reader, model string) (map[s
 	var usage map[string]any
 	err := upstream.StreamCapture(w, tap, func(u map[string]any) { usage = u })
 	if tap.errPayload != "" {
+		// 上游明确说这个模型本账号用不了 ⇒ 进摘除窗口（R143），面板不再列出它。
+		if reUnusableModel.MatchString(tap.errPayload) {
+			c.markUnusable(bareModelName(model), 0)
+		}
 		return usage, newStreamError(tap.errPayload, time.Now())
 	}
 	return usage, err
@@ -306,6 +310,10 @@ func (c *Client) Aggregate(r io.Reader, model string) (map[string]any, error) {
 	tap := newStreamTap(r, model)
 	resp, err := upstream.Aggregate(tap)
 	if tap.errPayload != "" {
+		// 上游明确说这个模型本账号用不了 ⇒ 进摘除窗口（R143）。
+		if reUnusableModel.MatchString(tap.errPayload) {
+			c.markUnusable(bareModelName(model), 0)
+		}
 		return nil, newStreamError(tap.errPayload, time.Now())
 	}
 	if err != nil {
