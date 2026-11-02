@@ -12,8 +12,8 @@ func TestPlatformRowCreditExact(t *testing.T) {
 	s := newTestStats(t)
 	now := time.Now()
 	s.ApplyPoll([]Account{{UID: "cm", Group: "comate", Credits: 0}}, now)
-	s.AddUsage("comate/glm-5.3-flash", 100, 20, 0.01, 0, 0, 0, false, now)
-	s.AddUsage("comate/glm-5.3-flash", 200, 40, 0.02, 0, 0, 0, false, now)
+	s.AddUsage("comate/glm-5.3-flash", 100, 20, 0.01, 0, 0, false, now)
+	s.AddUsage("comate/glm-5.3-flash", 200, 40, 0.02, 0, 0, false, now)
 
 	snap := s.Snapshot(now)
 	var row *PlatformRow

@@ -9,10 +9,14 @@ import (
 	"wild-work/internal/provider"
 )
 
-// minGenSecForTput 计入 per-model 吞吐聚合的最小生成耗时：
-// 50ms 对应 >20000 tok/s 的瞬时速度，任何真实模型都达不到；低于它的样本
-// 只可能是计时口径伪影（非流聚合回包、时钟量化），计入只会拉高平均值。
-const minGenSecForTput = 0.05
+// tputWindowSec 吞吐滑动窗口长度（秒）。
+//
+// 面板「速度」= 窗口内投递 token 合计 ÷ 该窗口秒数，即「最近一分钟平均每秒
+// 吐出多少 token」。为什么不是单请求比值（旧口径）：上游每秒吞吐随繁忙程度
+// 变化，一个 70 秒的请求里可能前 10 秒 200 tok/s、中间 40 秒卡在 3 tok/s，
+// 单比值既不代表任何一秒、也不代表整段——实测小浣熊夸大 3.56 倍
+// （docs/adr/accepted/r132-*.md）。
+const tputWindowSec = 60
 
 // ringCap 请求日志环形容量（内存环形，不持久化）。
 const ringCap = 128
@@ -37,20 +41,22 @@ type ReqRow struct {
 // 积分，由 allocateTraeCreditsLocked 按「渠道真实消耗 × 模型 token 占比」**分摊**
 // （估算，前端加 "≈" 前缀）。两类相加要与「花费积分」卡片口径一致时以平台表为准。
 //
-// 性能三项为「成功记账请求」的实测值（口径见 modelEntry）：
-//   - AvgTTFBMs：首字节耗时算术平均（毫秒）；
-//   - AvgTokPerSec：生成 token 合计 ÷ 生成耗时合计（按时长加权的平均吞吐）；
-//   - PerfSamples：样本数（= 参与 TTFB 平均的请求数，前端做悬停提示用）。
+// 性能两项为「成功记账请求」的实测值：
+//   - AvgTTFBMs：首字节耗时算术平均（毫秒）；PerfSamples = 参与平均的请求数；
+//   - TokPerSec：**最近 TputWindowSec 秒**的投递速率（token/秒），来自 tputMeter
+//     的按秒分桶滑动窗口。它不是「本模型历史平均」，窗口内没有流式投递就是 0，
+//     前端显示「—」而不是 0 tok/s。
 //
-// 无样本时 AvgTTFBMs/AvgTokPerSec 为 0，前端显示 "—"（不解为 0 耗时/0 速度）。
+// 无样本时 AvgTTFBMs/TokPerSec 为 0（前端不解为 0 耗时/0 速度）。
 type ModelStat struct {
-	Model        string  `json:"model"`
-	Reqs         int64   `json:"reqs"`
-	Tokens       int64   `json:"tokens"`
-	Credit       float64 `json:"credit"`
-	AvgTTFBMs    int64   `json:"avg_ttfb_ms"`
-	AvgTokPerSec float64 `json:"avg_tok_per_sec"`
-	PerfSamples  int64   `json:"perf_samples"`
+	Model         string  `json:"model"`
+	Reqs          int64   `json:"reqs"`
+	Tokens        int64   `json:"tokens"`
+	Credit        float64 `json:"credit"`
+	AvgTTFBMs     int64   `json:"avg_ttfb_ms"`
+	TokPerSec     float64 `json:"tok_per_sec"`
+	TputWindowSec int     `json:"tput_window_sec"`
+	PerfSamples   int64   `json:"perf_samples"`
 
 	// 缓存利用率（今日）：CR = 命中 token 合计，CRCov = **上报该维度**请求的
 	// prompt 合计（分母），CRReqs = 上报请求数。CRRov==0 表示今日无样本，
@@ -61,12 +67,11 @@ type ModelStat struct {
 	CRReqs int64 `json:"cr_reqs,omitempty"`
 }
 
-// modelEntry per-model 今日累计（消耗 + 性能采样）。
-// 性能采样只统计「usage 记账成功」的请求（与表内「次数」列同口径，失败/截断请求
+// modelEntry per-model 今日累计（消耗 + TTFB 采样）。
+// TTFB 采样只统计「usage 记账成功」的请求（与表内「次数」列同口径，失败/截断请求
 // 不计，否则秒回错误会把首字节均值拉低成假象）：
-//   - ttfbSumMs / perfCnt：首字节耗时的分子与分母（算术平均）；
-//   - genTokens / genSec：生成 token 与生成耗时（总时长 − 首字节）合计，两者相除即
-//     按时长加权的吞吐，避免短请求把均值拉偏。genSec<50ms 或 completion=0 不计入。
+//   - ttfbSumMs / perfCnt：首字节耗时的分子与分母（算术平均）。
+// 吞吐**不在**本结构里：它需要按秒分桶的滑动窗口，见 tputMeter。
 type modelEntry struct {
 	reqs   int64
 	tokens int64
@@ -81,18 +86,15 @@ type modelEntry struct {
 
 	ttfbSumMs int64
 	perfCnt   int64
-	genTokens int64
-	genSec    float64
 }
 
 // AddUsage 记录一次代理请求的 usage（全局精确口径 + per-model 消耗与性能采样）。
 // prompt/completion 为上游 usage 帧的 token 数；credit 为本次精确积分（无则 0）。
 // cacheReported 表示上游**是否上报**了缓存命中字段；cacheHit 为命中 token 数
 // （prompt 的子集）。仅 cacheReported 时才进入缓存利用率的分母/分子。
-// ttfbMs 为首字节耗时（毫秒）；genSec 为生成耗时（总时长 − 首字节，秒），
-// <=50ms 或 completion=0 时只计入 TTFB 平均、不计入吞吐（与请求日志 tok/s 判定
-// 同口径）。异常负值帧钳 0 拒记，防止污染今日口径与跨天后的历史 map。
-func (s *Stats) AddUsage(model string, prompt, completion int64, credit float64, ttfbMs int64, genSec float64, cacheHit int64, cacheReported bool, now time.Time) {
+// ttfbMs 为首字节耗时（毫秒）。异常负值帧钳 0 拒记，防止污染今日口径与
+// 跨天后的历史 map。吞吐走 AddTput（按秒分桶滑动窗口），与本函数解耦。
+func (s *Stats) AddUsage(model string, prompt, completion int64, credit float64, ttfbMs int64, cacheHit int64, cacheReported bool, now time.Time) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.rollDayLocked(now)
@@ -134,10 +136,6 @@ func (s *Stats) AddUsage(model string, prompt, completion int64, credit float64,
 	}
 	m.ttfbSumMs += ttfbMs
 	m.perfCnt++
-	if genSec >= minGenSecForTput && completion > 0 {
-		m.genTokens += completion
-		m.genSec += genSec
-	}
 	s.dirty = true
 }
 
@@ -178,7 +176,8 @@ func channelOfModel(model string) (string, bool) {
 }
 
 // modelStatsLocked 生成今日按模型消耗行（调用方须持锁；积分降序）。
-func (s *Stats) modelStatsLocked() []ModelStat {
+// TokPerSec 为滑动窗口速率（tputWindowSec 秒），因此必须传 now。
+func (s *Stats) modelStatsLocked(now time.Time) []ModelStat {
 	models := make([]ModelStat, 0, len(s.models))
 	for name, m := range s.models {
 		st := ModelStat{Model: name, Reqs: m.reqs, Tokens: m.tokens, Credit: m.credit}
@@ -190,9 +189,8 @@ func (s *Stats) modelStatsLocked() []ModelStat {
 			st.AvgTTFBMs = m.ttfbSumMs / m.perfCnt
 			st.PerfSamples = m.perfCnt
 		}
-		if m.genSec > 0 {
-			st.AvgTokPerSec = float64(m.genTokens) / m.genSec
-		}
+		st.TokPerSec = s.tput.rate(name, now)
+		st.TputWindowSec = tputWindowSec
 		models = append(models, st)
 	}
 	// TraeWork 无精确积分：上游 usage 帧不含积分字段，改用该渠道今日真实消耗
@@ -285,4 +283,112 @@ func (s *Stats) reqSumLocked() int64 {
 		sum += v
 	}
 	return sum
+}
+
+// tputMeter 逐模型「每秒钟投递的 token 数」滑动窗口。
+//
+// buckets: model -> unix 秒 -> 该秒投递的 token 数。纯内存、不落盘：窗口只有
+// 60 秒，重启后自然重建，持久化只会让面板读到过期的速率。
+//
+// 为什么按秒分桶而不是单请求比值：上游繁忙程度每秒都在变（用户原话
+// 「接口因为繁忙每秒吐 token 都是在变化的」），单请求比值只能给一个平均数，
+// 与实际感知严重背离。按秒分桶后，窗口内求和即真实速率的时间平均。
+type tputMeter struct {
+	buckets map[string]map[int64]int64
+}
+
+func newTputMeter() *tputMeter {
+	return &tputMeter{buckets: map[string]map[int64]int64{}}
+}
+
+// deposit 把一次已完成请求的 completion token 按「每秒写帧数占比」摊到秒桶。
+// slices: unix 秒 -> 该秒内的写帧数（<=0 的项忽略）。窗口外的秒直接丢弃
+// （长请求收尾时不应把 token 塞进已经出窗的桶）。
+//
+// 余数一律落末秒：逐秒整数除法会累计截断误差，让窗口速率系统性偏低。
+func (m *tputMeter) deposit(model string, tokens int64, slices map[int64]int, now time.Time) {
+	if tokens <= 0 || len(slices) == 0 {
+		return
+	}
+	var total int
+	for _, c := range slices {
+		total += c
+	}
+	if total <= 0 {
+		return
+	}
+	cur := now.Unix()
+	oldest := cur - tputWindowSec + 1
+	secs := make([]int64, 0, len(slices))
+	for s, c := range slices {
+		if c <= 0 || s < oldest || s > cur {
+			continue
+		}
+		secs = append(secs, s)
+	}
+	if len(secs) == 0 {
+		return
+	}
+	sort.Slice(secs, func(i, j int) bool { return secs[i] < secs[j] })
+	b := m.buckets[model]
+	if b == nil {
+		b = map[int64]int64{}
+		m.buckets[model] = b
+	}
+	var acc int64
+	for i, s := range secs {
+		var part int64
+		if i == len(secs)-1 {
+			part = tokens - acc // 末秒吃余数，保证 Σ 精确等于 tokens
+		} else {
+			part = tokens * int64(slices[s]) / int64(total)
+			acc += part
+		}
+		b[s] += part
+	}
+}
+
+// rate 返回滑动窗口内的 tok/s（窗口内无投递 = 0，前端据此显示「—」）。
+func (m *tputMeter) rate(model string, now time.Time) float64 {
+	b := m.buckets[model]
+	if b == nil {
+		return 0
+	}
+	cur := now.Unix()
+	oldest := cur - tputWindowSec + 1
+	var sum int64
+	for s, v := range b {
+		if s >= oldest && s <= cur {
+			sum += v
+		}
+	}
+	return float64(sum) / float64(tputWindowSec)
+}
+
+// prune 剪掉窗口外的秒桶与空模型（防 map 无限增长）。
+func (m *tputMeter) prune(now time.Time) {
+	oldest := now.Unix() - tputWindowSec + 1
+	for model, b := range m.buckets {
+		for s := range b {
+			if s < oldest {
+				delete(b, s)
+			}
+		}
+		if len(b) == 0 {
+			delete(m.buckets, model)
+		}
+	}
+}
+
+// AddTput 记录一次成功请求的 token 投递分布（按秒），供面板滑动窗口速率。
+// 只在「流式且拿到 usage」的成功出口调用；非流式一次性写回没有分帧意义，
+// 不计入（前端显示「—」，比显示一个端到端总耗时算出的假速率更诚实）。
+func (s *Stats) AddTput(model string, tokens int64, slices map[int64]int, now time.Time) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if model == "" {
+		model = "unknown"
+	}
+	s.tput.deposit(model, tokens, slices, now)
+	s.tput.prune(now)
 }

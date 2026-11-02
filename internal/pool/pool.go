@@ -316,6 +316,18 @@ func (e *entry) expireOK(now time.Time) bool {
 	return !e.earliestExpire.IsZero() && e.earliestExpire.After(now)
 }
 
+// EarliestExpireOf 返回该账号「最早有效到期时刻」，ok=false 表示账号不存在。
+// 零值时间 = 该渠道不下发到期信息（R112：这类账号在选号时垫底）。
+func (p *Pool) EarliestExpireOf(uid string) (time.Time, bool) {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	e, ok := p.byUID[uid]
+	if !ok {
+		return time.Time{}, false
+	}
+	return e.earliestExpire, true
+}
+
 // SetCreditDetail 更新账号积分：usable 为可消耗余额，expiring 为其中临期部分（仅展示），
 // unusable 为账号名下有但本工具用不了的额度（如 TraeWork 的 ep=1 专用池，仅面板展示）。
 // earliest 为该账号仍有效的最早到期时刻（零值 = 无到期信息），是 Pick() 的第一排序键。

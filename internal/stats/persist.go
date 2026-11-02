@@ -26,8 +26,9 @@ type persistJSON struct {
 }
 
 // modelPersist 单模型消耗落盘形态（与内存 modelEntry 同口径，字段一一对应）。
-// 性能四项缺省为零值 → 均值退化为「无样本」，前端显示 "—"，重启后新一轮请求
-// 自然重新采样（丢弃历史样本比显示半截均值更诚实）。
+// 只有 TTFB 两项（TTFBSumMs/PerfCnt）持久化；吞吐是 60 秒滑动窗口，落盘只会
+// 让面板读到过期速率，故不持久化（重启后窗口自然重建）。
+// 旧版本写入的 gen_tokens/gen_sec 字段会被 json 解码忽略，无需迁移。
 // 缓存三项（Cr/CrCov/CrReqs）必须持久化：曾遗漏导致每次重启丢失今日缓存样本，
 // 面板「缓存」列大面积回退成「—」（2026-10-13 线上实测：workbuddyai 98%→—）。
 type modelPersist struct {
@@ -39,8 +40,6 @@ type modelPersist struct {
 	CrReqs    int64   `json:"cr_reqs,omitempty"`
 	TTFBSumMs int64   `json:"ttfb_sum_ms,omitempty"`
 	PerfCnt   int64   `json:"perf_cnt,omitempty"`
-	GenTokens int64   `json:"gen_tokens,omitempty"`
-	GenSec    float64 `json:"gen_sec,omitempty"`
 }
 
 // toEntry 落盘形态 → 内存形态。
@@ -49,7 +48,6 @@ func (mp modelPersist) toEntry() *modelEntry {
 		reqs: mp.Reqs, tokens: mp.Tokens, credit: mp.Credit,
 		cr: mp.Cr, crCov: mp.CrCov, crReqs: mp.CrReqs,
 		ttfbSumMs: mp.TTFBSumMs, perfCnt: mp.PerfCnt,
-		genTokens: mp.GenTokens, genSec: mp.GenSec,
 	}
 }
 
@@ -59,7 +57,6 @@ func fromEntry(e *modelEntry) modelPersist {
 		Reqs: e.reqs, Tokens: e.tokens, Credit: e.credit,
 		Cr: e.cr, CrCov: e.crCov, CrReqs: e.crReqs,
 		TTFBSumMs: e.ttfbSumMs, PerfCnt: e.perfCnt,
-		GenTokens: e.genTokens, GenSec: e.genSec,
 	}
 }
 

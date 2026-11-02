@@ -4590,16 +4590,19 @@ function stTkItem(label, val) {
 let perfLookup = {};
 
 // perfCellFor 按 "channel/model" 取速度单元格；无样本显示「—」（与运行统计同款三态）。
+// 速度 = 最近窗口（默认 60 秒）的按秒分桶滑动速率，不是单请求平均：
+// 上游每秒吞吐随繁忙程度变化，单请求比值与用户感知严重不符（R147）。
 function perfCellFor(channel, model) {
   const m = perfLookup[channel + "/" + model];
-  if (!m) return `<span class="muted" title="该模型暂无成功请求的速度样本">—</span>`;
-  const tps = Number(m.avg_tok_per_sec) || 0;
+  if (!m) return `<span class="muted" title="该模型最近窗口内无流式投递样本">—</span>`;
+  const tps = Number(m.tok_per_sec) || 0;
   const ttfb = Number(m.avg_ttfb_ms) || 0;
   const parts = [];
   if (tps > 0) parts.push(fmtPct(tps) + " tok/s");
   if (ttfb > 0) parts.push(fmtCredits(ttfb) + "ms");
-  if (!parts.length) return `<span class="muted" title="无速度样本">—</span>`;
-  return `<span title="样本 ${fmtCredits(m.perf_samples)} 次成功请求">${parts.join(" · ")}</span>`;
+  if (!parts.length) return `<span class="muted" title="最近窗口内无流式投递样本">—</span>`;
+  const win = Number(m.tput_window_sec) || 60;
+  return `<span title="最近 ${win} 秒按秒分桶的投递速率（token ÷ ${win} 秒）；TTFB 样本 ${fmtCredits(m.perf_samples)} 次">${parts.join(" · ")}</span>`;
 }
 
 // buildPerfLookup 用 stats 快照的 models[] 建索引（30s 轮询时刷新）。
@@ -4860,7 +4863,7 @@ function renderExpiry(ex) {
 // 模型消耗（今日，按积分降序）：Trae 系积分加「≈」（分摊估算），平均速度=成功请求实测均值
 function renderModels(models) {
   let mh = `<tr><th>#</th><th>模型</th><th>次数</th><th>Token</th><th>缓存</th><th>积分</th>` +
-    `<th title="成功请求实测均值：tok/s = 生成 token ÷ 生成耗时（按时长加权）；TTFB = 首字节耗时算术平均">平均速度</th></tr>`;
+    `<th title="最近 60 秒滑动窗口速率：窗口内投递 token 合计 ÷ 60（按秒分桶，反映当前实际吐出速度，不是单请求平均）；TTFB = 首字节耗时算术平均">当前速度</th></tr>`;
   models.forEach((m, j) => {
     const isTrae = isTraeChannel(m.model);
     let creditCell;
@@ -4873,14 +4876,15 @@ function renderModels(models) {
         ? `<span title="TraeWork 无单次精确积分，按渠道真实消耗分摊；暂无余额差值消耗">—</span>`
         : fmtCreditS(m.credit);
     }
-    const tps = Number(m.avg_tok_per_sec) || 0;
+    const tps = Number(m.tok_per_sec) || 0;
     const ttfb = Number(m.avg_ttfb_ms) || 0;
     const parts = [];
     if (tps > 0) parts.push(fmtPct(tps) + " tok/s");
     if (ttfb > 0) parts.push(fmtCredits(ttfb) + "ms");
+    const win = Number(m.tput_window_sec) || 60;
     const perfCell = parts.length
-      ? `<span title="样本 ${fmtCredits(m.perf_samples)} 次成功请求">${parts.join(" · ")}</span>`
-      : "—";
+      ? `<span title="最近 ${win} 秒窗口 · TTFB 样本 ${fmtCredits(m.perf_samples)} 次">${parts.join(" · ")}</span>`
+      : `<span class="muted" title="最近 ${win} 秒内无流式投递">—</span>`;
     mh += `<tr><td class="st-idx">${j + 1}</td>` +
       `<td class="st-mono" title="${esc(m.model)}">${esc(m.model)}</td>` +
       `<td>${fmtCredits(m.reqs)}</td><td>${fmtTokensFull(m.tokens)}</td>` +
@@ -4891,9 +4895,9 @@ function renderModels(models) {
   $("stModels").innerHTML = models.length ? mh : `<tr><td class="st-empty" colspan="7">今日暂无消耗</td></tr>`;
 }
 
-// 请求日志：降序渲染（最新在最上）；tok/s 仅流式有值，0/空给「—」
+// 请求日志：降序渲染（最新在最上）；tok/s = 端到端（token ÷ 总耗时），0/空给「—」
 function renderLogs(rows) {
-  let h = `<tr><th>#</th><th>时间</th><th>模型</th><th>模式</th><th>状态</th><th>TTFB</th><th>tok</th><th>tok/s</th><th>total</th><th>积分</th></tr>`;
+  let h = `<tr><th>#</th><th>时间</th><th>模型</th><th>模式</th><th>状态</th><th>TTFB</th><th>tok</th><th title="本次请求端到端速率：completion token ÷ 总耗时（含排队与首字节）">tok/s</th><th>total</th><th>积分</th></tr>`;
   for (let i = rows.length - 1; i >= 0; i--) {
     const r = rows[i];
     const status = r.status < 400 ? String(r.status) : `<span class="st-bad">${r.status}</span>`;
