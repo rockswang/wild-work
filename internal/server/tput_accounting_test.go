@@ -25,6 +25,9 @@ func (u *tputUpstream) ChatStream(*auth.Auth, []byte) (io.ReadCloser, int, []byt
 }
 
 func (u *tputUpstream) Stream(w http.ResponseWriter, _ io.Reader, _ string) (map[string]any, error) {
+	// Windows 上 time.Since 对亚毫秒区间会返回 0（实测 200/200 采样为 0），
+	// 不睡一下 total_sec 恒为 0，下面的端到端口径断言无从判定。
+	time.Sleep(2 * time.Millisecond)
 	for i := 0; i < 3; i++ {
 		_, _ = io.WriteString(w, `data: {"choices":[{"index":0,"delta":{"content":"x"}}]}`+"\n\n")
 	}
