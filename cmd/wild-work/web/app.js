@@ -1150,9 +1150,16 @@ function renderAccounts() {
       ? "无需手动签到：定时自动对话保活并领取日活奖励"
       : `${chLabel(a.group)} 不支持手动签到`;
 
-    const checkinTag = a.last_checkin_at
-      ? `<span class="tag ${a.last_checkin_ok ? "ok" : "bad"}">${a.last_checkin_ok ? "签到成功" : "签到失败"}</span>`
-      : (noCheckin ? `<span class="tag neutral" title="${esc(noCheckinTitle)}">${noCheckinText(a.group)}</span>` : '<span class="tag neutral">未签到</span>');
+    // 签到状态徽标。判断顺序：**先判「本渠道无签到」再判时间戳**（issue #210）。
+    // 反过来（旧实现）会让灰分支永不可达——无签到渠道被巡检写过一次时间戳后，
+    // 面板上就永远是红色「签到失败」，即使积分照常到账。
+    // 判据只看 noCheckin（不再叠加 !last_checkin_ok）：旧版本写下的 ok=true 也不该
+    // 让一个根本没有签到活动的渠道显示绿色「签到成功」。
+    const checkinTag = noCheckin
+      ? `<span class="tag neutral" title="${esc(noCheckinTitle)}">${noCheckinText(a.group)}</span>`
+      : a.last_checkin_at
+        ? `<span class="tag ${a.last_checkin_ok ? "ok" : "bad"}">${a.last_checkin_ok ? "签到成功" : "签到失败"}</span>`
+        : '<span class="tag neutral">未签到</span>';
 
     const disabledClass = a.disabled ? " disabled" : "";
     const disableIcon = a.disabled ? "▶" : "⏸";

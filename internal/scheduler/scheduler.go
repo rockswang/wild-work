@@ -45,6 +45,17 @@ type Config struct {
 	// WorkBuddy 国际版使用该模式。
 	ActivitiesOnly bool
 
+	// FollowGlobalCheckin 表示本渠道的签到时刻**跟随面板全局配置**（config.schedule.checkin_times）。
+	// 只有它为 true 的调度器才会被 App.SetCheckinTimes 热更新。
+	//
+	// 为什么需要这个标记（issue #210）：旧实现无条件把全局时刻广播给**所有**调度器，于是
+	//   ① 显式配成 []int{} 的渠道（qwenwork/cline/comate/oczen/kilo/zcode）一旦用户改过一次
+	//      签到时间，就获得了签到时刻，从此每天空跑必然失败的签到并把面板染红；
+	//   ② Qoder 双区的固定 10:00 窗口（上游活动开放时刻，见 main.go 的 qoderCheckinMinute）
+	//      会被用户的 09:00/21:00 覆盖掉，起点跑到活动创建之前。
+	// 「有没有签到时刻」不足以区分这两者——qodercn 有固定时刻但不该跟随全局。
+	FollowGlobalCheckin bool
+
 	// Ledger 积分流水记账器（非 nil 时签到后余额刷新触发差分记账）。
 	Ledger *ledger.Ledger
 }
@@ -441,13 +452,25 @@ func (s *Scheduler) CheckinAccount(uid string) (CheckinResult, error) {
 	return s.checkinOne(uid), nil
 }
 
+// FollowsGlobalCheckin 本渠道的签到时刻是否跟随面板全局配置（决定 SetCheckinTimes 是否推送）。
+func (s *Scheduler) FollowsGlobalCheckin() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.cfg.FollowGlobalCheckin
+}
+
 // finishCheckin 统一收尾：记录签到状态并上报观察者。
-// ActivitiesOnly 渠道跳过这两步（无签到语义，且需对用户透明）。
+// 两种情况跳过这两步：
+//   - ActivitiesOnly：无签到语义，需对用户透明（WorkBuddy 国际版）；
+//   - 本渠道没有签到时刻（R39 的显式空切片）：根本没有签到任务，把它必然失败的
+//     DailyCheckin 桩当成「签到失败」落盘，正是 issue #210 的红标来源。
+//     判据取自配置本身，渠道侧无需改动；即使被外部误调 RunCheckinNow 也不会污染面板。
 func (s *Scheduler) finishCheckin(uid string, r CheckinResult) CheckinResult {
-	if !s.cfg.ActivitiesOnly {
-		s.cfg.Pool.RecordCheckin(uid, r.OK, r.Msg)
-		s.notifyCheckin(r)
+	if s.cfg.ActivitiesOnly || len(s.CheckinMinutes()) == 0 {
+		return r
 	}
+	s.cfg.Pool.RecordCheckin(uid, r.OK, r.Msg)
+	s.notifyCheckin(r)
 	return r
 }
 

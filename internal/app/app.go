@@ -2976,8 +2976,15 @@ func (a *App) SetCheckinTimes(times []string) error {
 	if err != nil {
 		return err
 	}
+	// 只推给「签到时刻跟随全局配置」的调度器（issue #210）。
+	//
+	// 旧实现无条件广播给所有调度器，带来两个后果：
+	//   - 显式配成 []int{} 的渠道（qwenwork/cline/comate/oczen/kilo/zcode）只要用户改过一次
+	//     签到时间，就会获得签到时刻，从此每天空跑必然失败的签到并把面板染红；
+	//   - Qoder 双区的固定 10:00 窗口（上游活动开放时刻）会被全局时刻覆盖。
+	// 故改成白名单式推送：声明了 FollowGlobalCheckin 的渠道才更新。
 	for _, rt := range a.runtimesSnapshot() {
-		if rt != nil && rt.Scheduler != nil {
+		if rt != nil && rt.Scheduler != nil && rt.Scheduler.FollowsGlobalCheckin() {
 			rt.Scheduler.SetCheckinMinutes(clean)
 		}
 	}

@@ -267,6 +267,39 @@ check(
   `实际 ${(cards.match(/冷却至/g) || []).length} 个`
 );
 
+// ---- 场景 1.9：无签到渠道不得渲染成红色「签到失败」（issue #210）----
+// 现场：qwenwork / kilo / oczen 卡片长期红「签到失败」，但积分照常到账。
+// 根因是 checkinTag 的三元判断顺序反了——旧写法先看 `a.last_checkin_at`，只要
+// 巡检写过一次时间戳就走红/绿分支，`noCheckin` 的灰分支**永不可达**。
+// 变异点：把三元改回「先判 last_checkin_at」→ 本节前两条立刻变红。
+{
+  const cardOf = (name) =>
+    document.getElementById("acctList").innerHTML
+      .split('<div class="acct-card').find((seg) => seg.includes(name)) || "";
+  // 复现现场：无签到渠道被写过一次失败时间戳（巡检 / 用户改过签到时间的旧版本都会造成）。
+  T.__setAccount("cline-abcdef123456", { last_checkin_at: "2026-10-30 09:00", last_checkin_ok: false });
+  T.renderAccounts();
+  const clineCard = cardOf("cline无积分号");
+  check("无签到渠道即使有失败时间戳也不显示「签到失败」",
+    clineCard !== "" && !clineCard.includes("签到失败"), clineCard.slice(0, 300));
+  check("无签到渠道显示灰标「无签到」", /tag neutral"[^>]*>无签到</.test(clineCard), clineCard.slice(0, 300));
+  check("灰标的 title 说明原因（不是空白徽标）",
+    /tag neutral" title="Cline 不支持手动签到"/.test(clineCard));
+  // 反向护栏：真正有签到活动的渠道失败时必须照旧报红（别把红标一起治没了）。
+  T.__setAccount("4298452267967801", { last_checkin_at: "2026-10-30 09:00", last_checkin_ok: false });
+  T.renderAccounts();
+  const trCard = cardOf("健康号");
+  check("有签到活动的渠道失败仍显示「签到失败」红标",
+    /tag bad"[^>]*>签到失败</.test(trCard), trCard.slice(0, 300));
+  // 复位，避免污染后续场景。
+  T.__setAccount("cline-abcdef123456", { last_checkin_at: "", last_checkin_ok: false });
+  T.__setAccount("4298452267967801", { last_checkin_at: "2026-10-02 09:00", last_checkin_ok: true });
+  T.renderAccounts();
+  // 源码级锁：顺序必须写成「先判 noCheckin」，否则下一次重构很容易又调回来。
+  check("checkinTag 先判 noCheckin 再判时间戳（issue #210 顺序锁）",
+    /const checkinTag = noCheckin\n/.test(raw));
+}
+
 // ---- 场景 1.8：停用原因徽标（R135）----
 // 为什么需要：账号被「自动停用」时（R135 的典型场景——这个 WPS 账号在 Comate 侧
 // 一个模型都没有），卡片原先只有灰底 + ▶，用户既不知道为什么被停，也不知道点 ▶ 有没有用。

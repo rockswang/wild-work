@@ -72,8 +72,8 @@ func TestLoomyCheckinWiring(t *testing.T) {
 		name string
 		re   *regexp.Regexp
 	}{
-		{"loomy", regexp.MustCompile(`(?s)Name: "loomy",\s*CheckinMinutes: checkinMinutes`)},
-		{"monkeycode", regexp.MustCompile(`(?s)Name: "monkeycode",\s*CheckinMinutes: checkinMinutes`)},
+		{"loomy", regexp.MustCompile(`(?s)Name: "loomy",(?:\s*FollowGlobalCheckin: true,)?\s*CheckinMinutes: checkinMinutes`)},
+		{"monkeycode", regexp.MustCompile(`(?s)Name: "monkeycode",(?:\s*FollowGlobalCheckin: true,)?\s*CheckinMinutes: checkinMinutes`)},
 	} {
 		if !tc.re.MatchString(main) {
 			t.Errorf("❌ %s 的调度器未启用定时签到（CheckinMinutes 应为 checkinMinutes）—— "+
