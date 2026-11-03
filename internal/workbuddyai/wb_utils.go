@@ -17,10 +17,10 @@ import (
 // 请求体改写
 // ---------------------------------------------------------------------------
 
-// PrepareBody 改写发往国际版上游的 chat 请求体（含脱敏 + 整包 DSH 品牌串兜底，
+// PrepareBody 改写发往国际版上游的 chat 请求体（含脱敏；不做整包替换，
 // 与 internal/upstream.PrepareBody 同形，漏一处等于没改）。
 func PrepareBody(src []byte) []byte {
-	return sanitize.BodyFallback(sanitize.Messages(prepareBodyInner(src)))
+	return sanitize.Messages(prepareBodyInner(src))
 }
 
 func prepareBodyInner(src []byte) []byte {

@@ -12,12 +12,10 @@ import (
 )
 
 // PrepareBody 单 pass 改写；无法解析时原样返回。
-// BodyFallback 整包兜底：结构化清洗（Messages）只覆盖 messages 的
-// content/reasoning_content/tool_calls.arguments，metadata、tools[].function.description
-// 等字段摸不到，而上游对任意位置的 DSH 品牌串都按逐字指纹拦截（2026-10-28 实测），
-// 故对最终 body 再做一次品牌串兜底替换（仅在确有命中时才重编码）。
+// 出站脱敏在 sanitize.Messages 内完成（只动 messages 结构化字段，不做整包替换——
+// 上游对 tools 等非 messages 字段的品牌串实测放行，整包兜底已于 2026-11-02 删除）。
 func PrepareBody(src []byte) []byte {
-	return sanitize.BodyFallback(sanitize.Messages(prepareBodyInner(src)))
+	return sanitize.Messages(prepareBodyInner(src))
 }
 
 // prepareBodyInner 同 PrepareBody 但不含脱敏（供内部调用）。
