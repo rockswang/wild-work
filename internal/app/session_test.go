@@ -2,6 +2,7 @@ package app
 
 import (
 	"encoding/json"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -164,23 +165,36 @@ func TestPanelRequiresSession(t *testing.T) {
 	}
 }
 
+// freePort 取一个当前空闲的本地端口（避免用例写死 17863/17864 在并行/重跑时撞自身）。
+func freePort(t *testing.T) int {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("取空闲端口失败：%v", err)
+	}
+	port := ln.Addr().(*net.TCPAddr).Port
+	_ = ln.Close()
+	return port
+}
+
 // TestSetListenRequiresPassword 非环回监听必须已有密码；环回监听不受限。
 func TestSetListenRequiresPassword(t *testing.T) {
 	a := newPanelApp(t, "127.0.0.1", "")
-	if err := a.SetListen("0.0.0.0", 17863); err == nil {
+	pub, back := freePort(t), freePort(t)
+	if err := a.SetListen("0.0.0.0", pub); err == nil {
 		t.Fatal("无密码时切到 0.0.0.0 应被拒绝")
 	}
 	if err := a.SetAdminPassword("pw12345678"); err != nil {
 		t.Fatalf("设置密码应成功：%v", err)
 	}
-	if err := a.SetListen("0.0.0.0", 17863); err != nil {
+	if err := a.SetListen("0.0.0.0", pub); err != nil {
 		t.Fatalf("有密码后切到 0.0.0.0 应成功：%v", err)
 	}
 	// 处于对外监听时不允许清空密码
 	if err := a.SetAdminPassword(""); err == nil {
 		t.Fatal("对外监听时清空密码应被拒绝")
 	}
-	if err := a.SetListen("127.0.0.1", 17864); err != nil {
+	if err := a.SetListen("127.0.0.1", back); err != nil {
 		t.Fatalf("切回环回应成功：%v", err)
 	}
 	if err := a.SetAdminPassword(""); err != nil {

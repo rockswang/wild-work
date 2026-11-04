@@ -15,19 +15,10 @@ import (
 // waitRefreshIdle 等 SetExpiringDays 触发的异步 RefreshAll 收尾。
 // 不等的话 t.TempDir 清理时后台 goroutine 还在写 state/ledger 文件
 // （Windows 会报 "The process cannot access the file" / "directory is not empty"）。
+// 直接用 App 自己的收尾信号（Close 也走同一个，见 waitRefresh）。
 func waitRefreshIdle(t *testing.T, a *App) {
 	t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		a.refreshMu.Lock()
-		busy := a.refreshing
-		a.refreshMu.Unlock()
-		if !busy {
-			return
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
-	t.Fatalf("RefreshAll 未在超时内收尾")
+	a.waitRefresh(5 * time.Second)
 }
 
 // TestSetExpiringDaysBroadcastsToAllSchedulers 所有渠道的调度器都要换窗口

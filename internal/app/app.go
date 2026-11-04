@@ -179,6 +179,13 @@ type App struct {
 
 	refreshMu  sync.Mutex // 防并发刷新积分
 	refreshing bool
+	// refreshDone RefreshAll 的收尾信号（关闭时 Close 要等它落地）。
+	// 值可以是 nil（没有在跑的刷新），Close 对它做一次普通的 nil 判断即可。
+	refreshDone chan struct{}
+	// closed 已进入关闭流程。置位后刷新一律拒绝:
+	// 后台 goroutine 可能还没调度到 Close 就已经结束，它一旦真的跑起来
+	// 会重新 MkdirAll 出 data/ledger 目录，把已清理的 TempDir 又弄成非空。
+	closed bool
 
 	// ledger 用量/积分双流水（data/ledger/）；锦上添花统计，nil = 未启用
 	ledger     *ledger.Ledger
@@ -272,8 +279,37 @@ func (a *App) healRaccoonProtocol() {
 	_ = raccoon.ClearCallback(dir)
 }
 
+// waitRefresh 等在跑的 RefreshAll 收尾（没有在跑就立即返回）。
+//
+// 为什么必须等：刷新链路会往回写 pool 快照 / ledger / stats，并在写的过程中
+// **重新创建 data 目录**。Close 若不等它，进程退出（或测试里的 TempDir 清理）
+// 会与后台 goroutine 抢同一批文件句柄——Windows 上表现为
+// `RemoveAll cleanup: ... directory is not empty` / `The process cannot access the file`，
+// 面板侧则可能留下一个半截的 state.json。
+// timeout 是有界的：上游可能卡在超时里，退出路径不能无限挂。
+func (a *App) waitRefresh(timeout time.Duration) {
+	a.refreshMu.Lock()
+	done := a.refreshDone
+	a.refreshMu.Unlock()
+	if done == nil {
+		return
+	}
+	select {
+	case <-done:
+	case <-time.After(timeout):
+		log.Printf("退出前等待积分刷新超时（%s）：后台刷新仍在写 data 文件", timeout)
+	}
+}
+
 // Close 关闭日志文件。
 func (a *App) Close() {
+	// 第一件事：置关闭标志并等正在跑的积分刷新收尾。
+	// 置标志是为了堵住「go RefreshAll() 还没被调度，Close 已经跑完」这个窗口——
+	// 那个 goroutine 一旦还真跑起来，会在已关闭的目录上重新建出 data/ledger。
+	a.refreshMu.Lock()
+	a.closed = true
+	a.refreshMu.Unlock()
+	a.waitRefresh(5 * time.Second)
 	// 停 ledger 自动落盘并冲刷句柄（丢最后几秒流水可接受，但不能一直丢）
 	if a.ledgerStop != nil {
 		select {
@@ -2786,16 +2822,20 @@ func (a *App) RefreshCredits(uid string) (int64, error) {
 // RefreshAll 刷新全部账号积分，返回汇总（供托盘消息框 / Web UI）。
 func (a *App) RefreshAll() RefreshSummary {
 	a.refreshMu.Lock()
-	if a.refreshing {
+	if a.refreshing || a.closed {
 		a.refreshMu.Unlock()
 		return RefreshSummary{Busy: true}
 	}
 	a.refreshing = true
+	done := make(chan struct{})
+	a.refreshDone = done
 	a.refreshMu.Unlock()
 	defer func() {
 		a.refreshMu.Lock()
 		a.refreshing = false
+		a.refreshDone = nil
 		a.refreshMu.Unlock()
+		close(done) // 先解除记录再广播：等的人醒来时状态已是「空闲」
 	}()
 	sum := RefreshSummary{Platforms: map[string]PlatformSummary{}}
 	for _, rt := range a.runtimesSnapshot() {
