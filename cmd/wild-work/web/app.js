@@ -409,10 +409,24 @@ function attachEffortPicker(input, opts) {
 //   ② 触屏设备不派发 mouseenter/mouseleave，手机上既打不开也关不掉；
 //   ③ hover 模型把「翻页」与「移出即关」耦合成矛盾诉求（要翻页就得移进浮窗）。
 const DETAIL_PAGE_SIZE = 8;
-// EXPIRING_DAYS 面板「临期」标记的展示窗口（自然日）。
-// 与后端 provider.ExpiringDays 同值：2026-10-20 起阈值不再是设置项，
-// 选号看「最早到期时刻」（R112），这个窗口只影响明细里的红色「临期」章。
-const EXPIRING_DAYS = 1;
+// EXPIRING_DAYS 面板「临期」标记的**默认**展示窗口（自然日）。
+// 由后端 state.expiring_days 覆盖（1/2/7，设置里可选）；缺省 1 = 今日到期。
+// 它只影响展示：① 汇总条/卡片的「临期 X」；② 明细里的红色「临期」章。
+// 2026-10-20 起的 R112 曾把它固定成 1 且删掉设置项，导致「明早 05:47 到期」
+// （剩 20.8h，按自然日归明日）一天里大部分时间不显示临期；R112b 恢复为可配，
+// 口径与运行统计三桶一致（1=今日到期，2=今日+明日，7=7 日内到期）。
+const EXPIRING_DEF = 1;
+let EXPIRING_DAYS = EXPIRING_DEF;
+// setExpiringDays 应用后端下发的口径（只认 1/2/7，其它一律当默认）。
+function setExpiringDays(n) {
+  EXPIRING_DAYS = (n === 1 || n === 2 || n === 7) ? n : EXPIRING_DEF;
+}
+// expiringLabel 口径的中文说明（tooltip / 侧栏文案单一来源）。
+function expiringLabel(n) {
+  if (n === 2) return "2 个自然日（今日+明日，次日 00:00 失效算今日）";
+  if (n === 7) return "7 个自然日（含今日，次日 00:00 失效算今日）";
+  return "今日到期（次日 00:00 失效算今日）";
+}
 let detailCache = {};
 // detailState 当前浮窗的展示状态：{uid, page}。
 let detailState = null;
@@ -553,9 +567,9 @@ function renderCreditDetail() {
 
   const items = d.items.slice();
   // 临期判定与后端 provider.ExpireWithinDays 同口径：**自然日**（窗口内到期）。
-  // 判据 = 失效时刻 - 零点宽限 所属自然日 ≤ 今天+days（次日 00:00 失效算今日）。
-  // 窗口固定 1 天（= 后端 provider.ExpiringDays）：2026-10-20 起阈值不再可配，
-  // 选号改看「最早到期时刻」，这个窗口只决定明细里打不打「临期」红章。
+  // 判据 = 失效时刻 - 零点宽限 所属自然日 ≤ 今天 + (days-1) 天（次日 00:00 失效算今日）。
+  // 窗口由设置项选出（state.expiring_days，1/2/7），与后端 provider.ExpireWithinDays
+  // 逐位同口径（今天算第 1 天：days=1 只含今天）。
   const expDays = EXPIRING_DAYS;
   // expireInstantUtc 失效时刻的真实 UTC 毫秒，与后端 provider.ExpireInstant 同口径：
   //   日期粒度（YYYY-MM-DD）= 该日全天可用 ⇒ **次日 00:00（UTC+8）**才失效；
@@ -580,12 +594,12 @@ function renderCreditDetail() {
   };
   const nowCst = new Date(Date.now() + 8 * 3600 * 1000);
   const todayUtc = Date.UTC(nowCst.getUTCFullYear(), nowCst.getUTCMonth(), nowCst.getUTCDate()) - 8 * 3600 * 1000;
-  // 临期：失效自然日 ≤ 今天 + expDays 天（含），且尚未失效
+  // 临期：失效自然日 ≤ 今天 + (expDays-1) 天（含），且尚未失效
   const isExpiring = (s) => {
     const day = expireDayUtc(s), inst = expireInstantUtc(s);
     if (day === null || inst === null) return false;
     if (inst <= Date.now()) return false;
-    return day <= todayUtc + expDays * 24 * 3600 * 1000;
+    return day <= todayUtc + (expDays - 1) * 24 * 3600 * 1000;
   };
   // 排序：临期（可消耗、有剩余、窗口内到期）→ 可用 → 已用完/不可用/仅展示垫底；组内按到期日升序。
   const expUtcOf = (it) => {
@@ -647,7 +661,7 @@ function renderCreditDetail() {
       const expUtc = expireInstantUtc(it.expire_at);
       if (expUtc !== null) {
         if (isExpiring(it.expire_at)) {
-          expCell = `${esc(it.expire_at)}<span class="detail-exp-tag" title="今日到期（${expDays} 个自然日，次日 00:00 失效算今日），选号时优先消耗">临期</span>`;
+          expCell = `${esc(it.expire_at)}<span class="detail-exp-tag" title="${esc(expiringLabel(expDays))}，选号时优先消耗">临期</span>`;
           expCellCls = ' class="detail-exp"';
           cls = ' class="detail-exp-row"';
         } else {
@@ -1003,12 +1017,12 @@ function renderSummary() {
       // Token 计数：以 tokens 为单位单列，明示它不是积分。
       body = `<span class="cs-num">${fmtTokens(c.tokens)}</span>`
         + `<span class="cs-tok" title="本渠道额度以 token 计量，不计入「合计」">tokens</span>`
-        + (c.expiring > 0 ? `<span class="cs-exp" title="今日到期（次日 00:00 失效算今日），选号时优先消耗">临期${fmtTokens(c.expiring)}</span>` : "");
+        + (c.expiring > 0 ? `<span class="cs-exp" title="${esc(expiringLabel(EXPIRING_DAYS))}，选号时优先消耗">临期${fmtTokens(c.expiring)}</span>` : "");
     } else if (allStale) {
       body = `<span class="credit-stale">待刷新</span>`;
     } else {
       body = `<span class="cs-num">${fmt(c.credits)}</span>`
-        + (c.expiring > 0 ? `<span class="cs-exp" title="今日到期（次日 00:00 失效算今日），选号时优先消耗">临期${fmt(c.expiring)}</span>` : "")
+        + (c.expiring > 0 ? `<span class="cs-exp" title="${esc(expiringLabel(EXPIRING_DAYS))}，选号时优先消耗">临期${fmt(c.expiring)}</span>` : "")
         + (c.unusable > 0 ? `<span class="cs-unu" title="账号名下、本工具不可消耗的额度（不计入合计）">不可用${fmt(c.unusable)}</span>` : "")
         + (c.stale > 0 ? `<span class="cs-stale" title="部分账号余额待刷新">${c.stale} 待刷新</span>` : "");
     }
@@ -3000,6 +3014,9 @@ function openSettings() {
   $("effModelInput").value = ""; $("effEffortInput").value = "";
   // 自动签到 + 开机自启
   $("chkAutostart").checked = !!state.autostart;
+  // 临期口径（1/2/7）：后端唯一真源；旧后端不读该字段时回退默认 1 日
+  setExpiringDays(state.expiring_days);
+  $("selExpiring").value = String(EXPIRING_DAYS);
   $("chkLoopGuard").checked = state.loop_guard !== false; // 缺省（旧后端）按开启显示
   $("chkBodyLog").checked = !!state.body_log;
   syncListenRisk(); // 按当前监听地址初始化警告条与必填星号
@@ -3571,6 +3588,15 @@ async function saveSettings() {
   if (loopGuardOn !== (state.loop_guard !== false)) {
     try {
       await api("/api/config/loop_guard", { on: loopGuardOn });
+    } catch (e) { toast(e.message); return; }
+  }
+
+  // 4b) 临期口径（1/2/7，独立端点即时生效，后端会异步重刷一轮积分）
+  const expDays = parseInt($("selExpiring").value, 10);
+  if (expDays !== EXPIRING_DAYS || expDays !== (state.expiring_days ?? EXPIRING_DEF)) {
+    try {
+      await api("/api/config/expiring_days", { days: expDays });
+      setExpiringDays(expDays);
     } catch (e) { toast(e.message); return; }
   }
 

@@ -134,9 +134,20 @@ type Config struct {
 		CheckinHours   []int    `json:"checkin_hours,omitempty"` // 旧格式：[9,21]
 		CheckinTimes   []string `json:"checkin_times,omitempty"` // 新格式：["09:00","21:30"]
 		KeepaliveHours []int    `json:"keepalive_hours"`         // [22]
-		// 临期阈值已于 2026-10-20 删除（R112）：选号改用「最早到期时刻升序」，
-		// 不再需要「N 天内算临期」这个开关；面板临期额度固定按 provider.ExpiringDays 算。
-		// 旧配置里的 expiring_threshold_hours 字段会被静默忽略（json 未知字段不报错）。
+		// ExpiringDays 面板「积分汇总」里「临期」的计算口径（自然日，1/2/7）。
+		//
+		// 历史：2026-10-20 的 R112 曾把该设置项**整体删除**（选号改按「最早到期时刻
+		// 升序」后，窗口大小不再是路由参数）；但删除同时也把「临期」展示固定成 1 天，
+		// 于是「明早 05:47 到期」这类每日包（还剩 20.8h）按自然日归「明日」⇒ 汇总条
+		// 一天里大部分时间恒不显示临期（2026-11-04 用户实测，见 R112b）。
+		//
+		// 现在恢复为**纯展示口径**的可选项，与运行统计三桶同源（provider.ExpiringWithinDays）：
+		//   1 = 今日到期（= 运行统计「今日到期」列）
+		//   2 = 今日+明日
+		//   7 = 7 日内到期（= 运行统计「7 日内到期」列）
+		// **仍然不参与选号**——选号判据只有一个：provider.EarliestExpire。
+		// 旧配置残留的 expiring_threshold_hours（小时粒度）已被本字段取代，静默忽略。
+		ExpiringDays int `json:"expiring_days,omitempty"`
 	} `json:"schedule"`
 
 	Upstream struct {
@@ -311,6 +322,20 @@ func ValidAliasName(name string) bool {
 // DefaultStickyMaxRequests 粘性路由的默认轮换阈值。
 const DefaultStickyMaxRequests = 50
 
+// 临期展示口径（自然日）：面板「积分汇总」的「临期」用几天窗口，
+// 与运行统计的「今日到期 / 明日到期 / 7 日内到期」同源（provider.ExpiringWithinDays）。
+// 只影响**展示**，不参与选号（选号判据只有 provider.EarliestExpire，见 R112/R112b）。
+const (
+	DefaultExpiringDays = 1 // 今日到期
+	ExpiringDaysTwoDays = 2 // 今日 + 明日
+	ExpiringDaysSeven   = 7 // 7 日内到期
+)
+
+// IsExpiringDays 报告 days 是否为面板允许的临期口径（1/2/7）。
+func IsExpiringDays(days int) bool {
+	return days == DefaultExpiringDays || days == ExpiringDaysTwoDays || days == ExpiringDaysSeven
+}
+
 // Default 默认配置。
 func Default() *Config {
 	c := &Config{
@@ -331,6 +356,7 @@ func Default() *Config {
 	c.Schedule.CheckinHours = []int{9, 21}
 	c.Schedule.CheckinTimes = []string{"09:00", "21:00"}
 	c.Schedule.KeepaliveHours = []int{22}
+	c.Schedule.ExpiringDays = DefaultExpiringDays
 	c.Upstream.TimeoutSeconds = 120
 	c.Server.StickyMaxRequests = DefaultStickyMaxRequests
 	c.Compat.DefaultChannel = "workbuddy"
@@ -569,6 +595,17 @@ func (c *Config) normalize() error {
 	}
 	if c.Upstream.TimeoutSeconds <= 0 {
 		c.Upstream.TimeoutSeconds = 120
+	}
+	// 临期展示口径：只接受 1/2/7（面板下拉框限定）。非法值（含老配置缺字段的 0）
+	// 回退默认 1 天并记 WARN——只在内存回退，**加载时不写盘**（不变量 5：老配置
+	// 缺字段用默认值即可，不因读一次配置就改写文件，否则配置漂移会让用户看不出
+	// 哪些是默认值；与 sticky_max_requests 同一纪律）。
+	if !IsExpiringDays(c.Schedule.ExpiringDays) {
+		if c.Schedule.ExpiringDays != 0 {
+			log.Printf("WARN config: schedule.expiring_days=%d invalid, fallback=%d",
+				c.Schedule.ExpiringDays, DefaultExpiringDays)
+		}
+		c.Schedule.ExpiringDays = DefaultExpiringDays
 	}
 	if c.Compat.MaxTokensCap < 0 {
 		c.Compat.MaxTokensCap = 0 // 负数视为「不限制」，避免误用导致 max_tokens 被置 0

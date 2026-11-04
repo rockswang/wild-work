@@ -64,7 +64,7 @@ import (
 )
 
 // Version 版本号。
-const Version = "2.11.2"
+const Version = "2.11.4"
 
 const (
 	loginTimeout   = 5 * time.Minute
@@ -547,6 +547,18 @@ func (a *App) keepaliveHours() []int {
 		return rt.Scheduler.KeepaliveHours()
 	}
 	return nil
+}
+
+// expiringDays 面板「积分汇总·临期」的展示窗口（自然日，1/2/7）。
+// 配置值是唯一真源；缺省/非法（老配置没读过 normalize）一律回退 1 天。
+func (a *App) expiringDays() int {
+	a.mu.Lock()
+	d := a.cfg.Schedule.ExpiringDays
+	a.mu.Unlock()
+	if !config.IsExpiringDays(d) {
+		return config.DefaultExpiringDays
+	}
+	return d
 }
 
 func (a *App) nextFire() time.Time {
@@ -2580,7 +2592,7 @@ func (a *App) refreshIfSessionDead(rt *Runtime, au *auth.Auth, err error) bool {
 
 // creditSnapshot 实时拉取明细并算出「可消耗余额」「临期额度」「不可消耗余额」三口径，
 // 成功即回写 pool 快照 + ledger 差分。三者同源于 UserResourceDetail 的单次响应：remain 即
-// pool 路由口径的可消耗余额，临期额度为其中 provider.ExpiringDays 个自然日内到期的部分
+// pool 路由口径的可消耗余额，临期额度为其中 config.schedule.expiring_days 个自然日内到期的部分
 // （**仅展示**，R112 起不参与选号），不可消耗部分由条目的 Usable 标记汇总得到
 // （渠道不区分专用池时为 0；渠道不下发到期时间时临期为 0，如 Qoder）。
 // 同一响应里还算出「最早到期时刻」一并写入 pool——那是 Pick() 的唯一排序键。
@@ -2599,10 +2611,11 @@ func (a *App) creditSnapshot(rt *Runtime, au *auth.Auth) (remain int64, items []
 		return 0, nil, 0, 0, err
 	}
 	_, unusable = provider.Summarize(items)
-	// 临期额度：自然日口径（provider.ExpiringDays 个自然日内到期，次日 00:00 失效算今日）。
+	// 临期额度：自然日口径（config.schedule.expiring_days 个自然日内到期，次日 00:00 失效算今日）。
 	// R112 起**仅展示**（面板三口径/汇总条），不参与选号——选号用下面的 earliest。
+	// 窗口可配 1/2/7（R112b），与运行统计三桶同源。
 	now := time.Now()
-	expiring = provider.ExpiringWithinDays(items, provider.ExpiringDays, now)
+	expiring = provider.ExpiringWithinDays(items, a.expiringDays(), now)
 	// 最早到期时刻：Pick() 的第一排序键（R112）。ok=false（如 Qoder 不下发到期时间）
 	// 时返回零值，pool 会把它排到「有到期信息」的账号之后按余额兜底。
 	earliest, _ := provider.EarliestExpire(items, now)
@@ -2954,7 +2967,42 @@ func (a *App) SetBodyLog(on bool) error {
 	return nil
 }
 
-// SetCheckinTimes 更新自动签到时间（HH:MM）并立即唤醒两个调度器。
+// SetExpiringDays 更新「积分汇总」临期口径（自然日，1/2/7）：保存配置 → 推给所有
+// 调度器 → **立即刷一轮积分**让面板当场生效。
+//
+// 为什么必须立即刷：expiring 只在上游响应到达时计算并写进 pool 快照（见 creditSnapshot），
+// 不主动刷的话用户把下拉框从 1 天改成 7 天后，界面要等到下一次 10 分钟的自动刷新
+// 才有变化，看起来像没生效。刷新是**复用已有账号的余额端点**（每账号一次调用，与常规
+// 10 分钟刷新同源、同量级），不是新增探测。
+//
+// 注意它**不参与选号**：选号判据只有 provider.EarliestExpire（R112），
+// 这里是纯展示口径（R112b）。
+func (a *App) SetExpiringDays(days int) error {
+	if !config.IsExpiringDays(days) {
+		return errors.New("临期口径仅支持 1/2/7 天")
+	}
+	a.mu.Lock()
+	if a.cfg.Schedule.ExpiringDays == days {
+		a.mu.Unlock()
+		return nil // 值未变：不写盘、不刷积分（避免用户点两次就白打一轮上游）
+	}
+	a.cfg.Schedule.ExpiringDays = days
+	err := config.Save(a.cfg, a.cfgPath)
+	a.mu.Unlock()
+	if err != nil {
+		return err
+	}
+	// 推给所有调度器：签到路径也会写 expiring，不推的话它会继续用旧窗口算，
+	// 并在下一次签到把 pool 里的值改回旧口径。
+	for _, rt := range a.runtimesSnapshot() {
+		if rt != nil && rt.Scheduler != nil {
+			rt.Scheduler.SetExpiringDays(days)
+		}
+	}
+	go a.RefreshAll() // 异步：接口立即返回，面板的旧数字在下一次 poll 时被新值替换
+	log.Printf("临期口径已更新：%d 个自然日", days)
+	return nil
+}
 func (a *App) SetCheckinTimes(times []string) error {
 	minutes, err := config.ParseClockTimes(times)
 	if err != nil {
@@ -3751,9 +3799,12 @@ type State struct {
 	Accounts       []AccountView `json:"accounts"`
 	CheckinTimes   []string      `json:"checkin_times"`
 	KeepaliveHours []int         `json:"keepalive_hours"`
-	ListenHost     string        `json:"listen_host"`
-	ListenPort     int           `json:"listen_port"`
-	APIKey         string        `json:"api_key"`
+	// ExpiringDays 面板「积分汇总·临期」的计算口径（自然日，1/2/7）。
+	// 只影响展示，不参与选号（R112b）。老前端不读该字段也无害。
+	ExpiringDays int    `json:"expiring_days"`
+	ListenHost   string `json:"listen_host"`
+	ListenPort   int    `json:"listen_port"`
+	APIKey       string `json:"api_key"`
 
 	// AdminPassSet 是否已配置管理密码（不回显密码本身）；
 	// AuthEnabled = 面板鉴权已生效（密码非空）；
@@ -3823,6 +3874,7 @@ func (a *App) GetState() State {
 	}
 	st := State{
 		CheckinTimes:   a.checkinTimes(),
+		ExpiringDays:   a.expiringDays(),
 		KeepaliveHours: a.keepaliveHours(),
 		ListenHost:     listen.Host,
 		ListenPort:     listen.Port,
@@ -4432,6 +4484,17 @@ func (a *App) HandleAPI(mux *http.ServeMux) {
 		}
 		_ = json.NewDecoder(r.Body).Decode(&req)
 		if err := a.SetCheckinTimes(req.Times); err != nil {
+			apiError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+	})
+	mux.HandleFunc("POST /api/config/expiring_days", func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Days int `json:"days"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		if err := a.SetExpiringDays(req.Days); err != nil {
 			apiError(w, http.StatusBadRequest, err.Error())
 			return
 		}

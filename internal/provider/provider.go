@@ -819,16 +819,20 @@ func ExpireWithinDays(expireAt string, now time.Time, days int) bool {
 	return !day.After(limit)
 }
 
-// ExpiringDays 面板「临期额度」的展示窗口（自然日，固定 1 天 = 今日到期）。
+// ExpiringDays 面板「临期额度」的**默认**展示窗口（自然日，1 = 今日到期）。
 //
-// 自 2026-10-20 起**不再是路由参数**：选号改用「最早到期时刻升序」
-// （EarliestExpire），窗口大小只决定面板上那一列/汇总条怎么加总，
-// 因此取消设置项（原 R18 的可配阈值被 R112 取代）。
+// 自 2026-10-20（R112）起**不是路由参数**：选号改用「最早到期时刻升序」
+// （EarliestExpire），窗口大小只决定面板上那一列/汇总条怎么加总。
+// 该值自 2026-11-04 起可由 `config.schedule.expiring_days` 覆盖（1/2/7，
+// 纯展示，仍不参与选号，见 R112b）——运行时请读 App 的配置值，
+// 本常量仅作默认值与单测基准。
 const ExpiringDays = 1
 
 // ExpiringWithinDays 统计 days 个自然日内到期的**可消耗**积分小计。
 // 自 R112 起仅用于**展示**（面板三口径的「临期额度」/汇总条）；路由判据是
 // EarliestExpire（最早到期时刻），不再看这个量。
+// days 由 `config.schedule.expiring_days` 决定（1/2/7），与运行统计三桶同源：
+// days=1 → 今日到期桶；days=7 → 三桶累加（= 运行统计「7 日内到期」列）。
 func ExpiringWithinDays(items []ResourceItem, days int, now time.Time) int64 {
 	var expiring int64
 	for _, it := range items {

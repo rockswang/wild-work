@@ -578,6 +578,14 @@
           </div>
         </div>
         <div class="hint" style="margin-left:98px;margin-top:-2px;margin-bottom:8px">保活 22:00 自动 · 下次 <span id="nextCheckin">-</span></div>
+        <div class="row">
+          <label class="lbl wide">临期口径<span class="help-mark" onclick="event.preventDefault()">?<span class="help-pop">只决定「积分汇总」里「临期」那几个数字的计算窗口，<b>不影响选号</b>（选号始终优先消耗最早到期的账号）。<br><br>口径与运行统计完全一致（自然日，次日 00:00 失效算今日）：<br>· <b>1 日</b> = 今日到期（= 运行统计「今日到期」列）<br>· <b>2 日</b> = 今日 + 明日<br>· <b>7 日</b> = 7 日内到期（= 运行统计「7 日内到期」列）<br><br>注意：运行统计里的「今日作废」是<b>往回看</b>（已经过期作废、已成事实），与这里的「临期」方向相反。<br><br>改了会立即重刷一轮积分，几秒后生效。</span></span></label>
+          <select id="selExpiring" class="select" style="min-width:160px">
+            <option value="1">1 日（今日到期）</option>
+            <option value="2">2 日（今日+明日）</option>
+            <option value="7">7 日（7 日内到期）</option>
+          </select>
+        </div>
         <div class="row row-switch">
           <label class="lbl wide">开机自启<span class="help-mark" onclick="event.preventDefault()">?<span class="help-pop">程序随系统启动自动在后台运行。</span></span></label>
           <label class="switch"><input type="checkbox" id="chkAutostart"><span class="slider"></span></label>

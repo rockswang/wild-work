@@ -58,6 +58,13 @@ type Config struct {
 
 	// Ledger 积分流水记账器（非 nil 时签到后余额刷新触发差分记账）。
 	Ledger *ledger.Ledger
+
+	// ExpiringDays 面板「临期额度」的展示窗口（自然日，1/2/7，默认 1 = 今日到期）。
+	//
+	// 它是**纯展示口径**（见 R112b），与选号完全无关：本渠道签到后刷新余额时用它
+	// 算出 expiring 写回 pool，使面板能立刻反映新窗口（不必等到下一次积分自动刷新）。
+	// 0 = 用 provider.ExpiringDays（默认 1），供旧测试/未接线的渠道兼容。
+	ExpiringDays int
 }
 
 // Scheduler 调度器。
@@ -452,6 +459,29 @@ func (s *Scheduler) CheckinAccount(uid string) (CheckinResult, error) {
 	return s.checkinOne(uid), nil
 }
 
+// SetExpiringDays 运行中更新临期展示窗口（自然日，1/2/7）。
+// 改变只影响**之后的**签到/刷新写回值；已写入 pool 的 expiring 由下一次
+// 积分刷新（App.SetExpiringDays 会立即刷一轮）重算，因此这里不主动触发刷新。
+func (s *Scheduler) SetExpiringDays(days int) {
+	s.mu.Lock()
+	s.cfg.ExpiringDays = days
+	s.mu.Unlock()
+}
+
+// expiringDays 当前临期展示窗口（0 表示未配置 ⇒ 用 provider 默认值）。
+func (s *Scheduler) expiringDays() int {
+	s.mu.Lock()
+	d := s.cfg.ExpiringDays
+	s.mu.Unlock()
+	if d <= 0 {
+		return provider.ExpiringDays
+	}
+	return d
+}
+
+// ExpiringDays 当前临期展示窗口（面板/测试读回用；未配置时回 provider 默认值）。
+func (s *Scheduler) ExpiringDays() int { return s.expiringDays() }
+
 // FollowsGlobalCheckin 本渠道的签到时刻是否跟随面板全局配置（决定 SetCheckinTimes 是否推送）。
 func (s *Scheduler) FollowsGlobalCheckin() bool {
 	s.mu.Lock()
@@ -581,9 +611,10 @@ func (s *Scheduler) checkinOne(uid string) CheckinResult {
 	} else {
 		_, unusable := provider.Summarize(items)
 		// 临期额度（仅展示）与最早到期时刻（Pick 排序键）同一份 items。
-		// 阈值固定 provider.ExpiringDays，R112 起不再可配。
+		// 窗口取调度器配置（config.schedule.expiring_days，默认 1 天，R112b），
+		// 与 App.creditSnapshot 同源；不参与选号。
 		now := time.Now()
-		expiring := provider.ExpiringWithinDays(items, provider.ExpiringDays, now)
+		expiring := provider.ExpiringWithinDays(items, s.expiringDays(), now)
 		earliest, _ := provider.EarliestExpire(items, now)
 		r.Remain, r.HasRemain = usable, true
 		log.Printf("checkin credits platform=%s uid=%s remain=%d expiring=%d unusable=%d earliest=%v", name, uid, usable, expiring, unusable, earliest)

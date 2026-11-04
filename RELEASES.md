@@ -4113,3 +4113,112 @@ qwenwork / kilo / oczen 等**没有签到活动**的渠道，卡片长期红「�
   需要补进 `modelUnavailableMarkers`。
 - **R144 的 DSML 解析**依赖与注入模板逐字一致（改模板必须同步改正则）；`string="false"` 的真实
   响应形态未逐字核对。
+
+# wild-work v2.11.3
+
+对应决议 **R112b**（部分回滚 R112 / R18）。
+
+## 🔧 「积分汇总」的临期口径恢复为可配（R112b）
+
+**现象**：面板「积分汇总」几乎看不到任何渠道的临期额度，但同一页「运行统计」明明显示好几个渠道
+有 24 小时内到期的积分（`expire_tomorrow=385`、`expiring_7d=8057`）。实测 29 个账号里只有
+officeace 一个非零（其「每日签到有礼 100」今晚 23:59:59 失效），其余全 0。
+
+**根因**：v2.9.4 的 R112 在把选号改成「最早到期时刻优先」的同时，顺手把**展示窗口**固定成
+`provider.ExpiringDays = 1` 并按**自然日**分桶（今天算第 1 天）。而 traework / workbuddy 的每日
+签到包形态是「每天 05:47 发、次日 05:47 到期」——上午 9 点看，最近一笔永远落在「明天」这个
+自然日，于是**一天里大部分时间汇总条必然恒空**。运行统计走的是三桶（今日 / 明日 / 7 日内）
+逐条目累加，所以同一批额度在那边可见。
+
+**现在**：设置弹层恢复「临期口径」下拉，三选项与运行统计三桶**同口径**：
+
+| 选项 | 含义 | 对应运行统计列 |
+|------|------|----------------|
+| 1 日（默认） | 今日到期（次日 00:00 失效算今日） | 「今日到期」 |
+| 2 日 | 今日 + 明日 | 「今日到期」+「明日到期」 |
+| 7 日 | 未来 7 个自然日内到期 | 「7 日内到期」 |
+
+> 1 日对齐的是「今日**到期**」而不是「今日作废」——后者是往回看的账本口径（今天已经过期消失的额度，
+> 见运行统计「今日作废」列），方向相反，两者不可相减。
+
+- 配置项 `schedule.expiring_days`（1/2/7）；非法值只在内存回退默认并记 `WARN config: schedule.expiring_days=`，
+  **加载时不写盘**（老配置缺字段就用默认值，不产生配置漂移）。
+- `POST /api/config/expiring_days` 保存后**立即刷一轮积分**，面板当场生效；当前值随 `/api/state` 下发回显。
+- **仍然不参与选号**：R112 的核心不变量一字未改——选号判据只有 `provider.EarliestExpire`（最早到期
+  时刻升序 → 同到期时刻按 uid ASCII 升序 → 无到期信息者垫底按余额降序）。本项只恢复**纯展示口径**。
+- 两处写回 `expiring` 的路径都取运行期配置（`creditSnapshot` 与签到路径）；漏改后者会让面板数字在
+  下一次签到后悄悄跳回旧窗口。
+
+## 📚 文档
+
+- `AGENTS.md` / `docs/决议项.md` 新增 **R112b**，并在 R18 / R112 行标注「展示窗口这一半已被 R112b 恢复、
+  「不参与选号」这半边仍由 R112 决定」。
+- `docs/接口参考.md` 补 `POST /api/config/expiring_days`。
+- `config.example.json` 的 `schedule` 段补 `"expiring_days": 1`。
+
+## 已知限制
+
+- 改口径会触发一轮 `RefreshAll()`（每账号一次余额端点，与常规 10 分钟刷新同源同量级），不是新增探测。
+- **Gemini 不受影响**：它不在 `StartCreditAutoRefresh` 的 kinds 里（其 `UserResource` 恒 0、配额窗口以
+  `InfoOnly` 呈现），集合永远为空 ⇒ 配多少都是 0。
+- 历史 `state-*.json` 里的 `expiring` 值不重算（下一次刷新/签到自然覆盖，不改写历史快照）。
+- 手改 `config.json` 仍需重启；面板改则立即生效。
+
+---
+
+# wild-work v2.11.4
+
+对应决议 **R151**（推翻 R134 的六处清洗策略，R115 的「两份表同步」纪律保留）。
+
+## 🧹 脱敏层收敛：判据重验 + 停用失效规则 + 删整包兜底（R151）
+
+外部 PR #214（作者 wzwjustdoit）用真机探针重新验证了 WorkBuddy 国内版的上游审核判据，
+发现 R134 那一版清洗策略有六处问题，其中两处会伤到用户内容：
+
+- **语义自相矛盾**：DSH 身份句被替换成「You are Claude Code, Anthropic's official CLI tool for Claude」，
+  可后面几行还写着 DeepSeek 模型、DSH Web GUI —— 模型自我认知直接错乱。
+- **篡改用户内容**：`BodyFallback` 对整包做「DeepSeek Harness → Claude Code」替换，
+  连用户贴的日志、`DeepSeek Harness implementation checkout` 这种正常文本一起改。
+- 另有四处：预检表混入本表自己的改写产物 `11-128`（上游从不匹配，白跑净化）、
+  裸 `11128` 实测不拦却静默改写用户回显、两层改写（先插冠词 the 再由正则整句替换）叠加难维护。
+
+**判据重验结论**（真机探针 33 + 6 + 1 发，另 41 发角色维度复测；探针默认 SKIP，
+须 `WB_PROBE_UID` 指定专用小号才跑，遵守 §0.1 不碰主力账号池）：
+
+| 判据 | 结论 |
+|------|------|
+| DSH 身份句（大小写不敏感）、DSH 跨句 @ 路径、Claude Code 身份句、Main branch、字段反馈句、billing 键值 | **仍拦** |
+| Codex 首段 | **收紧为前缀锚定**（旧改写「CLI tool」仍 400） |
+| 裸 `11128`、DSH Web GUI 段、billing 裸键名、`tools[]` 品牌串 | **已失效** |
+| 角色维度 | **扫 system 与 assistant，不扫 user/tool/function** |
+
+**修法**：
+
+- DSH 身份句改写为 `You are an AI agent powered by DSH`（**缩写而非跨品牌替换**，后文 DSH 关键词一致）；
+- Codex 首段 `in → within`；ACP 路径句 `resolve from → are resolved from`；
+- 失效规则**注释停用**而非删除（保留原判据与停用日期，将来复活必须先跑探针）；
+- **`BodyFallback` 连同 `bodyDSHRe` 与两处 `PrepareBody` 接线一并删除**；
+- 结构化清洗**跳过 `user`/`tool`/`function`**，`system`/`assistant` 继续清洗；
+- 没有任何规则真正生效时**不再 `TrimSpace`**（预检可能因裸键名变体命中却无改写，
+  白改首尾空白就是破坏不变量 16）。
+
+**回归**：两套平行表（`internal/sanitize` 与 `internal/upstream/sanitize`）逐字节快照同步
+（`features 13→9` / `rewrites 7→5` / `regexes 6→5`），并新增**直接 parity 守卫**
+（不再只靠「两条臂都过生产表」的间接断言）+ 6 条「停用规则不得复活」护栏；
+新增真机探针两个文件（默认 SKIP）。`go build ./... && go vet ./... && go test ./...` 全绿。
+
+## 📚 文档
+
+- `AGENTS.md` / `docs/决议项.md` 新增 **R151**，索引表与文档标题范围标记同步到 `R1–R151`。
+- R115 / R134 的正文里 `rewrites` 相关命名同步为 `sanitizeStringRewrites`（原表已改名）。
+
+## 已知限制
+
+- 上游判据是**黑盒快照**，会随上游改版漂移；复活任何停用规则前必须用探针重验（`WB_PROBE_UID`）。
+- 实测只用了**单个小号**，未排除账号灰度差异。
+- `tool_calls.arguments` 的行为沿用旧结论，本轮未重验。
+- `BodyFallback` 删除后，`tools[].function.description` 这类非 messages 字段里的品牌串
+  不再被清洗——探针实测该形态上游已放行，若日后再次拦截需重新加回结构化清洗（而不是整包替换）。
+
+---
+

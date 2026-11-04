@@ -516,6 +516,47 @@ check("汇总可用 = 2050+2686 = 4736", sum.includes("4,736"), sum.slice(0, 160
 check("汇总临期 = 100", sum.includes("临期100"));
 check("汇总含合计", sum.includes("合计"));
 
+// ---- 场景 2.1：临期口径可配（R112b）----
+// 背景：R112 把临期展示固定成 1 个自然日并删掉设置项，导致「明早 05:47 到期」
+// （剩 20.8h，按自然日归「明日」）一天里大部分时间在汇总条上不显示临期。
+// 这里锁住三个不变量：
+//   ① 口径只认 1/2/7，非法值回退默认 1；
+//   ② 前端窗口天数与后端 provider.ExpireWithinDays 逐位同口径（今天算第 1 天），
+//      **不得**再用旧的 `todayUtc + expDays*24h`（那会把 1 天当成 2 天）；
+//   ③ 设置里的下拉框、state 字段与端点三处名字必须一致。
+// ① 非法值回退
+const reExpDefault = /const EXPIRING_DEF = 1;/;
+check("临期默认口径 = 1 天", reExpDefault.test(raw));
+check("前端只接受 1/2/7（其它一律回退默认）",
+  /EXPIRING_DAYS = \(n === 1 \|\| n === 2 \|\| n === 7\) \? n : EXPIRING_DEF/
+    .test(raw.replace(/\s+/g, " ").replace(/\(n === 1\)/g, "(n === 1)"))
+  || /n === 1 \|\| n === 2 \|\| n === 7/.test(raw));
+// ② 自然日口径（今天算第 1 天）：旧写法 `todayUtc + expDays * 24 * 3600 * 1000` 必须消失
+check("临期判据为「今天算第 1 天」（todayUtc + (expDays-1) 天，R112b）",
+  /todayUtc \+ \(expDays - 1\) \* 24 \* 3600 \* 1000/.test(raw));
+check("临期判据不得保留旧口径（todayUtc + expDays*24h）",
+  !/todayUtc \+ expDays \* 24 \* 3600 \* 1000/.test(raw));
+// ③ 三处名字一致：index.html 的 selExpiring、state.expiring_days、端点 /api/config/expiring_days
+const idxHtml2 = readFileSync(new URL("../cmd/wild-work/web/index.html", import.meta.url), "utf8");
+check("设置里有临期口径下拉框（三选项 1/2/7）",
+  /id="selExpiring"/.test(idxHtml2) &&
+  /<option value="1">1 日/.test(idxHtml2) &&
+  /<option value="2">2 日/.test(idxHtml2) &&
+  /<option value="7">7 日/.test(idxHtml2));
+check("下拉框只有 1/2/7 三个选项（不得回退到旧的 3 天）",
+  (idxHtml2.match(/<option value="[0-9]+">[0-9]+ 日/g) || []).length === 3 &&
+  !/<option value="3">3 日/.test(idxHtml2));
+check("前端读 state.expiring_days 并回显到下拉框",
+  /setExpiringDays\(state\.expiring_days\)/.test(raw) && /\("selExpiring"\)\.value = String\(EXPIRING_DAYS\)/.test(raw));
+check("保存时调 /api/config/expiring_days", /\/api\/config\/expiring_days/.test(raw));
+// ④ 文案不得再写死「今日到期」：三处 title 必须走 expiringLabel(天数)
+check("汇总条临期 title 随口径变化（走 expiringLabel）",
+  /expiringLabel\(EXPIRING_DAYS\)/.test(raw));
+check("明细临期章 title 随口径变化（走 expiringLabel）",
+  /expiringLabel\(expDays\)/.test(raw));
+check("不再有写死的「今日到期（次日 00:00 失效算今日）」硬文案",
+  !/今日到期（次日 00:00 失效算今日），选号时优先消耗/.test(raw));
+
 // ---- 场景 2.5：模型查找面板（纯前端过滤，全量渲染 + 列表滚动） ----
 // 假缓存共 17 个模型：qodercn 2 + workbuddy 2 + loomy 12 + cline 1（含 13 个 qwen* 用于滚动断言）
 check("collectAllModels 展平全渠道 17 个模型", T.collectAllModels().length === 17, `实际 ${T.collectAllModels().length}`);

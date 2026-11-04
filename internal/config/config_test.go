@@ -122,6 +122,122 @@ func TestStickyMaxRequestsInvalidFallsBackWithWarning(t *testing.T) {
 	}
 }
 
+func TestExpiringDaysLegacyConfigDefaultsWithoutWriting(t *testing.T) {
+	t.Setenv("WILDWORK_API_KEY", "")
+	dir := t.TempDir()
+	fp := filepath.Join(dir, "config.json")
+	// 老配置：R112 时代（无 expiring_days），且带着已被删除的 expiring_threshold_hours。
+	before := []byte(`{"schedule":{"expiring_threshold_hours":24}}`)
+	if err := os.WriteFile(fp, before, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	c, err := Load(fp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Schedule.ExpiringDays != DefaultExpiringDays {
+		t.Fatalf("缺字段应使用默认值 %d，实际 %d", DefaultExpiringDays, c.Schedule.ExpiringDays)
+	}
+	after, err := os.ReadFile(fp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(after, before) {
+		t.Fatalf("加载配置不得主动写盘：\nbefore=%s\nafter=%s", before, after)
+	}
+	// 保存后才写出新字段（不变量 5：不因读一次配置就产生配置漂移）。
+	if err := Save(c, fp); err != nil {
+		t.Fatal(err)
+	}
+	saved, err := os.ReadFile(fp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(saved, []byte(`"expiring_days": 1`)) {
+		t.Fatalf("用户保存配置后应写入默认值：%s", saved)
+	}
+}
+
+func TestExpiringDaysExplicitValue(t *testing.T) {
+	t.Setenv("WILDWORK_API_KEY", "")
+	for _, days := range []int{1, 2, 7} {
+		t.Run(strconv.Itoa(days), func(t *testing.T) {
+			dir := t.TempDir()
+			fp := filepath.Join(dir, "config.json")
+			raw := []byte(`{"schedule":{"expiring_days":` + strconv.Itoa(days) + `}}`)
+			if err := os.WriteFile(fp, raw, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			c, err := Load(fp)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if c.Schedule.ExpiringDays != days {
+				t.Fatalf("显式配置应为 %d，实际 %d", days, c.Schedule.ExpiringDays)
+			}
+		})
+	}
+}
+
+// TestExpiringDaysInvalidFallsBackWithWarning R112b：只应接受 1/2/7。
+// 3 天是 R112 前的旧选项，现在必须回退默认并在日志里留下可检索痕迹——
+// 否则用户手改 config.json 写个 3，面板会显示一个后端根本不用的窗口。
+func TestExpiringDaysInvalidFallsBackWithWarning(t *testing.T) {
+	for _, value := range []int{3, 5, -1, 999} {
+		t.Run(strconv.Itoa(value), func(t *testing.T) {
+			t.Setenv("WILDWORK_API_KEY", "")
+			dir := t.TempDir()
+			fp := filepath.Join(dir, "config.json")
+			raw := []byte(`{"schedule":{"expiring_days":` + strconv.Itoa(value) + `}}`)
+			if err := os.WriteFile(fp, raw, 0o600); err != nil {
+				t.Fatal(err)
+			}
+
+			var logs bytes.Buffer
+			oldOutput, oldFlags := log.Writer(), log.Flags()
+			log.SetOutput(&logs)
+			log.SetFlags(0)
+			defer func() {
+				log.SetOutput(oldOutput)
+				log.SetFlags(oldFlags)
+			}()
+
+			c, err := Load(fp)
+			if err != nil {
+					t.Fatal(err)
+				}
+			if c.Schedule.ExpiringDays != DefaultExpiringDays {
+					t.Fatalf("非法值应回退为 %d，实际 %d", DefaultExpiringDays, c.Schedule.ExpiringDays)
+				}
+			if got := logs.String(); !strings.Contains(got, "WARN config: schedule.expiring_days=") {
+					t.Fatalf("非法值应记录可检索的 warning，实际日志：%q", got)
+				}
+			after, err := os.ReadFile(fp)
+			if err != nil {
+					t.Fatal(err)
+				}
+			if !bytes.Equal(after, raw) {
+					t.Fatalf("非法值只在内存回退，不得加载时主动写盘：\nbefore=%s\nafter=%s", raw, after)
+				}
+		})
+	}
+}
+
+// TestIsExpiringDays 面板只允许 1/2/7（与前端 selExpiring 的三个 option 同集）。
+func TestIsExpiringDays(t *testing.T) {
+	for _, days := range []int{1, 2, 7} {
+		if !IsExpiringDays(days) {
+			t.Errorf("%d 应为合法临期口径", days)
+		}
+	}
+	for _, days := range []int{0, 3, 5, 6, 8, -1} {
+		if IsExpiringDays(days) {
+			t.Errorf("%d 不应是合法临期口径", days)
+		}
+	}
+}
+
 func TestListenParsing(t *testing.T) {
 	cases := []struct {
 		in   string
