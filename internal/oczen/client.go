@@ -64,6 +64,12 @@ func New() *Client {
 		IdleConnTimeout:       30 * time.Second,
 		ResponseHeaderTimeout: 120 * time.Second,
 	}
+	// 免费档闸门判 TLS ClientHello 指纹（R155）：同一份请求体，Go 原生 ClientHello 恒
+	// 429 FreeUsageLimitError，复刻官方 CLI（Bun/BoringSSL）的 ClientHello 才 200。
+	// 见 tlsfp.go 的取证记录。
+	if !fingerprintDisabled() {
+		tr.DialTLSContext = officialFingerprintDialer(dialer.DialContext)
+	}
 	// 刻意**不**设 Base：让它留空，由 base() 按凭证车道选择
 	// （匿名 → AnonymousBase，自备 key → DefaultBase）。设成 DefaultBase 会把匿名车道
 	// 钉在 /zen 上，正是 issue #117 的恒 403 形态（R69）。
