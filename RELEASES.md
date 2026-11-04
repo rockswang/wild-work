@@ -4228,3 +4228,50 @@ officeace 一个非零（其「每日签到有礼 100」今晚 23:59:59 失效�
 
 ---
 
+---
+
+# wild-work v2.11.5
+
+## 一、OCZen 免费档恒 429 的根因：TLS ClientHello 指纹（R152–R155）
+
+`oczen/*` 全部模型对话恒返回 `429 FreeUsageLimitError`，而 `/inference/v1/models` 仍是 200。
+决定性实验（同一份请求体、同一分钟、同一出口）把五类客户端分别打到上游：
+
+| 客户端 | 结果 |
+|--------|------|
+| Go 默认 Transport（HTTP/1.1） | 429 |
+| Node `https.request`（OpenSSL） | 429 |
+| Chrome 同源 `fetch`（HTTP/2） | 429 |
+| uTLS `HelloChrome_133` 预设 | 429 |
+| **uTLS 复刻官方 Bun ClientHello** | **200 + 真实 SSE** |
+
+⇒ 上游判的是 **TLS 指纹**，不是请求体/头/路径/会话 id/HTTP 版本。修法：
+
+- 新增依赖 `github.com/refraction-networking/utls`，内嵌官方 CLI（Bun 1.4.4）的
+  ClientHello 原件（1502 B），每条连接重新解析成 spec 后 `HandshakeContext`；
+- 自加 10s 握手超时（`net/http` 的 `TLSHandshakeTimeout` 管不到自定义 `DialTLSContext`）；
+- 诊断开关 `OCZEN_NO_FINGERPRINT=1` 退回 Go 原生（可复现 429）。
+
+同时把请求体整形层对齐**官方 OpenCode 2.2.5 本机抓包**：官方 12 工具（无 `patch`）、
+官方 system prompt 与 `<env>` 块的原位、UA `opencode/latest/2.2.5/cli`、恢复 `Accept: */*`、
+`x-opencode-project` 按工作区稳定派生；客户端自带工具一律改名 `clint_*` 并在响应侧还原。
+
+### 已知限制
+
+- 内嵌的 ClientHello 与官方 prompt/工具集都是**快照**，上游换客户端或换白名单后必须重新抓取。
+- 未实证上游是「按 JA3 白名单」还是「按 Bot score 里的其它信号」——只实证了结果面（复刻即 200）。
+- 新增依赖（utls / x/crypto / x/sys / klauspost-compress / brotli）会让二进制变大。
+
+## 二、退出路径补上刷新收尾（R112b 补强）
+
+`POST /api/config/expiring_days` 之后是异步 `RefreshAll()`。它会在后台重新创建 `data/` 目录并写
+ledger/stats 文件，而 `App.Close()` 原先不等它收尾 —— Windows 上表现为测试/退出时
+`RemoveAll cleanup: ... directory is not empty`，面板侧则可能留下半截 `state.json`。
+现在 `Close()` 先 `waitRefresh(5s)`，并用 `closed` 标志堵住「goroutine 还没被调度就 Close」的窗口。
+
+## 三、测试健壮性
+
+- R146 粘性让位用例的到期时刻不再写死成 `now.Add(Δ)`，改由桶判据反推（`todayExpiry` /
+  `tomorrowExpiry`），并新增逐分钟扫 1440 个 `now` 的守卫（PR #216）；
+- `TestSetListenRequiresPassword` 改用系统分配的空闲端口，不再写死 17864（与并发/重跑抢端口）；
+- 新增 `internal/app/close_refresh_test.go` 锁住「Close 等在跑的刷新收尾」。
