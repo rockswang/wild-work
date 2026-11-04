@@ -9,6 +9,7 @@ import (
 	"bufio"
 	"bytes"
 	"crypto/rand"
+	"crypto/sha1"
 	"crypto/sha256"
 	"crypto/tls"
 	"encoding/hex"
@@ -62,6 +63,12 @@ func New() *Client {
 		MaxIdleConnsPerHost:   20,
 		IdleConnTimeout:       30 * time.Second,
 		ResponseHeaderTimeout: 120 * time.Second,
+	}
+	// 免费档闸门判 TLS ClientHello 指纹（R155）：同一份请求体，Go 原生 ClientHello 恒
+	// 429 FreeUsageLimitError，复刻官方 CLI（Bun/BoringSSL）的 ClientHello 才 200。
+	// 见 tlsfp.go 的取证记录。
+	if !fingerprintDisabled() {
+		tr.DialTLSContext = officialFingerprintDialer(dialer.DialContext)
 	}
 	// 刻意**不**设 Base：让它留空，由 base() 按凭证车道选择
 	// （匿名 → AnonymousBase，自备 key → DefaultBase）。设成 DefaultBase 会把匿名车道
@@ -225,58 +232,40 @@ func conversationSeed(obj map[string]any) string {
 	return ""
 }
 
-// stubTool 免费档要求的桩工具（bash / read）。参数与描述不参与校验，
-// 但给出可辨识的名字以便模型/客户端区分。
-func stubTool(name string) map[string]any {
-	switch name {
-	case "bash":
-		return map[string]any{"type": "function", "function": map[string]any{
-			"name": "bash", "description": "(internal placeholder — do not call)",
-			"parameters": map[string]any{"type": "object", "properties": map[string]any{
-				"command": map[string]any{"type": "string"}}}}}
-	default:
-		return map[string]any{"type": "function", "function": map[string]any{
-			"name": "read", "description": "(internal placeholder — do not call)",
-			"parameters": map[string]any{"type": "object", "properties": map[string]any{
-				"filePath": map[string]any{"type": "string"}}}}}
+// projectID 生成官方 CLI 那种**裸 40 位小写 hex**的 project id。
+//
+// 官方口径（OpenCode `packages/core/src/project.ts`，2026-11-01 抓包）：有 remote
+// 的 git 仓取 `sha1("git-remote:host/path")`，否则取 `sha1("directory:" + 工作目录)`；
+// 只有「无 remote 且无提交」的仓才发字面量 `global`。上游只校验形状（非 `prj_`
+// 前缀的 40 位 hex），但**每请求随机**是官方客户端从不出现的形态（真实客户端整个
+// 工作区固定一个 id，见 magpie 0.1.24 注释：0.1.14–0.1.18 每请求发 `global` 等于
+// 把全体用户塞进同一个 project 桶）。故按官方派生、进程内固定一次。
+func projectID() string { return projectIDOnce() }
+
+var projectIDOnce = sync.OnceValue(func() string {
+	// sha1 是**上游规定的形状**（40 位 hex），不是本仓的完整性保护，故此处忽略弱哈希告警。
+	sum := sha1.Sum([]byte("directory:" + workDir()))
+	return hex.EncodeToString(sum[:])
+})
+
+// randomHex 返回 n 字节的随机 hex 串（失败时退回时间派生，不阻塞请求）。
+func randomHex(n int) string {
+	buf := make([]byte, n)
+	if _, err := rand.Read(buf); err != nil {
+		sum := sha256.Sum256([]byte(time.Now().String()))
+		return hex.EncodeToString(sum[:n])
 	}
+	return hex.EncodeToString(buf)
 }
 
-// ensureAgentShape 就地改写请求体以通过免费档校验：
-//   - 强制 stream=true（上游免费档只接受流式；非流式客户端由 Aggregate 本地聚合）；
-//   - tools 内补齐缺失的 bash/read 桩工具（客户端没带 tools 时同时置 tool_choice=none，
-//     避免模型真的去调桩工具；客户端自带工具时保留其 tool_choice，否则会破坏工具调用）。
-//
-// 返回被强制改过的标记仅供测试断言。
-func ensureAgentShape(obj map[string]any) {
-	obj["stream"] = true
-
-	tools, _ := obj["tools"].([]any)
-	have := map[string]bool{}
-	for _, raw := range tools {
-		t, ok := raw.(map[string]any)
-		if !ok || t["type"] != "function" {
-			continue
-		}
-		fn, ok := t["function"].(map[string]any)
-		if !ok {
-			continue
-		}
-		if n, ok := fn["name"].(string); ok {
-			have[n] = true
-		}
-	}
-	hadTools := len(tools) > 0
-	for _, name := range stubToolNames {
-		if !have[name] {
-			tools = append(tools, stubTool(name))
-		}
-	}
-	obj["tools"] = tools
-	if !hadTools {
-		// 纯聊天：客户端没有工具语义，桩工具仅供上游过检，明确禁止调用。
-		obj["tool_choice"] = "none"
-	}
+// traceHeaders 生成官方 CLI（Effect tracer 的 B3 + W3C 两种形态）的链路头：
+// **一次对话一个 trace，每个请求一个新 span**。trace 由会话 id 派生（无状态、
+// 同一会话跨请求稳定），span 每请求随机。
+func traceHeaders(session string) (b3, traceparent string) {
+	sum := sha256.Sum256([]byte("trace\x00" + session))
+	trace := hex.EncodeToString(sum[:16])
+	span := randomHex(8)
+	return trace + "-" + span + "-1-" + randomHex(8), "00-" + trace + "-" + span + "-01"
 }
 
 // authKey 返回当前出站凭证：自定义 key 优先，空则回匿名。
@@ -296,21 +285,40 @@ func (c *Client) SetAPIKey(key string) {
 	c.apiKey = strings.TrimSpace(key)
 }
 
-// headered 为上游请求注入 OpenCode CLI 伪装头（含规范会话头）。
+// chatURL 返回对话端点：显式 Base（测试注入）→ base()/chat/completions；
+// 匿名车道 → AnonymousChatURL（v2 的 /inference/openai/v1 族，R152）。
+func (c *Client) chatURL() string {
+	if c.Base != "" {
+		return strings.TrimRight(c.Base, "/") + "/chat/completions"
+	}
+	c.mu.RLock()
+	keyed := c.apiKey != ""
+	c.mu.RUnlock()
+	if keyed {
+		return DefaultBase + "/chat/completions"
+	}
+	return AnonymousChatURL
+}
+
+// headered 为上游请求注入 OpenCode 2.x CLI 伪装头（含规范会话头与链路头）。
 //
-// 头集与官方客户端镜像（2026-10-14 起上游收紧）：
+// 头集按 2026-11-04 的**官方 2.2.5 抓包**镜像（原始头序：
+// `authorization` → `content-type` → `user-agent` → `b3` → `traceparent` →
+// `x-opencode-client` → `x-opencode-project` → 四个会话头 → `accept`）：
 //   - **不发 `x-opencode-request`**：该关联头一旦出现即判非官方客户端 ⇒ 403；
-//     （参考实现 opencode2api 注释原文："The x-opencode-request correlation
-//     header ... rejected with 403 since 2026-10-14, so neither is forwarded"）
-//   - `x-opencode-project` 必须是**裸 40 位小写 hex**（官方 CLI 自身形态）；
-//     `prj_` 前缀的规范 id 会被拒，值本身不校验只校验形状。
+//   - **发 `Accept: */*`**：官方抓包里确有该头（R152「不得发 Accept」的结论在抓包前，
+//     已按证据修正；Go 不显式设置时根本不发该头，与官方不一致）；
+//   - `x-opencode-project` 必须是**裸 40 位小写 hex**，按官方 sha1 派生（见 projectID）；
 //   - 会话头四个都要带：`x-opencode-session` + **`x-opencode-session-id`**
-//   - `x-session-affinity` + `X-Session-Id`，且同值（缺 `-id` 变体会被拒）。
+//   - `x-session-affinity` + `X-Session-Id`，且同值（缺 `-id` 变体会被拒）；
+//   - `b3` / `traceparent` 是官方 Effect tracer 的链路头（一对话一 trace、一请求一 span）。
 func (c *Client) headered(req *http.Request, session string) {
+	b3, traceparent := traceHeaders(session)
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Accept", "application/json, text/event-stream")
 	req.Header.Set("User-Agent", userAgent)
 	req.Header.Set("Authorization", "Bearer "+c.authKey())
+	req.Header.Set("b3", b3)
+	req.Header.Set("traceparent", traceparent)
 	req.Header.Set("x-opencode-client", "cli")
 	// 会话头族：上游要求「两个 session 头携带同一 descending id」，官方客户端
 	// 同时发 -session 与 -session-id 两种拼写，故四个都发同一值。
@@ -318,17 +326,8 @@ func (c *Client) headered(req *http.Request, session string) {
 	req.Header.Set("x-opencode-session-id", session)
 	req.Header.Set("x-session-affinity", session)
 	req.Header.Set("X-Session-Id", session)
-	// project 由 session 确定性派生裸 40 位 hex：形状合规，且同一会话恒定映射
-	// 到同一 project（保住上游 prompt cache 亲和）。
-	req.Header.Set("x-opencode-project", clientProjectID(session))
-}
-
-// clientProjectID 把会话标识派生成官方 CLI 那种**裸 40 位小写 hex**的 project id。
-// 上游只校验形状（非 `prj_` 前缀的 40 位 hex），值本身不校验；用 sha256 派生
-// 保证同一会话稳定映射到同一 project（prompt cache 亲和）。
-func clientProjectID(session string) string {
-	sum := sha256.Sum256([]byte("opencode-project\x00" + session))
-	return hex.EncodeToString(sum[:20])
+	req.Header.Set("x-opencode-project", projectID())
+	req.Header.Set("Accept", "*/*")
 }
 
 // ---------------------------------------------------------------------------
@@ -344,7 +343,9 @@ func (c *Client) ChatStream(_ *auth.Auth, body []byte) (io.ReadCloser, int, []by
 	if err := json.Unmarshal(body, &obj); err != nil {
 		return nil, 0, nil, fmt.Errorf("oczen: invalid request body: %w", err)
 	}
-	ensureAgentShape(obj)
+	// v2 整形层：官方 prompt + 官方工具集 + 客户端工具改名 + 聊天体常量。
+	// 返回的改名集合用于响应侧把工具名还原成调用方声明的名字。
+	renames := shapeChatRequest(obj)
 	// 会话标识由对话首轮稳定派生；缺 seed 时随机（单次会话，无亲和需求）。
 	seed := conversationSeed(obj)
 	if seed == "" {
@@ -356,6 +357,7 @@ func (c *Client) ChatStream(_ *auth.Auth, body []byte) (io.ReadCloser, int, []by
 		return nil, 0, nil, fmt.Errorf("oczen: marshal body: %w", err)
 	}
 	model, _ := obj["model"].(string)
+	chatURL := c.chatURL()
 
 	// 每次 attempt 重新构造请求（体已在内存，重放无需 GetBody）。
 	// cancel 所有权随**本次响应**走：在本函数内包好 idle.Monitor（空闲兜底 + 关闭时取消），
@@ -363,7 +365,7 @@ func (c *Client) ChatStream(_ *auth.Auth, body []byte) (io.ReadCloser, int, []by
 	// 隐式顺序（编排可能连发 1~3 次：直连→备用→回落直连），也避免 ErrNoBackup 等
 	// 提前返回路径漏调 cancel 而泄漏 context。
 	attempt := func(useBackup bool) (*http.Response, error) {
-		req, err := http.NewRequest(http.MethodPost, c.base()+"/chat/completions", bytes.NewReader(out))
+		req, err := http.NewRequest(http.MethodPost, chatURL, bytes.NewReader(out))
 		if err != nil {
 			return nil, err
 		}
@@ -387,7 +389,9 @@ func (c *Client) ChatStream(_ *auth.Auth, body []byte) (io.ReadCloser, int, []by
 			cancel() // 失败分支在本函数内收尾；200 的取消权随 resp 交给下面的 Monitor
 			return resp, err
 		}
-		resp.Body = idle.Monitor(resp.Body, c.IdleTimeout, cancel) // 流空闲兜底 + 取消权转移
+		// 响应侧还原工具名：包在 idle.Monitor 外层，Stream（透传）与
+		// Aggregate（本地聚合）两条路径都自动经过，不必各实现一遍。
+		resp.Body = newToolNameReader(idle.Monitor(resp.Body, c.IdleTimeout, cancel), renames) // 流空闲兜底 + 取消权转移
 		return resp, nil
 	}
 
@@ -462,15 +466,18 @@ func (c *Client) TestKey() (status int, body string, viaBackup bool, err error) 
 		"max_tokens": 8,
 		"messages":   []map[string]any{{"role": "user", "content": "ping"}},
 	}
-	ensureAgentShape(obj)
+	// 与真实对话同一条整形层：测试探针若用 v1 形态，看到的是「形态不合格」
+	// 的 429，而不是凭证/口径的真实状态（R64 同源要求）。
+	shapeChatRequest(obj)
 	out, err := json.Marshal(obj)
 	if err != nil {
 		return 0, "", false, err
 	}
 	session := canonicalSessionID(randomID("testkey", 8))
+	chatURL := c.chatURL()
 	via := false
 	attempt := func(useBackup bool) (*http.Response, error) {
-		req, err := http.NewRequest(http.MethodPost, c.base()+"/chat/completions", bytes.NewReader(out))
+		req, err := http.NewRequest(http.MethodPost, chatURL, bytes.NewReader(out))
 		if err != nil {
 			return nil, err
 		}
