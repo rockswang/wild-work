@@ -83,6 +83,26 @@ func tomorrowExpiry(t *testing.T, now time.Time, d time.Duration) time.Time {
 	return bucketExpiry(t, now, provider.BucketTomorrow)
 }
 
+// todayExpiryAfter 返回严格晚于 after 的一个「今天到期」时刻。给「两者都今天到期、
+// 但粘性账号不是池内最优」的场景用：这样让位判定才会真的走到 R146 那条
+// 「都今天到期 ⇒ 保持粘性」的守卫，而不是被 best==sticky 提前短路。
+func todayExpiryAfter(t *testing.T, now, after time.Time) time.Time {
+	t.Helper()
+	for d := after.Sub(now) + time.Second; d <= 25*time.Hour; {
+		if x := now.Add(d); provider.ExpireBucketOf(x.Format(time.RFC3339), now) == provider.BucketToday {
+			return x
+		}
+		if d < 15*time.Minute {
+			d += time.Second
+		} else {
+			d += time.Minute
+		}
+	}
+	t.Skipf("UTC+8 当日已无更晚的「今天到期」时刻（now=%s after=%s）",
+		now.Format(time.RFC3339), after.Format(time.RFC3339))
+	return time.Time{}
+}
+
 // TestStickyExpiryDataIsClockRobust 逐分钟扫一个完整自然日，验证上面三个构造器在
 // **任意**墙钟时刻都成立。这正是原用例缺的保证：老写法白天永远绿、入夜才红。
 func TestStickyExpiryDataIsClockRobust(t *testing.T) {
@@ -147,12 +167,18 @@ func TestStickyKeepsNewAccountAcrossRequests(t *testing.T) {
 }
 
 // TestStickyHoldsWhenBothExpireToday 两者都今天到期 → 保持粘性（避免请求间抖动）。
+//
+// 数据刻意让 **B 更早**（池内最优是 B、不是粘性账号 A）：这样才会真的走进
+// yieldForExpiringToday 的「都今天到期 ⇒ 保持粘性」守卫；若按原样让 A 更早，
+// best==sticky 会先短路返回，那条守卫从未被执行、删掉它这条用例也不会红。
 func TestStickyHoldsWhenBothExpireToday(t *testing.T) {
 	h := newStickyTestHandler(t)
 	rt := h.cfg.Runtimes[provider.GLM]
 	now := time.Now()
-	rt.Pool.SetCreditDetail(stickyTestKey+"A", 1000, 0, 0, todayExpiry(t, now, time.Hour))
-	rt.Pool.SetCreditDetail(stickyTestKey+"B", 500, 0, 0, todayExpiry(t, now, 3*time.Hour))
+	b := todayExpiry(t, now, time.Hour)
+	a := todayExpiryAfter(t, now, b)
+	rt.Pool.SetCreditDetail(stickyTestKey+"A", 1000, 0, 0, a)
+	rt.Pool.SetCreditDetail(stickyTestKey+"B", 500, 0, 0, b)
 	pinSticky(t, h, stickyTestKey+"A")
 
 	if got := h.pickWithSticky(rt, "m"); got == nil || got.UID != stickyTestKey+"A" {
