@@ -3325,7 +3325,7 @@ DeepSeek Harness 的 system prompt 正是以这句开头，于是经本代理转
 - 选插冠词的理由：语义扰动最小、改动可见可 review、不依赖不可见字符
   （全角空格会被 NFKC 折叠，抗归一化差）；`built on` 会换实词。
 - 同步更新 `internal/upstream/sanitize_test.go` 的逐字节快照护栏
-  （`sanitizeFeatures` 7→8 项、`sanitizeRewrites` 5→6 对），并新增 3 个回归用例
+  （`sanitizeFeatures` 7→8 项、`sanitizeStringRewrites` 5→6 对），并新增 3 个回归用例
   （改写生效 / 经 `PrepareBody` 落到 system content / 措辞相近的变体不得被误改）。
 
 ---
@@ -3415,7 +3415,7 @@ DeepSeek Harness 的 system prompt 正是以这句开头，于是经本代理转
   `internal/gateway/image_slim_test.go` 6 例、
   `internal/upstream/sanitize_test.go` 新增 3 例（改写生效 / 经 `PrepareBody` 落到
   system content / 措辞相近变体不得被误改）并同步逐字节快照护栏
-  （`sanitizeFeatures` 7→8 项、`sanitizeRewrites` 5→6 对）；
+  （`sanitizeFeatures` 7→8 项、`sanitizeStringRewrites` 5→6 对）；
 - `internal/server/handler_bodylimit_test.go` 改为基于变量断言（不写死 32MiB）。
 
 ## 🙏 致谢
