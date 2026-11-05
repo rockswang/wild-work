@@ -58,6 +58,65 @@ func TestBurnForecast(t *testing.T) {
 	}
 }
 
+// 净花费口径（2026-11-05）：差值花费里的**到期作废**不算消耗速度。
+//
+// 实测矛盾（面板「最近临期」行）：
+//
+//	300分 · 已耗 300 · 预计作废 264分
+//
+// 真实经过是昨日领的 300 分今晨 00:06 整包作废（一分未用）、07:15 又领新 300。
+// creditOut 是余额下降差，把作废记成「今日已耗 300」；burnForecast 再拿这个假
+// 消耗速度外推，得出「今晚只剩 36 分会花掉、264 分作废」——而正确结论是
+// 一分没花、300 分全废。拆出 expiredByUID 后：净花费 0 → 不参与外推（-1）。
+func TestNetSpentExcludesExpired(t *testing.T) {
+	s := newTestStats(t)
+	now := time.Now()
+	base := time.Date(now.Year(), now.Month(), now.Day(), 12, 0, 0, 0, time.Local)
+	at := base.Format("2006-01-02") + "T23:59:59+08:00"
+
+	s.ApplyPoll([]Account{{UID: "a", Nickname: "号1", Group: "raccoon", Credits: 7972}}, base)
+	s.ApplyExpiry("a", []ExpireItem{{At: at, Amount: 300}})
+	// 余额 −300：全是凌晨作废，无真实消耗
+	s.ApplyPoll([]Account{{UID: "a", Nickname: "号1", Group: "raccoon", Credits: 7672}}, base.Add(time.Hour))
+	s.ApplyLedgerExpire(todayKey(now), []LedgerExpire{{Channel: "raccoon", UID: "a", Amount: 300}})
+
+	row := s.Snapshot(base.Add(time.Hour)).Expiry[0]
+	if row.TodayOut != 300 || row.TodayExpired != 300 || row.TodaySpent != 0 {
+		t.Fatalf("out/expired/spent = %d/%d/%d, want 300/300/0", row.TodayOut, row.TodayExpired, row.TodaySpent)
+	}
+	if row.BurnForecast != -1 {
+		t.Fatalf("零净花费不应外推，forecast = %d, want -1", row.BurnForecast)
+	}
+	if !row.Risk {
+		t.Fatal("当日到期且零消耗应判风险（全部作废）")
+	}
+
+	// 混合：差值 300 里 100 是作废 → 净花费 200 参与外推
+	s2 := newTestStats(t)
+	s2.ApplyPoll([]Account{{UID: "b", Group: "workbuddy", Credits: 1000}}, base)
+	s2.ApplyExpiry("b", []ExpireItem{{At: at, Amount: 400}})
+	s2.ApplyPoll([]Account{{UID: "b", Group: "workbuddy", Credits: 700}}, base.Add(time.Hour))
+	s2.ApplyLedgerExpire(todayKey(now), []LedgerExpire{{Channel: "workbuddy", UID: "b", Amount: 100}})
+	row2 := s2.Snapshot(base.Add(time.Hour)).Expiry[0]
+	if row2.TodaySpent != 200 {
+		t.Fatalf("spent = %d, want 200（300−100 作废）", row2.TodaySpent)
+	}
+	// 速率 200/h，距 23:59:59 约 11h → forecast ≈ 2200 > 400 → 不判风险
+	if row2.BurnForecast < 0 || row2.Risk {
+		t.Fatalf("净花费外推应充足: forecast=%d risk=%v", row2.BurnForecast, row2.Risk)
+	}
+
+	// 作废大于差值（两条链路时间窗不一致）→ 钳 0，不产生负数速度
+	s3 := newTestStats(t)
+	s3.ApplyPoll([]Account{{UID: "c", Group: "workbuddy", Credits: 1000}}, base)
+	s3.ApplyExpiry("c", []ExpireItem{{At: at, Amount: 50}})
+	s3.ApplyPoll([]Account{{UID: "c", Group: "workbuddy", Credits: 980}}, base.Add(time.Hour))
+	s3.ApplyLedgerExpire(todayKey(now), []LedgerExpire{{Channel: "workbuddy", UID: "c", Amount: 500}})
+	if got := s3.Snapshot(base.Add(time.Hour)).Expiry[0]; got.TodaySpent != 0 || got.BurnForecast != -1 {
+		t.Fatalf("倒挂应钳 0: spent=%d forecast=%d", got.TodaySpent, got.BurnForecast)
+	}
+}
+
 // 最近临期全量下发：排序=到期日升序、同日按额降序、同日同额 uid 升序稳定锚点。
 func TestExpiryFullList(t *testing.T) {
 	s := newTestStats(t)
@@ -161,35 +220,48 @@ func TestApplyExpiryClears(t *testing.T) {
 
 // ============ 今日作废拆分（ApplyLedgerExpire / CreditUsed / trae 分摊扣作废） ============
 
-// ledger 作废写入：全量替换语义 + 渠道归一 + 空 map 表示「今日无作废」应清零。
+// ledger 作废写入：全量替换语义 + 渠道归一 + 空切片表示「今日无作废」应清零。
 func TestApplyLedgerExpireReplaceAndNormalize(t *testing.T) {
 	s := newTestStats(t)
 	now := time.Now()
 	day := todayKey(now)
 
 	// 首轮：workbuddy 100 + traecode 50（应归一为 traework）+ 空渠道归 unknown 7
-	s.ApplyLedgerExpire(day, map[string]int64{"workbuddy": 100, "traecode": 50, "": 7})
+	s.ApplyLedgerExpire(day, []LedgerExpire{
+		{Channel: "workbuddy", Amount: 100},
+		{Channel: "traecode", Amount: 50},
+		{Channel: "", Amount: 7},
+	})
 	snap := s.Snapshot(now)
 	if snap.CreditExpired != 157 {
 		t.Fatalf("credit_expired = %d, want 157（100+50+7）", snap.CreditExpired)
 	}
 
 	// 次轮全量替换（非累加）：只报 workbuddy 30，旧值必须被整体替换为 30
-	s.ApplyLedgerExpire(day, map[string]int64{"workbuddy": 30})
+	s.ApplyLedgerExpire(day, []LedgerExpire{{Channel: "workbuddy", Amount: 30}})
 	if snap := s.Snapshot(now); snap.CreditExpired != 30 {
 		t.Fatalf("全量替换语义破坏: credit_expired = %d, want 30", snap.CreditExpired)
 	}
 
-	// 空 map = 今日无作废 → 清零（不是保留旧值）
-	s.ApplyLedgerExpire(day, map[string]int64{})
+	// 空切片 = 今日无作废 → 清零（不是保留旧值）
+	s.ApplyLedgerExpire(day, []LedgerExpire{})
 	if snap := s.Snapshot(now); snap.CreditExpired != 0 {
-		t.Fatalf("空 map 应清零: credit_expired = %d, want 0", snap.CreditExpired)
+		t.Fatalf("空切片应清零: credit_expired = %d, want 0", snap.CreditExpired)
 	}
 
-	// v<=0 值跳过：负数与 0 不是合法作废额
-	s.ApplyLedgerExpire(day, map[string]int64{"workbuddy": -5, "traework": 0})
+	// 非正值跳过：负数与 0 不是合法作废额
+	s.ApplyLedgerExpire(day, []LedgerExpire{{Channel: "workbuddy", Amount: -5}, {Channel: "traework", Amount: 0}})
 	if snap := s.Snapshot(now); snap.CreditExpired != 0 {
 		t.Fatalf("非正值应跳过: credit_expired = %d, want 0", snap.CreditExpired)
+	}
+
+	// 同渠道/同 uid 多条累加（ledger 是一账号一包一条，不能只留最后一条）
+	s.ApplyLedgerExpire(day, []LedgerExpire{
+		{Channel: "workbuddy", UID: "wb-1", Amount: 40},
+		{Channel: "workbuddy", UID: "wb-1", Amount: 60},
+	})
+	if snap := s.Snapshot(now); snap.CreditExpired != 100 {
+		t.Fatalf("多条应累加: credit_expired = %d, want 100", snap.CreditExpired)
 	}
 }
 
@@ -198,19 +270,19 @@ func TestApplyLedgerExpireReplaceAndNormalize(t *testing.T) {
 func TestApplyLedgerExpireDayGuard(t *testing.T) {
 	s := newTestStats(t)
 	now := time.Now()
-	s.ApplyLedgerExpire(todayKey(now), map[string]int64{"workbuddy": 100})
+	s.ApplyLedgerExpire(todayKey(now), []LedgerExpire{{Channel: "workbuddy", Amount: 100}})
 	if s.Snapshot(now).CreditExpired != 100 {
 		t.Fatalf("前置失败")
 	}
 
 	// 空 day：调用方失败时不应调用，即便误调也不清零（保留旧值）
-	s.ApplyLedgerExpire("", map[string]int64{"workbuddy": 999})
+	s.ApplyLedgerExpire("", []LedgerExpire{{Channel: "workbuddy", Amount: 999}})
 	if got := s.Snapshot(now).CreditExpired; got != 100 {
 		t.Fatalf("空 day 不应覆盖: credit_expired = %d, want 100", got)
 	}
 
 	// 昨日 day：整批丢弃
-	s.ApplyLedgerExpire(todayKey(now.Add(-24*time.Hour)), map[string]int64{"workbuddy": 50})
+	s.ApplyLedgerExpire(todayKey(now.Add(-24*time.Hour)), []LedgerExpire{{Channel: "workbuddy", Amount: 50}})
 	if got := s.Snapshot(now).CreditExpired; got != 100 {
 		t.Fatalf("昨日 day 应整批丢弃: credit_expired = %d, want 100", got)
 	}
@@ -234,7 +306,7 @@ func TestPlatformRowsNetAndClamp(t *testing.T) {
 		{UID: "tw", Group: "traework", Credits: 470},  // −30
 		{UID: "qw", Group: "qwenwork", Credits: 490},  // −10
 	}, now.Add(time.Minute))
-	s.ApplyLedgerExpire(day, map[string]int64{"workbuddy": 110, "qwenwork": 40})
+	s.ApplyLedgerExpire(day, []LedgerExpire{{Channel: "workbuddy", Amount: 110}, {Channel: "qwenwork", Amount: 40}})
 
 	snap := s.Snapshot(now)
 	byGroup := map[string]PlatformRow{}
@@ -260,7 +332,7 @@ func TestPlatformRowsNetAndClamp(t *testing.T) {
 func TestLedgerExpireDayRoll(t *testing.T) {
 	s := newTestStats(t)
 	day1 := time.Now()
-	s.ApplyLedgerExpire(todayKey(day1), map[string]int64{"workbuddy": 200})
+	s.ApplyLedgerExpire(todayKey(day1), []LedgerExpire{{Channel: "workbuddy", Amount: 200}})
 	if s.Snapshot(day1).CreditExpired != 200 {
 		t.Fatalf("前置失败")
 	}
@@ -277,7 +349,7 @@ func TestLedgerExpireOrphanChannel(t *testing.T) {
 	now := time.Now()
 	s.ApplyPoll([]Account{{UID: "wb", Group: "workbuddy", Credits: 500}}, now)
 	s.ApplyPoll([]Account{{UID: "wb", Group: "workbuddy", Credits: 460}}, now.Add(time.Minute)) // 消耗 40
-	s.ApplyLedgerExpire(todayKey(now), map[string]int64{"ghost": 66})
+	s.ApplyLedgerExpire(todayKey(now), []LedgerExpire{{Channel: "ghost", Amount: 66}})
 
 	snap := s.Snapshot(now)
 	var ghostRow *PlatformRow
@@ -305,7 +377,7 @@ func TestTraeAllocationDeductsExpire(t *testing.T) {
 	s.AddUsage("traework/b", 500, 500, 0, 0, 0, false, now)                                 // 1000 token
 
 	// trae 系作废 100（traecode 键也应归一计入）→ 分摊基数 300−100=200
-	s.ApplyLedgerExpire(todayKey(now), map[string]int64{"traecode": 100})
+	s.ApplyLedgerExpire(todayKey(now), []LedgerExpire{{Channel: "traecode", Amount: 100}})
 	byName := map[string]ModelStat{}
 	for _, m := range s.Snapshot(now).Models {
 		byName[m.Model] = m
@@ -318,7 +390,7 @@ func TestTraeAllocationDeductsExpire(t *testing.T) {
 	}
 
 	// 作废 350 > 差值 300 → 基数 0，不做分摊（保持 0，不出现负数）
-	s.ApplyLedgerExpire(todayKey(now), map[string]int64{"traework": 350})
+	s.ApplyLedgerExpire(todayKey(now), []LedgerExpire{{Channel: "traework", Amount: 350}})
 	for _, m := range s.Snapshot(now).Models {
 		if m.Credit < 0 {
 			t.Fatalf("%s 超额作废时不应出现负积分，实际 %v", m.Model, m.Credit)

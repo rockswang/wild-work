@@ -4849,6 +4849,12 @@ function fmtExpireAt(s) {
 }
 
 // 最近临期：到期日升序；risk=按今日速度花不完 → 给预计作废量（额度−外推消耗）
+//
+// 额度格三件事必须分开（2026-11-05 修）：额度 / 今日花费 / 作废。
+// 旧文案「已耗 today_out」是余额差值，把到期作废也算成消耗，于是出现
+// 「300分 · 已耗 300 · 预计作废 264分」——都花完了还能作废一半，自相矛盾。
+// 现在：today_spent = 差值扣掉今日已作废（真花掉的），today_expired = 今日已作废，
+// 预计作废 = 按「真花费」速度外推今晚花不完的部分。
 function renderExpiry(ex) {
   if (!ex.length) { $("stExpiry").innerHTML = ""; $("stExpiry").className = "st-expiry"; return; }
   let html = `<div class="st-block-title">最近临期<span class="st-hint">按剩余时长升序 · ${ex.length} 个账号</span></div>` +
@@ -4859,7 +4865,7 @@ function renderExpiry(ex) {
     `<span class="st-ex-name">账号</span>` +
     `<span class="st-ex-date">到期时刻</span>` +
     `<span class="st-ex-days">剩余</span>` +
-    `<span class="st-ex-amt">额度 · 今日已耗</span>` +
+    `<span class="st-ex-amt" title="额度 = 该到期时刻的待作废额度；花费 = 今日余额差值扣掉到期作废；已作废 = 今日已到期清零的部分">额度 · 今日花费</span>` +
     `</div>`;
   ex.forEach((r, i) => {
     // 剩余时长优先用后端下发的精确小时数（hours_left），退回自然日文案兜底。
@@ -4868,6 +4874,10 @@ function renderExpiry(ex) {
     const dayTxt = Number.isFinite(h) && h > 0
       ? (h < 1 ? `${Math.round(h * 60)} 分钟后` : `${h.toFixed(1)} 小时后`)
       : (r.days_left <= 0 ? "今日到期" : (r.days_left === 1 ? "明日到期" : `${r.days_left} 天后到期`));
+    // 今日花费优先取净花费（today_spent）；老后端无此字段时退回差值，不至空白。
+    const spent = Number.isFinite(Number(r.today_spent)) ? Number(r.today_spent) : Number(r.today_out);
+    const expired = Number(r.today_expired) || 0;
+    const expiredTxt = expired > 0 ? ` · 已作废 ${fmtCredits(expired)}` : "";
     // 预计作废：burn_forecast<0 表示观测不足、无法外推，此时按「全部额度都会作废」
     // 展示（与后端 Risk 判定同口径），不能显示「作废 -1 分」这种反数。
     const burn = r.risk
@@ -4885,7 +4895,7 @@ function renderExpiry(ex) {
       `<span class="st-ex-name" title="${esc(r.uid)}">${esc(r.nickname || r.uid)}</span>` +
       `<span class="st-ex-date">${esc(fmtExpireAt(r.expire_at))}</span>` +
       `<span class="st-ex-days">${esc(dayTxt)}</span>` +
-      `<span class="st-ex-amt">${fmtCredits(r.amount)}分 · 已耗 ${fmtCredits(r.today_out)}${burn}</span>` +
+      `<span class="st-ex-amt">${fmtCredits(r.amount)}分 · 花费 ${fmtCredits(spent)}${expiredTxt}${burn}</span>` +
       `</div>`;
   });
   html += `</div>`;

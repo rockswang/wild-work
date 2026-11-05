@@ -75,7 +75,9 @@ func TestStatsAccountsMapping(t *testing.T) {
 	}
 }
 
-// TestFeedLedgerExpire 今日作废喂入：ledger 当日 expire 条目按渠道求和进引擎。
+// TestFeedLedgerExpire 今日作废喂入：ledger 当日 expire 条目按渠道 + uid 进引擎。
+// uid 维度是 2026-11-05 新增的——临期行要靠它把「差值里的作废」扣掉算净花费，
+// 缺 uid 只会让该账号退回含作废的旧口径，渠道合计不受影响。
 func TestFeedLedgerExpire(t *testing.T) {
 	a := newPanelApp(t, "127.0.0.1", "")
 	a.ledger.AppendCredit(ledger.CreditEntry{Ch: "workbuddy", UID: "wb-1", Kind: "expire", Amount: -100})
@@ -85,6 +87,12 @@ func TestFeedLedgerExpire(t *testing.T) {
 	snap := a.stats.Snapshot(now)
 	if snap.CreditExpired != 100 {
 		t.Fatalf("今日作废应 100（spend 不计），实际 %d", snap.CreditExpired)
+	}
+	// 渠道合计与 uid 拆分同源：平台表行与临期行不会各说各话
+	for _, r := range snap.Platforms {
+		if r.Group == "workbuddy" && r.CreditExpired != 100 {
+			t.Fatalf("平台行作废应 100，实际 %d", r.CreditExpired)
+		}
 	}
 }
 

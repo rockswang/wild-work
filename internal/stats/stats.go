@@ -112,15 +112,22 @@ type PlatformRow struct {
 
 // ExpiryRow 最近临期行。BurnForecast = -1 表示观测不足，无法预估。
 // 列表排序（expiryRowsLocked）：到期日升序 → 同日按额度降序 → 同日同额 uid 升序。
+//
+// TodayOut / TodaySpent / TodayExpired 三个数是「同一笔钱」的三种口径：
+// TodayOut 是余额差值（含到期作废，旧口径），TodaySpent + TodayExpired 才是它的拆分。
+// 不拆会把作废算成消耗速度，进而自相矛盾：「300 分 · 已耗 300 · 预计作废 264」——
+// 一边说花完了，一边说还会作废。（实测：昨天的包今晨 00:06 整包作废 300，今早 07:15 新领 300。）
 type ExpiryRow struct {
 	UID          string  `json:"uid"`
 	Nickname     string  `json:"nickname"`
 	Group        string  `json:"group"`
-	ExpireAt     string  `json:"expire_at"`  // 上游原始 ExpireAt（可能带时刻）
-	HoursLeft    float64 `json:"hours_left"` // 精确剩余小时（一位小数）
-	DaysLeft     int     `json:"days_left"`  // 自然日差（兼容旧前端）
-	Amount       int64   `json:"amount"`     // 该到期日各包剩余合计
-	TodayOut     int64   `json:"today_out"`
+	ExpireAt     string  `json:"expire_at"`     // 上游原始 ExpireAt（可能带时刻）
+	HoursLeft    float64 `json:"hours_left"`    // 精确剩余小时（一位小数）
+	DaysLeft     int     `json:"days_left"`     // 自然日差（兼容旧前端）
+	Amount       int64   `json:"amount"`        // 该到期日各包剩余合计
+	TodayOut     int64   `json:"today_out"`     // 今日差值花费（含到期作废，旧口径保留）
+	TodaySpent   int64   `json:"today_spent"`   // 净花费 = TodayOut − TodayExpired（钳 0）
+	TodayExpired int64   `json:"today_expired"` // 今日该账号已作废额度（ledger expire 条目）
 	BurnForecast int64   `json:"burn_forecast"`
 	// Risk 按今日速度外推「可能花不完」（数据维度：会不会作废）。
 	// Urgency 按紧迫度分档（视觉维度：标什么颜色），见 UrgencyToday 常量。
@@ -288,7 +295,11 @@ type Stats struct {
 	// 今日作废（ledger 周期喂入，纯内存不落盘：ledger 自身持久，重启后下一轮
 	// 喂入即自愈）。命名用 expired*（已作废）区别既有 expire*（将到期，见 acct.expireAt）。
 	expiredByGroup map[string]int64
-	expiredTotal   int64
+	// expiredByUID 同源按账号拆分的今日作废额。为什么必须到 uid 粒度：
+	// 差值 creditOut 只按账号记，作废额若只有渠道维度，就拆不出「某账号今天
+	// 真花了多少」——临期行会把整包作废当成消耗速度，得出「花完了还会作废」。
+	expiredByUID map[string]int64
+	expiredTotal int64
 
 	tokenDays map[string]int64                  // YYYY-MM-DD -> tokens（不含今日）
 	reqDays   map[string]int64                  // YYYY-MM-DD -> reqs（不含今日）
@@ -327,6 +338,7 @@ func New(dataDir string, logf func(format string, args ...any)) (*Stats, error) 
 		sticky:         map[string]stickyInfo{},
 		events:         map[string]int64{},
 		expiredByGroup: map[string]int64{},
+		expiredByUID:   map[string]int64{},
 		tokenDays:      map[string]int64{},
 		reqDays:        map[string]int64{},
 		modelDays:      map[string]map[string]*modelEntry{},
@@ -370,6 +382,7 @@ func (s *Stats) rollDayLocked(now time.Time) {
 	s.creditOutExact = 0
 	s.tokensToday, s.reqsToday = 0, 0
 	s.expiredByGroup = map[string]int64{}
+	s.expiredByUID = map[string]int64{}
 	s.expiredTotal = 0
 	s.models = map[string]*modelEntry{}
 	s.milestone = 0
@@ -487,18 +500,27 @@ func (s *Stats) ApplyExpiry(uid string, items []ExpireItem) {
 	}
 }
 
-// ApplyLedgerExpire 写入一轮 ledger 的「今日作废」合计（1.18.0 同款拆分）。
+// LedgerExpire 一条**已作废**流水（ledger expire 条目的最小投影）。
+// 两个维度都要：Channel 供平台表按渠道扣作废，UID 供临期行按账号算净花费。
+// Amount 恒为正数（调用方已在 ledger 侧取反）。
+type LedgerExpire struct {
+	Channel string
+	UID     string
+	Amount  int64
+}
+
+// ApplyLedgerExpire 写入一轮 ledger 的「今日作废」流水（1.18.0 同款拆分，
+// 2026-11-05 细化到 uid 维度）。
 // 与 ApplyExpiry 无关：后者是**将到期**的临期预测，本方法是**已作废**的既成事实。
 //
-// byGroup 的键为 ledger 条目 channel 原值（内部 normalizePlatform 归一），
 // 语义是**本轮全量**——整体替换而非累加：ledger 是持久账本、每轮重算今日合计，
-// 累加会随轮次膨胀。传空 map 表示今日无作废（置 0）；拉取失败时调用方**不应调用**
+// 累加会随轮次膨胀。传空切片表示今日无作废（置 0）；拉取失败时调用方**不应调用**
 // 本方法，保留上一轮有效值（降级为「作废额暂时陈旧」，好过退回含作废的旧口径
 // 把假花费当真消耗）。
 //
 // day 守卫：条目归属日须等于当前记账日，否则整批丢弃——跨零点时上游可能仍返回
 // 昨日数据，误记会让新的一天开局就背上一笔假作废。
-func (s *Stats) ApplyLedgerExpire(day string, byGroup map[string]int64) {
+func (s *Stats) ApplyLedgerExpire(day string, items []LedgerExpire) {
 	if day == "" {
 		return
 	}
@@ -508,20 +530,25 @@ func (s *Stats) ApplyLedgerExpire(day string, byGroup map[string]int64) {
 	if day != s.today {
 		return
 	}
-	grouped := make(map[string]int64, len(byGroup))
+	grouped := make(map[string]int64, len(items))
+	byUID := make(map[string]int64, len(items))
 	var total int64
-	for ch, v := range byGroup {
-		if v <= 0 {
+	for _, it := range items {
+		if it.Amount <= 0 {
 			continue
 		}
-		name := normalizePlatform(ch)
+		name := normalizePlatform(it.Channel)
 		if name == "" {
 			name = "unknown"
 		}
-		grouped[name] += v
-		total += v
+		grouped[name] += it.Amount
+		if it.UID != "" {
+			byUID[it.UID] += it.Amount
+		}
+		total += it.Amount
 	}
 	s.expiredByGroup = grouped
+	s.expiredByUID = byUID
 	s.expiredTotal = total
 }
 
@@ -590,11 +617,32 @@ func (a *acct) expireBucketsLocked(now time.Time) (today, tomorrow, within7 int6
 	return
 }
 
-// burnForecastLocked 预计作废：按今日差值速率外推距最早到期时刻的消耗。
+// netSpentLocked 该账号今日**净花费** = 差值花费 − 今日作废额（钳 0）。
+//
+// 为什么必须扣作废：creditOut 是余额下降差，不区分「花掉」与「到期作废」。
+// 典型场景：某账号昨日领的 300 分今晨 00:06 整包作废（一分未用）、07:15 又领
+// 新 300，于是 creditOut=300 全是作废、真实花费 0；旧口径把它当消耗速度外推，
+// 得出「今晚这 300 只花得掉 25，剩下 275 会作废」——而其实一分没花、300 全废。
+//
+// 作废额大于差值时钳 0：ledger 与轮询是两条链路，作废条目可能落在差值抓不到的
+// 窗口（账号降级/轮询间歇），倒挂时按「今日没花」处理，不产生负数速度。
+func (s *Stats) netSpentLocked(a *acct) int64 {
+	spent := a.creditOut - s.expiredByUID[a.uid]
+	if spent < 0 {
+		return 0
+	}
+	return spent
+}
+
+// burnForecastLocked 预计作废：按今日**净花费**速率外推距最早到期时刻的消耗。
 // 返回 -1 = 观测不足/无消耗（宁可不预估也不误报）；已到期返回 0。
 func (s *Stats) burnForecastLocked(a *acct, now time.Time) int64 {
 	_, amount, inst, ok := a.earliestExpiryLocked()
-	if !ok || amount <= 0 || a.burnSince.IsZero() || a.creditOut <= 0 {
+	if !ok || amount <= 0 || a.burnSince.IsZero() {
+		return -1
+	}
+	spent := s.netSpentLocked(a)
+	if spent <= 0 {
 		return -1
 	}
 	hours := now.Sub(a.burnSince).Hours()
@@ -605,7 +653,7 @@ func (s *Stats) burnForecastLocked(a *acct, now time.Time) int64 {
 	if hoursTo <= 0 {
 		return 0
 	}
-	return int64(float64(a.creditOut) / hours * hoursTo)
+	return int64(float64(spent) / hours * hoursTo)
 }
 
 // urgencyOf 按自然日把到期时刻分档（配色依据，见 UrgencyToday 等常量）。
@@ -649,6 +697,7 @@ func (s *Stats) expiryRowsLocked(now time.Time) []ExpiryRow {
 			dayAmount = amount
 		}
 		forecast := s.burnForecastLocked(a, now)
+		expired := s.expiredByUID[a.uid]
 		rows = append(rows, ExpiryRow{
 			UID:          a.uid,
 			Nickname:     a.nickname,
@@ -658,6 +707,8 @@ func (s *Stats) expiryRowsLocked(now time.Time) []ExpiryRow {
 			DaysLeft:     int(hoursLeft / 24),
 			Amount:       dayAmount,
 			TodayOut:     a.creditOut,
+			TodaySpent:   s.netSpentLocked(a),
+			TodayExpired: expired,
 			BurnForecast: forecast,
 			// Risk：按今日速度外推**可能花不完**（数据维度，决定是否显示「预计作废」）。
 			// forecast<0 = 观测不足（今日还没消耗过/刷新不足 30 分钟），无法外推——
