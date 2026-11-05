@@ -733,18 +733,18 @@ check("到期时刻渲染为完整标准时间（含时分秒，无 T、无时�
   stExpiry.includes("2026-10-20 00:00:00") &&
   !stExpiry.includes("2026-10-20T00:00:00"));
 // forecast<0（今日没消耗、无法外推）时按「全部额度作废」显示，
-// 不能出现「预计作废 -1分」这种反数。
-// forecast<0 的号（今日没消耗）必须显示「预计作废 100分」（全部额度），
-// 而不是「预计作废 -1分」这种反数。
-check("预计作废不为负（forecast<0 按全部额度）",
-  stExpiry.includes("预计作废 100分") &&
-  !/预计作废\s*-\d/.test(stExpiry));
-check("预计作废量 = 额度−外推消耗（55分）", stExpiry.includes("预计作废 55分"));
+// 必须出「到期前还会废 100分」，不能出现「到期前还会废 -1分」这种反数。
+check("到期前还会废不为负（forecast<0 按全部额度）",
+  stExpiry.includes("到期前还会废 100分") &&
+  !/到期前还会废\s*-\d/.test(stExpiry));
+check("到期前还会废量 = 额度−外推消耗（55分）", stExpiry.includes("到期前还会废 55分"));
 // 今日花费必须取净花费（today_spent=20，已扣掉 10 分作废），不能显示差值 30：
 // 这正是用户报的「都消耗完了怎么还有作废」——差值把作废算成消耗，才会自相矛盾。
 check("今日花费取净花费而非差值（花费 20，非 30）",
   stExpiry.includes("花费 20") && !stExpiry.includes("花费 30"));
-check("今日作废额显式标出（已作废 10）", stExpiry.includes("已作废 10"));
+// 「今日已废」与「到期前还会废」是两个不同的包，文案必须带批次限定词，
+// 否则并排显示会被读成「废了两次」（实测用户观感）。
+check("今日作废额带批次限定词（今日已废 10）", stExpiry.includes("今日已废 10"));
 // 无 today_spent/today_expired 的老后端载荷必须退回 today_out，不能渲染空白或 NaN。
 check("老后端无 today_spent 时退回差值（花费 7）",
   stExpiry.includes("花费 7") && !stExpiry.includes("NaN"));

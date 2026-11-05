@@ -4865,7 +4865,7 @@ function renderExpiry(ex) {
     `<span class="st-ex-name">账号</span>` +
     `<span class="st-ex-date">到期时刻</span>` +
     `<span class="st-ex-days">剩余</span>` +
-    `<span class="st-ex-amt" title="额度 = 该到期时刻的待作废额度（本行口径）；花费 = 净花费 = max(0, 今日余额差值 − 今日已作废)，真花掉的部分；已作废 = 该账号今日全量作废，可能含本行额度之外的包，故 花费 + 已作废 与 额度 不必相等">额度 · 今日花费</span>` +
+    `<span class="st-ex-amt" title="额度 = 本行这批包（同一到期日）的待作废额度；花费 = 净花费 = max(0, 今日余额差值 − 今日已作废)，真花掉的部分；今日已废 = 该账号今天已经清零的全部包，不一定是本行这批；到期前还会废 = 按今日净花费速度外推、本行这批到期前花不完的量（观测不足时按全废计）。三者口径不同，不必相加相等">额度 · 今日花费</span>` +
     `</div>`;
   ex.forEach((r, i) => {
     // 剩余时长优先用后端下发的精确小时数（hours_left），退回自然日文案兜底。
@@ -4877,16 +4877,19 @@ function renderExpiry(ex) {
     // 今日花费优先取净花费（today_spent）；老后端无此字段时退回差值，不至空白。
     const spent = Number.isFinite(Number(r.today_spent)) ? Number(r.today_spent) : Number(r.today_out);
     const expired = Number(r.today_expired) || 0;
-    const expiredTxt = expired > 0 ? ` · 已作废 ${fmtCredits(expired)}` : "";
+    // 「今日已废」与「到期前还会废」必须带批次限定词：二者是**不同的包**——
+    // 前者是账号今天已经清零的（往往是凌晨那批），后者是本行这批到期前的预估。
+    // 不加限定会被读成「废了两次」（实测用户观感）。
+    const expiredTxt = expired > 0 ? ` · 今日已废 ${fmtCredits(expired)}` : "";
     // 预计作废：burn_forecast<0 表示观测不足、无法外推，此时按「全部额度都会作废」
     // 展示（与后端 Risk 判定同口径），不能显示「作废 -1 分」这种反数。
     const burn = r.risk
-      ? ` · 预计作废 ${fmtCredits(r.burn_forecast < 0 ? r.amount : r.amount - r.burn_forecast)}分`
+      ? ` · 到期前还会废 ${fmtCredits(r.burn_forecast < 0 ? r.amount : r.amount - r.burn_forecast)}分`
       : "";
     // 配色按**紧迫度**（后端 urgency），不按 risk：
     //   今天到期 → 红（st-risk）；明天到期 → 黄（st-warn）；更远 → 不上色。
     // 此前用 risk 上色，7 天内的行全飘红（135 小时后到期的也红），一片警示等于没有警示。
-    // 「预计作废」文字仍只跟 risk 走：那是数据结论，与颜色分档独立。
+    // 「到期前还会废」文字仍只跟 risk 走：那是数据结论，与颜色分档独立。
     const urg = r.urgency === "today" ? " st-risk"
       : (r.urgency === "tomorrow" ? " st-warn" : "");
     html += `<div class="st-ex-row${urg}">` +
