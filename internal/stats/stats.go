@@ -31,7 +31,8 @@ import (
 )
 
 // Version 引擎载荷语义版本（Snapshot.Version 透出，结构演进时 bump）。
-const Version = "1"
+// "2"：ExpiryRow 新增 today_spent / today_expired，today_out 语义收窄为旧口径兼容字段。
+const Version = "2"
 
 // MilestoneStep 里程碑步长（分）：差值花费每满 N 分推一条 Toast。
 const MilestoneStep = 100
@@ -117,6 +118,10 @@ type PlatformRow struct {
 // TodayOut 是余额差值（含到期作废，旧口径），TodaySpent + TodayExpired 才是它的拆分。
 // 不拆会把作废算成消耗速度，进而自相矛盾：「300 分 · 已耗 300 · 预计作废 264」——
 // 一边说花完了，一边说还会作废。（实测：昨天的包今晨 00:06 整包作废 300，今早 07:15 新领 300。）
+//
+// 两个口径边界（否则读数据会觉得三数不闭合）：
+//  1. TodaySpent 钳 0：上游回包抖动可让作废大于差值（如新领包未入账），此时 花费 + 已作废 > 差值；
+//  2. TodayExpired 是该账号今日全量作废，可能含本行 Amount 之外的到期包，行内并排比较需注意范围不同。
 type ExpiryRow struct {
 	UID          string  `json:"uid"`
 	Nickname     string  `json:"nickname"`
@@ -126,8 +131,8 @@ type ExpiryRow struct {
 	DaysLeft     int     `json:"days_left"`     // 自然日差（兼容旧前端）
 	Amount       int64   `json:"amount"`        // 该到期日各包剩余合计
 	TodayOut     int64   `json:"today_out"`     // 今日差值花费（含到期作废，旧口径保留）
-	TodaySpent   int64   `json:"today_spent"`   // 净花费 = TodayOut − TodayExpired（钳 0）
-	TodayExpired int64   `json:"today_expired"` // 今日该账号已作废额度（ledger expire 条目）
+	TodaySpent   int64   `json:"today_spent"`   // 净花费 = max(0, TodayOut − TodayExpired)
+	TodayExpired int64   `json:"today_expired"` // 今日该账号已作废额度（ledger expire 条目，含本行额度之外的包）
 	BurnForecast int64   `json:"burn_forecast"`
 	// Risk 按今日速度外推「可能花不完」（数据维度：会不会作废）。
 	// Urgency 按紧迫度分档（视觉维度：标什么颜色），见 UrgencyToday 常量。

@@ -103,13 +103,11 @@ func (a *App) feedLedgerExpire(now time.Time) {
 		return
 	}
 	items := []statsEngine.LedgerExpire{}
-	if q := a.ledger.Query(1, nil); q != nil {
-		for _, e := range q.Credit.Entries {
-			if e.Kind == "expire" && e.Amount < 0 {
-				items = append(items, statsEngine.LedgerExpire{
-					Channel: e.Channel, UID: e.UID, Amount: -e.Amount,
-				})
-			}
+	for _, e := range a.ledger.Query(1, nil).Credit.Entries {
+		if e.Kind == "expire" && e.Amount < 0 {
+			items = append(items, statsEngine.LedgerExpire{
+				Channel: e.Channel, UID: e.UID, Amount: -e.Amount,
+			})
 		}
 	}
 	a.stats.ApplyLedgerExpire(now.Format("2006-01-02"), items)

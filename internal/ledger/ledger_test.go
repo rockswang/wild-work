@@ -435,6 +435,43 @@ func TestDiffCreditsSameKeyUnchangedNoEvents(t *testing.T) {
 	}
 }
 
+// TestDiffCreditsSkipsInfoOnly 纯展示条目（InfoOnly）不参与差分。
+// 真实形态：monkeycode 同账号下「积分余额」是 credits，另有「每日 Token 额度」
+// 以 token 计数（Usable=true，InfoOnly=true）。token 数一旦被差分，就会产出
+// 假的 expire/spend，进而被临期列算成「今日作废」——量纲不同的两套额度不可相加。
+func TestDiffCreditsSkipsInfoOnly(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "ledger")
+	l, _ := New(dir)
+	defer l.Close()
+
+	items := func(credits, tokenRemain, tokenUsed int64) []provider.ResourceItem {
+		return []provider.ResourceItem{
+			{Name: "积分余额", Key: "credits", Total: credits, Remain: credits, Usable: true},
+			{Name: "每日 Token 额度", Key: "daily_token", Total: 100000, Used: tokenUsed,
+				Remain: tokenRemain, Usable: true, InfoOnly: true},
+		}
+	}
+	// 首刷：baseline 只含积分 500（token 条目不得进 baseline）
+	if n := l.DiffCredits("monkeycode", "u1", 500, items(500, 100000, 0)); n != 1 {
+		t.Fatalf("首刷应只记 1 条 baseline earn，got %d", n)
+	}
+	// 二刷：token 被消耗 20000，积分不变 → 必须零事件
+	if n := l.DiffCredits("monkeycode", "u1", 500, items(500, 80000, 20000)); n != 0 {
+		t.Fatalf("InfoOnly 条目变动不应产生流水，got %d 条", n)
+	}
+	// 三刷：token 条目消失（日额度重置），同样不得记 expire
+	if n := l.DiffCredits("monkeycode", "u1", 500, []provider.ResourceItem{
+		{Name: "积分余额", Key: "credits", Total: 500, Remain: 500, Usable: true},
+	}); n != 0 {
+		t.Fatalf("InfoOnly 条目消失不应记 expire，got %d 条", n)
+	}
+
+	st := l.Query(1, nil)
+	if st.Credit.Spend != 0 || st.Credit.Expire != 0 {
+		t.Fatalf("token 消耗污染积分口径: spend=%d expire=%d, want 0/0", st.Credit.Spend, st.Credit.Expire)
+	}
+}
+
 // TestQueryEntriesTimeSorted entries 必须按时间升序返回（前端倒序分页依赖此顺序）。
 // months 是 map、range 顺序随机，跨月时会先扫到当月文件把最新条目排到前面；
 // 修复前这里同文件乱序落盘即能复现（返回顺序 = 写入顺序）。

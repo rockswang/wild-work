@@ -4865,7 +4865,7 @@ function renderExpiry(ex) {
     `<span class="st-ex-name">账号</span>` +
     `<span class="st-ex-date">到期时刻</span>` +
     `<span class="st-ex-days">剩余</span>` +
-    `<span class="st-ex-amt" title="额度 = 该到期时刻的待作废额度；花费 = 今日余额差值扣掉到期作废；已作废 = 今日已到期清零的部分">额度 · 今日花费</span>` +
+    `<span class="st-ex-amt" title="额度 = 该到期时刻的待作废额度（本行口径）；花费 = 净花费 = max(0, 今日余额差值 − 今日已作废)，真花掉的部分；已作废 = 该账号今日全量作废，可能含本行额度之外的包，故 花费 + 已作废 与 额度 不必相等">额度 · 今日花费</span>` +
     `</div>`;
   ex.forEach((r, i) => {
     // 剩余时长优先用后端下发的精确小时数（hours_left），退回自然日文案兜底。

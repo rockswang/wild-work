@@ -228,25 +228,43 @@ func TestApplyLedgerExpireReplaceAndNormalize(t *testing.T) {
 
 	// 首轮：workbuddy 100 + traecode 50（应归一为 traework）+ 空渠道归 unknown 7
 	s.ApplyLedgerExpire(day, []LedgerExpire{
-		{Channel: "workbuddy", Amount: 100},
-		{Channel: "traecode", Amount: 50},
+		{Channel: "workbuddy", UID: "wb-1", Amount: 100},
+		{Channel: "traecode", UID: "tr-1", Amount: 50},
 		{Channel: "", Amount: 7},
 	})
 	snap := s.Snapshot(now)
 	if snap.CreditExpired != 157 {
 		t.Fatalf("credit_expired = %d, want 157（100+50+7）", snap.CreditExpired)
 	}
+	if got := s.expiredByUID["wb-1"]; got != 100 {
+		t.Fatalf("uid 维度漏记: expiredByUID[wb-1] = %d, want 100", got)
+	}
+	// 空 UID 条目只进渠道/总量维度，不得在 uid 维度留下空字符串键
+	// （否则所有无 uid 的作废会累加成一笔挂在 "" 上，被任何 uid 为空的账号误认领）
+	if got := s.expiredByUID[""]; got != 0 {
+		t.Fatalf("空 UID 不应记 uid 维度: expiredByUID[\"\"] = %d, want 0", got)
+	}
 
-	// 次轮全量替换（非累加）：只报 workbuddy 30，旧值必须被整体替换为 30
-	s.ApplyLedgerExpire(day, []LedgerExpire{{Channel: "workbuddy", Amount: 30}})
+	// 次轮全量替换（非累加）：只报 workbuddy 30，旧值必须被整体替换为 30；
+	// uid 维度同样全量替换（wb-1 归零、新 uid 生效），否则账号级净花费会永久偏高。
+	s.ApplyLedgerExpire(day, []LedgerExpire{{Channel: "workbuddy", UID: "wb-2", Amount: 30}})
 	if snap := s.Snapshot(now); snap.CreditExpired != 30 {
 		t.Fatalf("全量替换语义破坏: credit_expired = %d, want 30", snap.CreditExpired)
 	}
+	if got := s.expiredByUID["wb-1"]; got != 0 {
+		t.Fatalf("uid 维度未全量替换: expiredByUID[wb-1] = %d, want 0", got)
+	}
+	if got := s.expiredByUID["wb-2"]; got != 30 {
+		t.Fatalf("uid 维度未全量替换: expiredByUID[wb-2] = %d, want 30", got)
+	}
 
-	// 空切片 = 今日无作废 → 清零（不是保留旧值）
+	// 空切片 = 今日无作废 → 清零（不是保留旧值），uid 维度同步清空
 	s.ApplyLedgerExpire(day, []LedgerExpire{})
 	if snap := s.Snapshot(now); snap.CreditExpired != 0 {
 		t.Fatalf("空切片应清零: credit_expired = %d, want 0", snap.CreditExpired)
+	}
+	if got := s.expiredByUID["wb-2"]; got != 0 {
+		t.Fatalf("空切片应清 uid 维度: expiredByUID[wb-2] = %d, want 0", got)
 	}
 
 	// 非正值跳过：负数与 0 不是合法作废额
@@ -262,6 +280,9 @@ func TestApplyLedgerExpireReplaceAndNormalize(t *testing.T) {
 	})
 	if snap := s.Snapshot(now); snap.CreditExpired != 100 {
 		t.Fatalf("多条应累加: credit_expired = %d, want 100", snap.CreditExpired)
+	}
+	if got := s.expiredByUID["wb-1"]; got != 100 {
+		t.Fatalf("多条应累加到 uid 维度: expiredByUID[wb-1] = %d, want 100", got)
 	}
 }
 
@@ -328,17 +349,24 @@ func TestPlatformRowsNetAndClamp(t *testing.T) {
 	}
 }
 
-// 跨天清零：作废两件套（expiredByGroup/Total）随 rollDay 重置。
+// 跨天清零：作废三件套（expiredByGroup / expiredByUID / expiredTotal）随 rollDay 重置。
+// uid 维度若漏重置，第二天的净花费会继续扣昨天的作废额，账越滚越偏。
 func TestLedgerExpireDayRoll(t *testing.T) {
 	s := newTestStats(t)
 	day1 := time.Now()
-	s.ApplyLedgerExpire(todayKey(day1), []LedgerExpire{{Channel: "workbuddy", Amount: 200}})
+	s.ApplyLedgerExpire(todayKey(day1), []LedgerExpire{{Channel: "workbuddy", UID: "wb-1", Amount: 200}})
 	if s.Snapshot(day1).CreditExpired != 200 {
 		t.Fatalf("前置失败")
+	}
+	if got := s.expiredByUID["wb-1"]; got != 200 {
+		t.Fatalf("前置失败: expiredByUID[wb-1] = %d, want 200", got)
 	}
 	day2 := day1.Add(24 * time.Hour)
 	if snap := s.Snapshot(day2); snap.CreditExpired != 0 {
 		t.Fatalf("跨天未清零: credit_expired = %d, want 0", snap.CreditExpired)
+	}
+	if got := s.expiredByUID["wb-1"]; got != 0 {
+		t.Fatalf("跨天未清 uid 维度: expiredByUID[wb-1] = %d, want 0", got)
 	}
 }
 
