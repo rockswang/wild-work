@@ -93,22 +93,24 @@ func (a *App) statsAccounts() []statsEngine.Account {
 	return out
 }
 
-// feedLedgerExpire 今日作废喂入：ledger 当日窗口的 expire 条目按渠道求和后
-// 交给引擎整体替换（引擎侧 day 守卫 + 全量替换）。空 map = 今日无作废 → 置 0；
-// ledger 未启用时不喂（引擎保留旧值，与 sidecar「拉取失败保留旧值」一致）。
+// feedLedgerExpire 今日作废喂入：ledger 当日窗口的 expire 条目交给引擎整体替换
+// （引擎侧 day 守卫 + 全量替换）。逐条保留 channel 与 uid：渠道维度供平台表扣
+// 作废，uid 维度供临期行估算今日花费（见 stats.netSpentLocked，两套采样不保证逐笔对齐）。
+// 空切片 = 今日无作废 → 置 0；ledger 未启用时不喂（引擎保留旧值，与 sidecar
+// 「拉取失败保留旧值」一致）。
 func (a *App) feedLedgerExpire(now time.Time) {
 	if a.ledger == nil {
 		return
 	}
-	byGroup := map[string]int64{}
-	if q := a.ledger.Query(1, nil); q != nil {
-		for _, e := range q.Credit.Entries {
-			if e.Kind == "expire" && e.Amount < 0 {
-				byGroup[e.Channel] += -e.Amount
-			}
+	items := []statsEngine.LedgerExpire{}
+	for _, e := range a.ledger.Query(1, nil).Credit.Entries {
+		if e.Kind == "expire" && e.Amount < 0 {
+			items = append(items, statsEngine.LedgerExpire{
+				Channel: e.Channel, UID: e.UID, Amount: -e.Amount,
+			})
 		}
 	}
-	a.stats.ApplyLedgerExpire(now.Format("2006-01-02"), byGroup)
+	a.stats.ApplyLedgerExpire(now.Format("2006-01-02"), items)
 }
 
 // applyExpiryFromItems 把 UserResourceDetail 的资源条目喂引擎（账号维度的

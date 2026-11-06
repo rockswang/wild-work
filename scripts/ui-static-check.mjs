@@ -646,11 +646,14 @@ const FAKE_STATS = {
   //   ① today → 红；② tomorrow → 黄；③ later → 不上色。
   // 注意 ③ 的 risk 故意给 true：颜色必须跟 urgency 走，不跟 risk 走——
   // 此前用 risk 上色导致 7 天内的行全红（135h 后到期的也红，用户实测反馈）。
+  // 「花费」取净花费 today_spent，不取含作废的 today_out：
+  //   ① 健康号 today_out=30 里含 10 分到期作废 ⇒ 花费 20 · 已作废 10；
+  //   ② 远期号故意**不写** today_spent/today_expired（老后端形态）⇒ 必须退回 today_out=7。
   expiry: [
-    { uid: "4298452267967801", nickname: "健康号", group: "traework", expire_at: "2026-10-20T00:00:00+08:00", hours_left: 5.7, days_left: 0, amount: 100, today_out: 30, burn_forecast: 45, risk: true, urgency: "today" },
-    { uid: "4298452267967802", nickname: "闲置号", group: "qwenwork", expire_at: "2026-10-20T08:45:21+08:00", hours_left: 4.7, days_left: 0, amount: 100, today_out: 0, burn_forecast: -1, risk: true, urgency: "today" },
-    { uid: "4298452267967803", nickname: "明日号", group: "traework", expire_at: "2026-10-21T09:32:32+08:00", hours_left: 19.5, days_left: 1, amount: 115, today_out: 10, burn_forecast: 400, risk: false, urgency: "tomorrow" },
-    { uid: "4298452267967804", nickname: "远期号", group: "workbuddyai", expire_at: "2026-10-25T12:06:19+08:00", hours_left: 135.7, days_left: 5, amount: 249, today_out: 0, burn_forecast: -1, risk: true, urgency: "later" },
+    { uid: "4298452267967801", nickname: "健康号", group: "traework", expire_at: "2026-10-20T00:00:00+08:00", hours_left: 5.7, days_left: 0, amount: 100, today_out: 30, today_spent: 20, today_expired: 10, burn_forecast: 45, risk: true, urgency: "today" },
+    { uid: "4298452267967802", nickname: "闲置号", group: "qwenwork", expire_at: "2026-10-20T08:45:21+08:00", hours_left: 4.7, days_left: 0, amount: 100, today_out: 0, today_spent: 0, today_expired: 0, burn_forecast: -1, risk: true, urgency: "today" },
+    { uid: "4298452267967803", nickname: "明日号", group: "traework", expire_at: "2026-10-21T09:32:32+08:00", hours_left: 19.5, days_left: 1, amount: 115, today_out: 10, today_spent: 10, today_expired: 0, burn_forecast: 400, risk: false, urgency: "tomorrow" },
+    { uid: "4298452267967804", nickname: "远期号", group: "workbuddyai", expire_at: "2026-10-25T12:06:19+08:00", hours_left: 135.7, days_left: 5, amount: 249, today_out: 7, burn_forecast: -1, risk: true, urgency: "later" },
   ],
   rotation: [{
     group: "traework",
@@ -730,13 +733,21 @@ check("到期时刻渲染为完整标准时间（含时分秒，无 T、无时�
   stExpiry.includes("2026-10-20 00:00:00") &&
   !stExpiry.includes("2026-10-20T00:00:00"));
 // forecast<0（今日没消耗、无法外推）时按「全部额度作废」显示，
-// 不能出现「预计作废 -1分」这种反数。
-// forecast<0 的号（今日没消耗）必须显示「预计作废 100分」（全部额度），
-// 而不是「预计作废 -1分」这种反数。
-check("预计作废不为负（forecast<0 按全部额度）",
-  stExpiry.includes("预计作废 100分") &&
-  !/预计作废\s*-\d/.test(stExpiry));
-check("预计作废量 = 额度−外推消耗（55分）", stExpiry.includes("预计作废 55分"));
+// 必须出「到期前还会废 100分」，不能出现「到期前还会废 -1分」这种反数。
+check("到期前还会废不为负（forecast<0 按全部额度）",
+  stExpiry.includes("到期前还会废 100分") &&
+  !/到期前还会废\s*-\d/.test(stExpiry));
+check("到期前还会废量 = 额度−外推消耗（55分）", stExpiry.includes("到期前还会废 55分"));
+// 今日花费必须取净花费（today_spent=20，已扣掉 10 分作废），不能显示差值 30：
+// 这正是用户报的「都消耗完了怎么还有作废」——差值把作废算成消耗，才会自相矛盾。
+check("今日花费取净花费而非差值（花费 20，非 30）",
+  stExpiry.includes("花费 20") && !stExpiry.includes("花费 30"));
+// 「今日已废」与「到期前还会废」是两个不同的包，文案必须带批次限定词，
+// 否则并排显示会被读成「废了两次」（实测用户观感）。
+check("今日作废额带批次限定词（今日已废 10）", stExpiry.includes("今日已废 10"));
+// 无 today_spent/today_expired 的老后端载荷必须退回 today_out，不能渲染空白或 NaN。
+check("老后端无 today_spent 时退回差值（花费 7）",
+  stExpiry.includes("花费 7") && !stExpiry.includes("NaN"));
 
 const stModels = document.getElementById("stModels").innerHTML;
 check("Trae 系模型积分为估算（≈ 前缀）", stModels.includes("≈12.50"));
