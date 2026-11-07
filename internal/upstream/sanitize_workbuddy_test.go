@@ -14,7 +14,7 @@ package upstream
 //     缺 X-Conversation-* 族本身就会 11128 "conversation id missing"，会污染实验）。
 //
 // ⛔ §0.1 纪律（2026-10-16 封号教训，AGENTS.md）：严禁穷举/批量探测。
-//   - 用例集固定为 sanitize 表的逐条覆盖（30 例，每例 1 次请求），单账号单发；
+//   - 用例集固定为 sanitize 表的逐条覆盖（31 例，每例 1 次请求），单账号单发；
 //     WB_PROBE_MAX 可调小先行试点；控制组被拦即中止；
 //   - 用例间 sleep 2s；账号必须是专用小号（WB_PROBE_UID 指定）。
 //
@@ -53,9 +53,9 @@ type probeCase struct {
 	want   string // "BLOCKED" | "OK" | "?"（无既有证据）
 }
 
-// probeCases 探针集：sanitize.go 两套表的逐条覆盖（特征 9 项 + 改写产物 + DSH 变体）。
+// probeCases 探针集：sanitize.go 两套表的逐条覆盖（特征 10 项 + 改写产物 + DSH 变体）。
 // 顺序：控制组（账号健康前提）→ 11128 / 11-128 / DSH 各形态 → 其余特征逐条 → 改写产物。
-// 每例 1 次请求；本轮全量覆盖 run（30 例，2s 间隔）。
+// 每例 1 次请求；本轮全量覆盖 run（31 例，2s 间隔）。
 var probeCases = []probeCase{
 	// ---- 控制组 ----
 	{"control_无害提示词", "You are a helpful assistant.", "OK"},
@@ -73,14 +73,20 @@ var probeCases = []probeCase{
 	{"fp_DSH身份句_非开头位置", "You are a helpful assistant.\n\nYou are an AI agent powered by DeepSeek Harness.", "OK"},
 	{"fp_完整DSHprompt_原始", realDSHSysPrompt, "BLOCKED"},
 	{"var_DSH品牌串_单独出现", "This product is called DeepSeek Harness.", "OK"},
-	{"fp_DSH_WebGUI_整段逐字串", "You are interacting with the user through the DeepSeek Harness Web GUI whose URL the runtime context names. When the user refers to \"this page\", \"this GUI\", \"this app\" without naming another target, they mean this GUI.", "OK"},
+	{"fp_DSH_WebGUI_整段逐字串", "You are interacting with the user through the DeepSeek Harness Web GUI whose URL the runtime context names. When the user refers to \"this page\", \"this GUI\", \"this app\" without naming another target, they mean this GUI.", "?"},
 	{"var_WebGUI短语_单独出现", "DeepSeek Harness Web GUI", "OK"},
+	// 2026-11-07 注：WebGUI 整段在「主探针单发」得 200，但同一天线上真实 system 内
+	// （以及整段落单发复测）得 400 —— 判据疑似灰度/不稳定，故 want 标 ?。
+	// 生产改写已按「品牌串一律缩写为 DSH」处理（见 sanitize.go），不再依赖该单点结论。
 	{"fp_跨句_@路径连写", "Tokens prefixed with @ are paths the user explicitly referenced. Relative paths resolve from the workspace root; absolute paths identify files or directories on the host.", "BLOCKED"},
 	{"var_RelativePaths_单独出现", "Relative paths resolve from the workspace root", "OK"},
 	// ---- 改写产物验证（今天「缩写为 DSH」改法 + 既有表目标串）----
 	{"rw_DSH身份句_缩写DSH产物", "You are an AI agent powered by DSH.", "OK"},
 	{"rw_WebGUI_缩写DSH产物", "DSH Web GUI", "OK"},
 	{"rw_checkout句_DSH缩写产物", "The runtime context names the DSH implementation checkout. Use this checkout only to inspect or extend DSH itself.", "OK"},
+	// 2026-11-07 线上 DSH Web 被拦后新增：真实新模板 prompt 里该句品牌原样即 400；
+	// 单句独立形态未单独实测，故标 ?（探针只打印不判失败）。
+	{"fp_checkout句_品牌原样", "The runtime context names the DeepSeek Harness implementation checkout. Use this checkout only to inspect or extend DSH itself.", "?"},
 	// ---- CC 指纹 ----
 	{"fp_CC身份句", "You are Claude Code, Anthropic's official CLI for Claude.", "BLOCKED"},
 	{"rw_CC身份句_改写产物", "You are Claude Code, Anthropic's official CLI tool for Claude.", "OK"},

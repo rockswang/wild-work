@@ -78,7 +78,7 @@ func TestSanitizeEmptyToolCallArgumentsParity(t *testing.T) {
 		t.Fatalf("无 tool_calls: %s", body)
 		return ""
 	}
-	viaProd := argsOf(sanitize.Messages(mkBody()))
+	viaProd := argsOf(prodSanitize(t, mkBody()))
 	viaBoth := argsOf(upstream.PrepareBody(mkBody()))
 	if viaProd != viaBoth {
 		t.Errorf("两表对空串 arguments 的处理不一致: prod=%q both=%q", viaProd, viaBoth)
@@ -91,18 +91,18 @@ func TestSanitizeEmptyToolCallArgumentsParity(t *testing.T) {
 func TestSanitizeTablesParity(t *testing.T) {
 	for _, in := range parityPayloads {
 		body := mustBody(t, in)
-		viaProd := systemContent(t, sanitize.Messages(append([]byte(nil), body...)))
+		viaProd := systemContent(t, prodSanitize(t, append([]byte(nil), body...)))
 		viaBoth := systemContent(t, upstream.PrepareBody(append([]byte(nil), body...)))
 		if viaProd != viaBoth {
 			t.Errorf("两表净化结果不一致（漏改一份等于没修，见 R115）\n in=%q\n sanitize=%q\n upstream=%q",
 				in, viaProd, viaBoth)
 		}
 		// 指纹类输入必须真的被改写，否则说明两表同时失效（而不是「一致」）。
-		// 2026-11-02 判据快照：DSH 身份句是活指纹必须被改写；WebGUI 段实测放行
-		// 可原样保留（规则已停用），不再作为「必须消失」的断言对象。
-		if strings.Contains(in, "You are an AI agent powered by DeepSeek Harness") &&
-			strings.Contains(viaProd, "You are an AI agent powered by DeepSeek Harness") {
-			t.Errorf("改写后仍留身份句指纹: %q", viaProd)
+		// 2026-11-07 判据：DSH 身份句与品牌串都是活指纹，输入含品牌串时
+		// 净化结果里不得再出现原样品牌串（同品牌缩写为 DSH）。
+		if strings.Contains(strings.ToLower(in), "deepseek harness") &&
+			strings.Contains(strings.ToLower(viaProd), "deepseek harness") {
+			t.Errorf("改写后仍留 DSH 品牌串: %q", viaProd)
 		}
 	}
 }
@@ -116,6 +116,23 @@ func mustBody(t *testing.T, sys string) []byte {
 		t.Fatal(err)
 	}
 	return b
+}
+
+// prodSanitize 解码后用生产表脱敏；无改动时返回原 body。
+func prodSanitize(t *testing.T, body []byte) []byte {
+	t.Helper()
+	var obj map[string]any
+	if err := json.Unmarshal(body, &obj); err != nil {
+		t.Fatalf("unmarshal: %v body=%s", err, body)
+	}
+	if !sanitize.MessagesInPlace(obj) {
+		return body
+	}
+	out, err := json.Marshal(obj)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	return out
 }
 
 func systemContent(t *testing.T, body []byte) string {

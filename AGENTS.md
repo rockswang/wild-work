@@ -45,7 +45,7 @@
 
 ---
 
-## 1. 决议项索引（R1–R155）
+## 1. 决议项索引（R1–R156）
 
 **全文（含证据链、反例、已知限制）见 [`docs/决议项.md`](docs/决议项.md)** —— 改动相关代码前必读对应条目。
 
@@ -188,6 +188,7 @@
 | R153 | **OCZen 免费闸门要的不是「整段官方 prompt」，而是 system 内容里必须收尾的官方 `<env>` 环境块；R152 把块前置进了 caller 文本之前，块被挤出末尾**（2026-11-04，9router `25878ce` + magpie 0.1.24 源码取证）：上游判形正则 `/<env>\r?\n {2}Working directory: [^\n]*\n[\s\S]*?<\/env>/`（**两个空格缩进是硬要求**，Claude Code 的单空格块不算），且「不管头、UA、会话，没有它一律 429」。修法：`officialSystemPrompt()` 只留 base prompt + skill 清单；`shapeChatRequest` 在官方 prompt → caller prompt → 占位说明**全部落定后**，把「真实 cwd + 最近 `.git` 祖先」的环境块**追加到第一条 system/developer 消息末尾**（分片 content 追加末尾 `text` 分片、caller 分片与 `cache_control` 原样保留），幂等判据改用官方判形正则（外来单空格块仍补官方块），shell 工具描述按宿主平台（Windows=powershell / macOS=zsh / Linux=bash）与 `Platform:` 行一致。`go build/vet/test` 全绿（53 包）。**未实证**：本机出口仍 429（`Retry-After` 指向下个 UTC 00:00），无法分离「IP/64 当日额度耗尽」与「长期指纹标记」。详见 [`docs/决议项.md`](docs/决议项.md) R153 |
 | R154 | **OCZen 整形层改用官方 OpenCode 2.2.5 本机抓包口径；R153「env 块必须收尾 + magpie 判形正则」被证伪**（2026-11-04，官方 2.2.5 CLI 抓包驱动） | **取证**：`OPENCODE_CONFIG_CONTENT` 把 provider baseURL 指向本地桩（127.0.0.1:8899），`opencode run --model opencode/big-pickle` 抓到 23211 B 真实对话体——12 工具（`edit,glob,grep,question,read,shell,skill,subagent,webfetch,websearch,write,execute`，各 `strict:false`，**无 `patch`**）、system 8944 字符、`stream_options.include_usage`、`max_completion_tokens:32000`、UA `opencode/latest/2.2.5/cli`、`accept: */*`、`authorization: Bearer public`。**关键反例**：官方 system 的 `<env>` 块之后**还有一句 worktree 说明**（`When you create a worktree outside the current working directory …`）⇒「system 必须以 `</env>` 收尾」「存在那条判形正则」都不成立；`<available_skills>` 是**本机真实技能清单**（逐机不同）⇒ 闸门不可能校验提示词文本。**修法**：资产换为 `opencode_prompt_2.2.5.txt`（8.8 KB，8 个占位符各出现 1 次）与 `opencode_tools_2.2.5.json`（12 工具逐字节原件）；`officialSystemPrompt()` 把环境块放回官方位置（正文之内），删除 `ensureOfficialEnvironment` 与判形正则；`headered` 恢复 `Accept: */*`；旧资产 `opencode_prompt_v2.txt` / `opencode_tools.json` 删除。**回归**：`TestOfficialPromptIsCaptured225`、`TestOfficialToolsetMatchesCapture`、`TestShellDescriptionFollowsHostPlatform`、`TestShapePrependsOfficialPromptAndKeepsCallerText`、`TestForeignEnvironmentStillGetsOfficialPrompt`、`TestOfficialPromptPrependedToFragmentSystem`；删除结论已反转的 3 例。**已知限制**：整形正确性只等于「与官方形态一致」；2026-11-04 实测证明**整形本身不是 429 的判据**（见 R155）。 |
 | R155 | **OCZen 免费档闸门判的是 TLS ClientHello 指纹：必须复刻官方 CLI（Bun 1.4.4/BoringSSL）那一份；Go 原生 ClientHello 恒 429**（2026-11-04 定案，用户报「对话恒 429 FreeUsageLimitError」） | **决定性实验（同一份 body、同一分钟、同一出口 49.68.54.61）**：把 wild-work 整形后的 24041 B 出站体交五类客户端发往 `https://opencode.ai/inference/openai/v1/chat/completions`——Go 默认 Transport（h1.1）→ **429**；Node `https.request`（OpenSSL，h1.1）→ **429**；Chrome 同源 `fetch`（h2）→ **429**；uTLS `HelloChrome_133` 预设（h1.1）→ **429**；**uTLS 复刻 Bun ClientHello（h1.1）→ 200 + 真实 SSE**（`x-zen-model: big-pickle`、`cf-ray …-BOS`、`x-opencode-log-id`）。**同一份官方抓包体逐字节重放**（含官方 session/project/b3/traceparent 头）→ 429，而**官方 CLI 自己发** → 200（多次，DB 记真实 usage，如 `17*23→391`）⇒ 请求体/头/路径/会话 id/`Bearer public`/HTTP 版本**全部排除为判据**；`Retry-After` 指向下个 UTC 00:00 只是上游拒绝免费档的统一文案，**不代表本机出口额度耗尽**。**指纹实测（本机采集，0 上游请求）**：Bun JA3 md5 `1523504b38f0fae0d881d4b6554aac1b` / JA4 `t13d1713h1_5b57614c22b0_7f527383e249`（17 cipher、13 扩展、ALPN 仅 `http/1.1`、无 GREASE）；Go 原生（13/11，因 `TLSNextProto` 非 nil 空表而**完全不发 ALPN**；其 JA3 md5 随 Go 版本/环境浮动——本机两次测量分别得 `9b7dcdf3…` 与 `20b27999…`，故只作「≠Bun」对照、不作断言基准）；Chrome `t13i1516h2_…`（15/16、扩展序随机化）⇒ Bun ≠ Chrome，「类浏览器指纹」不通过。**抓取方法**：`BUN_BE_BUN=1 opencode-cli.exe` 让官方 CLI 退化成 Bun 1.4.4 运行时；本地 CONNECT 嗅探器（只回 200、只抓首个 TLS record、不落地 MITM）+ `HTTPS_PROXY` ⇒ 拿到 SNI=opencode.ai 的原件。**修法**：新增依赖 `github.com/refraction-networking/utls v1.8.2`；`internal/oczen/tlsfp.go` 内嵌 `assets/clienthello_bun_2.2.5.bin`（1502 B 原件），`Fingerprinter{AllowBluntMimicry:true}.RawClientHello` **每条连接重新解析**成 spec（避免 `ApplyPreset` 的 slice 跨连接共享），`New()` 给 Transport 挂 `DialTLSContext`（uTLS `HelloCustom` + `ApplyPreset` + `HandshakeContext`），保持 HTTP/1.1；**自加 10s 握手超时**（net/http 只在自己 `addTLS` 分支装 `TLSHandshakeTimeout`，走自定义 `DialTLSContext` 的连接**不受它约束**——独立验证实测静默上游 >25s 挂住、原生路径 10.02s 超时，而 oczen 的 `StreamHTTP` 无整体 Timeout）；诊断开关 `OCZEN_NO_FINGERPRINT=1` 退回 Go 原生（复现 429）。**回归**：`TestEmbeddedClientHelloAsset`（资产 JA3 == 取证值）、`TestOfficialClientHelloIsMimicked`（真实拨号打到本地监听，断言出站 ClientHello 的 JA3 md5 == `1523504b…`）、`TestNewWiresFingerprintDialer`（默认挂载 + 开关生效）、`TestFingerprintDialerHandshakeTimeout`（静默上游必须 ~300ms 超时）、`TestOfficialFingerprintDialerTimesOutOnSilentUpstream`（同样打静默上游但走**生产入口** + 4s 守卫——独立验证用变异 A 证明前一条不经过生产接线、改坏接线仍绿，故补）、`TestJA3ParserDropsGrease`（JA3 的 cipher/扩展/curves 三处都剔 GREASE）。**已知限制**：① 嵌入的 hello 是**官方客户端快照**，上游换客户端/换白名单后必须重抓（抓取脚本见运维项目 `dev/oczen-tls-test/hello-snoop.js`）；② 新增依赖（utls + x/crypto + x/sys + klauspost/compress + brotli）会让二进制变大；③ 未实证上游是「按 JA3 白名单」还是「按 Bot score 里的其它信号」——只实证了结果面（复刻即 200）。 |
+| R156 | **脱敏表支持 `sanitize.toml` 追加自定义规则：TOML 单引号字面量让正则零转义；只 append、不覆盖、不隐式补预检**：JSON 承载正则有静默陷阱（`\b` 被解成退格符），故用 TOML 字面量字符串；段键=源文件路径、字段名=源变量名，解析器共享于 `internal/sanitizecfg`（两包各留约 30 行 append 接线）；段级 `enabled` 只管本段自定义规则是否加载（字段缺失或非布尔值按默认 `true`，显式 `false` 跳过本段追加、内置规则照常生效）；坏条目逐条跳过，文件缺失/语法错误保留内置规则；首次启动生成完整模板。已知限制：只增不删、无隐式预检、手改需重启。详见 [`docs/决议项.md`](docs/决议项.md) R156 |
 
 > ⚠️ **R71 附带的实测纪律**（也是 §0.1 的来源）：上游校验的是**头族齐全**而非单点
 > （只补 `X-Conversation-ID` 仍被拒）；且 `X-Conversation-ID` 的**取值形态不被校验**
@@ -230,13 +231,14 @@
 13. **兼容层调用内层只能经 `Gateway.call()`**（`io.Pipe`），调用方读完必须 `res.Close()`，否则内层 goroutine 可能阻塞在 Write 上泄漏。
 14. **`pipeRW.Flush()` 为空操作是刻意的**：`io.Pipe` 无缓冲，Write 即送达；不要改成缓冲 + 定时 flush。
 15. **错误分类 429 必须优先于 hardMarkers**：限流 body 高频带 `quota exceeded`，先判 hardRule 会把限流误归余额耗尽 → 12h 硬冷却。三渠道 `Classify` 均已修复此顺序。
-16. **脱敏层仅做文本替换不做语义变更**：`internal/sanitize` 只改模板句、不改用户内容语义；预检不命中时零分配原样通过。将来配置 `features.sanitize_fingerprints` 可一键关闭（逃生门）。
+16. **脱敏层仅做文本替换不做语义变更**：`internal/sanitize` 只改模板句、不改用户内容语义；预检不命中时零分配原样通过。将来配置 `features.sanitize_fingerprints` 可一键关闭（逃生门）；当前内置表可通过工作目录的 `sanitize.toml` **追加**自定义条目（TOML 单引号字面量，正则零转义；只追加、不覆盖、不删除，两表各一段，见 R156）。
     - **R151 起的三条硬边界**（推翻 R134 的六处做法）：① **绝不做整包替换**——`BodyFallback`
       已删除（它会把用户贴的日志 / `DeepSeek Harness implementation checkout` 改成 `Claude Code`），
-      清洗只走 `Messages` 的结构化字段；② **绝不跨品牌替换身份句**——DSH 身份句统一改写为
-      `You are an AI agent powered by DSH`（缩写，字面不出 `DeepSeek Harness`），不得换成 Claude Code
-      身份串（那会让模型自我认知错乱）；③ **按角色限定**：`user`/`tool`/`function` 一律跳过，
-      只清洗 `system`/`assistant`（真机实测上游就这么扫）；并且**没有任何规则真生效时不 `TrimSpace`**。
+      清洗只走 messages 的结构化字段；② **绝不跨品牌替换身份句**——DSH 身份句与品牌串
+      统一缩写为 `DSH`（2026-11-07 起品牌串全量改写；字面不出 `DeepSeek Harness`，但也不得
+      换成 Claude Code 身份串，那会让模型自我认知错乱）；③ **按角色限定**：`user`/`tool`/`function` 一律跳过，
+      只清洗 `system`/`assistant`（真机实测上游就这么扫）；`assistant.tool_calls.arguments` 也按文本清洗，
+      含品牌串的路径/命令/写入内容会被缩写为 `DSH`（已知行为，暂不收窄）；并且**没有任何规则真生效时不 `TrimSpace`**。
     - 失效规则**注释停用**而非删除（保留原判据 + 停用日期）；**复活任何停用规则前必须跑真机探针**
       （`internal/upstream/sanitize_workbuddy_test.go`，默认 SKIP，须 `WB_PROBE_UID` 指定专用小号，§0.1）。
 17. **积分「可用/不可用」拆分统计**：`provider.ResourceItem.Usable` 标记条目是否属于本工具可消耗的额度池，`provider.Summarize()` 汇总小计。
@@ -487,7 +489,7 @@ bash scripts/probe-dump.sh summarize                # 汇总各渠道 usage 字�
 | [README.md](README.md) | 用户文档 |
 | [DEVELOPMENT.md](DEVELOPMENT.md) | 开发者文档（面向 AI Agent） |
 | [AGENTS.md](AGENTS.md) | **本文件**：纪律 + 决议索引 + 关键不变量 + 构建发版 |
-| [docs/决议项.md](docs/决议项.md) | **R1–R155 决议全文**（证据链、反例、已知限制） |
+| [docs/决议项.md](docs/决议项.md) | **R1–R156 决议全文**（证据链、反例、已知限制） |
 | [docs/渠道接入备忘.md](docs/渠道接入备忘.md) | 各渠道协议要点、凭据模型、已知限制与踩坑 |
 | [docs/接口参考.md](docs/接口参考.md) | 面板区块规划 + 管理 API 全量清单 |
 | [docs/模型降级链定义.md](docs/模型降级链定义.md) | **模型降级链的唯一权威定义**：三维归因、错误类型全量归属、两条触发路径、三条硬规则、已知限制（R94） |

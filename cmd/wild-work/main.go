@@ -32,8 +32,8 @@ import (
 	"wild-work/internal/app"
 	"wild-work/internal/auth"
 	"wild-work/internal/cline"
-	"wild-work/internal/comate"
 	"wild-work/internal/codearts"
+	"wild-work/internal/comate"
 	"wild-work/internal/config"
 	"wild-work/internal/custom"
 	"wild-work/internal/devdump"
@@ -58,6 +58,8 @@ import (
 	"wild-work/internal/qodercom"
 	"wild-work/internal/qwenwork"
 	"wild-work/internal/raccoon"
+	"wild-work/internal/sanitize"
+	"wild-work/internal/sanitizecfg"
 	"wild-work/internal/scheduler"
 	"wild-work/internal/server"
 	"wild-work/internal/stats"
@@ -115,6 +117,11 @@ func main() {
 		} else {
 			fatal("加载配置失败：%v\n\n请检查 config.json 后重新启动", err)
 		}
+	}
+	// 脱敏规则：sanitize.toml 首次运行生成完整模板；存在时把用户条目追加到内置表末尾。
+	if sanitizecfg.EnsureFile("sanitize.toml") {
+		sanitize.Load("sanitize.toml")
+		upstream.Load("sanitize.toml")
 	}
 	// 管理面板鉴权：监听非环回地址（0.0.0.0 / 网卡 IP）时必须设置管理员密码，
 	// 否则局域网任何设备都能无凭据打开面板、退出程序。启动层与面板保存层双重把关。

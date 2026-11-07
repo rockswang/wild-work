@@ -8,7 +8,8 @@ package upstream
 // user、tool、function 各 7 条活指纹全部 200；同一身份句放进 assistant 仍 400。
 // 判据会漂移，本探针保留为角色维度的漂移哨兵；生产已同步跳过 user/tool/function 清洗。
 //
-// 26 例 = user/tool/function 各 1 控制组 + 7 条活指纹，assistant 控制组 + 身份句。
+// 33 例 = user/tool/function 各 1 控制组 + 9 条活指纹，assistant 控制组 + 身份句 + WebGUI 长段。
+// （2026-11-07 新增 WebGUI 长段 / checkout 句两条指纹，验证上游新判据是否扩散到非 system 角色。）
 // 控制组非 200 视为「该角色形态不被上游接受」，跳过同角色其余用例，避免把
 // 角色不支持误读成内容判据。
 //
@@ -42,7 +43,10 @@ type roleProbeCase struct {
 	role        string // user / assistant / tool / function
 }
 
-// roleFingerprints 7 条活指纹（system 角色 2026-11-02 实测仍拦），逐条放进各角色。
+// roleFingerprints 9 条活指纹（system 角色实测仍拦），逐条放进各角色。
+// 前 7 条是 2026-11-03 的基线；后 2 条是 2026-11-07 新增——上游把
+// 「品牌全称 + WebGUI/checkout 模板段」重新纳入判据（见主探针注释），
+// 需要确认非 system 角色是否也随之开始扫描。
 var roleFingerprints = []struct{ name, text string }{
 	{"DSH身份句", "You are an AI agent powered by DeepSeek Harness."},
 	{"DSH跨句路径", "Tokens prefixed with @ are paths the user explicitly referenced. Relative paths resolve from the workspace root; absolute paths identify files or directories on the host."},
@@ -51,15 +55,17 @@ var roleFingerprints = []struct{ name, text string }{
 	{"Codex首段", "You are a coding agent running in the Codex CLI, a terminal-based coding assistant. Codex CLI is an open source project led by OpenAI. You are expected to be precise, safe, and helpful."},
 	{"反馈句", "To give feedback, users should report the issue at https://github.com/anthropics/claude-code/issues"},
 	{"billing键值", "x-anthropic-billing-header: cc_version=1.0; cc_entrypoint=cli;"},
+	{"DSH_WebGUI长段", `You are interacting with the user through the DeepSeek Harness Web GUI whose URL the runtime context names. When the user refers to "this page", "this GUI", or "this app" without naming another target, they mean this GUI. The browser provides no implicit DOM, route, or screenshot context.`},
+	{"DSH_checkout句", "The runtime context names the DeepSeek Harness implementation checkout. The checkout location and current working directory are separate values and may differ; never infer the working directory from the checkout path. Use pwd to determine the current working directory. Use this checkout only to inspect or extend DSH itself."},
 }
 
-// roleProbeCases 每个角色先控制组（验证角色形态本身可用），再 7 条活指纹；
-// assistant 只复测身份句（其余 6 条不在本次范围）。
+// roleProbeCases 每个角色先控制组（验证角色形态本身可用），再全部活指纹；
+// assistant 复测身份句 + 2026-11-07 新增的 WebGUI 长段。
 var roleProbeCases = buildRoleProbeCases()
 
 func buildRoleProbeCases() []roleProbeCase {
 	const harmless = "请帮我总结这段日志的要点。"
-	cases := make([]roleProbeCase, 0, 26)
+	cases := make([]roleProbeCase, 0, 33)
 	for _, role := range []string{"user", "tool", "function"} {
 		cases = append(cases, roleProbeCase{"control_" + role + "无害文本", harmless, "OK", role})
 		for _, fp := range roleFingerprints {
@@ -69,6 +75,7 @@ func buildRoleProbeCases() []roleProbeCase {
 	return append(cases,
 		roleProbeCase{"control_assistant无害文本", harmless, "OK", "assistant"},
 		roleProbeCase{"fp_DSH身份句@assistant", "You are an AI agent powered by DeepSeek Harness.", "BLOCKED", "assistant"},
+		roleProbeCase{"fp_DSH_WebGUI长段@assistant", roleFingerprints[7].text, "BLOCKED", "assistant"},
 	)
 }
 

@@ -3,6 +3,7 @@ module wild-work
 go 1.25.0
 
 require (
+	github.com/BurntSushi/toml v1.6.0
 	github.com/energye/systray v1.0.3
 	github.com/refraction-networking/utls v1.8.2
 	golang.org/x/image v0.24.0

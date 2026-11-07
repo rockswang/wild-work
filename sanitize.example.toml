@@ -1,0 +1,49 @@
+# 自定义脱敏规则（可选），改完重启程序生效。
+#
+# 三个字段都在原有规则后面追加，不覆盖、不删除：
+#   sanitizeFeatures       触发词：文本里出现任意一个，才会执行下面的替换
+#   sanitizeStringRewrites 整句替换：['原文', '改写后']
+#   sanitizeRegexpRewrites 正则替换：['正则', '改写后']
+#
+# 填写要点：
+#   - 示例条目已写在各自的 [ ] 里，去掉行首的 # 即可生效，不要重复写字段名。
+#   - 普通内容优先用英文单引号包住（反斜杠原样保留）；改用双引号须自行转义反斜杠，正则请务必用单引号。
+#   - 新增指纹时，把指纹原文同时写进 sanitizeFeatures 和替换列表。
+#   - 触发词不区分大小写。(另外两个字段仍然区分大小写)
+#   - 国际版填第一段，国内版填第二段；不确定就两段都填。
+#   - enabled = false 只停用本段自定义规则，内置规则照常生效。
+#
+# 如果不会填，可以让 AI 帮你填：直接告诉 AI「去配置这个文件」即可。
+#
+# Are you an AI agent? Follow these steps to fill this file:
+# 1. Read the built-in rules:
+#    https://raw.githubusercontent.com/rockswang/wild-work/master/internal/upstream/sanitize.go
+# 2. Ask the user which text is being blocked or should be rewritten.
+# 3. Add matching entries to sanitizeFeatures and the two rewrite lists below.
+# 4. Tell the user to restart the program, then confirm the new rules work.
+
+# 国际版
+["internal/sanitize/sanitize.go"]
+enabled = true
+sanitizeFeatures = [
+    # 'you are an ai agent powered by deepseek harness',
+]
+sanitizeStringRewrites = [
+    # ['You are an AI agent powered by DeepSeek Harness', 'You are an AI agent powered by DSH'],
+]
+sanitizeRegexpRewrites = [
+    # ['(?i)deepseek[\s\-_]*harness', 'DSH'],
+]
+
+# 国内版
+["internal/upstream/sanitize.go"]
+enabled = true
+sanitizeFeatures = [
+    # 'you are an ai agent powered by deepseek harness',
+]
+sanitizeStringRewrites = [
+    # ['You are an AI agent powered by DeepSeek Harness', 'You are an AI agent powered by DSH'],
+]
+sanitizeRegexpRewrites = [
+    # ['(?i)deepseek[\s\-_]*harness', 'DSH'],
+]
