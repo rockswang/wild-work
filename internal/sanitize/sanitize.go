@@ -19,10 +19,10 @@ import (
 	"strings"
 )
 
-// featHeaders 特征预检：任一命中才进入净化。全部小写，配合 asciiContainsFold
+// sanitizeFeatures 特征预检：任一命中才进入净化。全部小写，配合 asciiContainsFold
 // 做大小写不敏感匹配（上游判据大小写不敏感，2026-10-28 真机实测小写变体同样 400，
 // 大小写敏感的 Contains 会让小写变体连净化都进不去）。
-var featHeaders = []string{
+var sanitizeFeatures = []string{
 	"x-anthropic-billing-hdr",
 	"x-anthropic-billing-header",
 	"cc_entrypoint=",
@@ -55,15 +55,15 @@ var featHeaders = []string{
 // 注意不能简单写 `hdr`：原始键名 "header" 不含连续 "hdr"，会漏掉键值整段剥离。
 const hdrKeyRe = `x[^a-z]*anthropic[^a-z]*billing[^a-z]*h[^a-z]*(?:e[^a-z]*)?(?:a[^a-z]*)?d[^a-z]*(?:e[^a-z]*)?r`
 
-// reHdr 剥离层：header 键名即触发（与值无关），整段删除。
-var reHdr = regexp.MustCompile(`(?i)` + hdrKeyRe + `\s*:[^;\n]*;?\s*`)
+// sanitizeHdrRe 剥离层：header 键名即触发（与值无关），整段删除。
+var sanitizeHdrRe = regexp.MustCompile(`(?i)` + hdrKeyRe + `\s*:[^;\n]*;?\s*`)
 
-// reBareHdr 裸键名（无冒号）兜底：是 reHdr 的超集，
+// sanitizeBareHdrRe 裸键名（无冒号）兜底：是 sanitizeHdrRe 的超集，
 // 两者并用——先删键值形态，再处理残留裸键名（改写已停用，仅预检兜底用）。
-var reBareHdr = regexp.MustCompile(`(?i)` + hdrKeyRe)
+var sanitizeBareHdrRe = regexp.MustCompile(`(?i)` + hdrKeyRe)
 
-// reKv 剥离层：尾随裸键值（cc_xxx=...;）循环清理。
-var reKv = regexp.MustCompile(`(?i)\bcc_[a-z0-9_]+=[^;\n]*;?\s*`)
+// sanitizeKvRe 剥离层：尾随裸键值（cc_xxx=...;）循环清理。
+var sanitizeKvRe = regexp.MustCompile(`(?i)\bcc_[a-z0-9_]+=[^;\n]*;?\s*`)
 
 // regexpRewriteStruct 正则改写对：re = 匹配正则，repl = 替换串。
 type regexpRewriteStruct struct {
@@ -71,9 +71,9 @@ type regexpRewriteStruct struct {
 	repl string
 }
 
-// regexpRewrites 正则匹配改写表
+// sanitizeRegexpRewrites 正则匹配改写表
 // 左 = *regexp.Regexp    右 = 替换串
-var regexpRewrites = []regexpRewriteStruct{
+var sanitizeRegexpRewrites = []regexpRewriteStruct{
 	// 2026-11-02 重要改动: deepseek harness 替换为 DSH
 	// 不得换成他身份串如 claude code, 因为dsh的系统提示词后文大量出现 DSH 这种关键词，
 	// 此前的错误做法(自称 claude code) 只会让模型自我认知错乱。
@@ -95,8 +95,8 @@ var regexpRewrites = []regexpRewriteStruct{
 	},
 }
 
-// stringRewrites 字符串匹配改写表
-var stringRewrites = [][2]string{
+// sanitizeStringRewrites 字符串匹配改写表
+var sanitizeStringRewrites = [][2]string{
 	{
 		"You are Claude Code, Anthropic's official CLI for Claude",
 		"You are Claude Code, Anthropic's official CLI tool for Claude",
@@ -157,7 +157,7 @@ func Messages(body []byte) []byte {
 	if len(msgs) == 0 {
 		return body
 	}
-	if cleanMessages(msgs) {
+	if sanitizeMessages(msgs) {
 		if out, err := json.Marshal(obj); err == nil {
 			return out
 		}
@@ -174,35 +174,35 @@ func MessagesInPlace(obj map[string]any) bool {
 	if len(msgs) == 0 {
 		return false
 	}
-	return cleanMessages(msgs)
+	return sanitizeMessages(msgs)
 }
 
-// cleanText 单段文本净化：预检不中 → 返回原串（零分配）。
-func cleanText(text string) string {
+// sanitizeText 单段文本净化：预检不中 → 返回原串（零分配）。
+func sanitizeText(text string) string {
 	if !hasFingerprint(text) {
 		return text
 	}
 	orig := text
 	// 字符串匹配改写表
-	for _, rw := range stringRewrites {
+	for _, rw := range sanitizeStringRewrites {
 		text = strings.ReplaceAll(text, rw[0], rw[1])
 	}
 	// 正则匹配改写表: (2026-11-02 改动: 改成遍历该表而非代码写死)
-	for _, rw := range regexpRewrites {
+	for _, rw := range sanitizeRegexpRewrites {
 		text = rw.re.ReplaceAllString(text, rw.repl)
 	}
-	if reHdr.MatchString(text) {
-		text = reHdr.ReplaceAllString(text, "")
+	if sanitizeHdrRe.MatchString(text) {
+		text = sanitizeHdrRe.ReplaceAllString(text, "")
 	}
 	if strings.Contains(text, "cc_") {
 		prev := ""
 		for prev != text {
 			prev = text
-			text = reKv.ReplaceAllString(text, "")
+			text = sanitizeKvRe.ReplaceAllString(text, "")
 		}
 	}
 	// 2026-11-02 停用: (探针 sanitize_workbuddy_test.go 实测结果正常且未被拦截)
-	// text = reBareHdr.ReplaceAllString(text, "x-anthropic-billing-hdr")
+	// text = sanitizeBareHdrRe.ReplaceAllString(text, "x-anthropic-billing-hdr")
 
 	// 预检可能因裸键名变体命中、却没有任何规则生效；此时原样返回，
 	// 不能让末尾 TrimSpace 白白改掉首尾空白。
@@ -212,16 +212,16 @@ func cleanText(text string) string {
 	return strings.TrimSpace(text)
 }
 
-// hasFingerprint 特征预检：featHeaders 全小写 + ASCII 折叠匹配（上游判据大小写
-// 不敏感），再以 reBareHdr 兜住键名形态。asciiContainsFold 命中与否都零分配，
+// hasFingerprint 特征预检：sanitizeFeatures 全小写 + ASCII 折叠匹配（上游判据大小写
+// 不敏感），再以 sanitizeBareHdrRe 兜住键名形态。asciiContainsFold 命中与否都零分配，
 // 守住「预检不命中零分配原样通过」的不量（不能整串 ToLower，会逐请求拷贝）。
 func hasFingerprint(s string) bool {
-	for _, f := range featHeaders {
+	for _, f := range sanitizeFeatures {
 		if asciiContainsFold(s, f) {
 			return true
 		}
 	}
-	return reBareHdr.MatchString(s)
+	return sanitizeBareHdrRe.MatchString(s)
 }
 
 // lowerASCII ASCII 大写折小写（仅特征表需要的折叠范围）。
@@ -258,11 +258,11 @@ func asciiContainsFold(s, f string) bool {
 	return false
 }
 
-// cleanContent 兼容字符串与多模态数组；只动 text part，image 等 part 不动。
-func cleanContent(v any) (any, bool) {
+// sanitizeContent 兼容字符串与多模态数组；只动 text part，image 等 part 不动。
+func sanitizeContent(v any) (any, bool) {
 	switch c := v.(type) {
 	case string:
-		s := cleanText(c)
+		s := sanitizeText(c)
 		return s, s != c
 	case []any:
 		changed := false
@@ -272,7 +272,7 @@ func cleanContent(v any) (any, bool) {
 				continue
 			}
 			if t, ok := m["text"].(string); ok {
-				if s := cleanText(t); s != t {
+				if s := sanitizeText(t); s != t {
 					m["text"] = s
 					changed = true
 				}
@@ -283,7 +283,7 @@ func cleanContent(v any) (any, bool) {
 	return v, false
 }
 
-func cleanToolCalls(v any) bool {
+func sanitizeToolCalls(v any) bool {
 	calls, ok := v.([]any)
 	if !ok {
 		return false
@@ -302,7 +302,7 @@ func cleanToolCalls(v any) bool {
 		if !ok || args == "" {
 			continue
 		}
-		if s := cleanText(args); s != args {
+		if s := sanitizeText(args); s != args {
 			fn["arguments"] = s
 			changed = true
 		}
@@ -310,10 +310,10 @@ func cleanToolCalls(v any) bool {
 	return changed
 }
 
-// cleanMessages 净化 messages 中的 content、reasoning_content 与 tool_calls；任一命中返回 true。
+// sanitizeMessages 净化 messages 中的 content、reasoning_content 与 tool_calls；任一命中返回 true。
 // 2026-11-02 改动: 跳过 role=user/tool/function (探针 sanitize_workbuddy_test.go 实测结果正常且未被拦截)
 // role=system/assistant 实测仍拦截，继续保持清洗。无 role 等未知角色继续保持清洗。
-func cleanMessages(msgs []any) bool {
+func sanitizeMessages(msgs []any) bool {
 	changed := false
 	for _, m := range msgs {
 		msg, _ := m.(map[string]any)
@@ -326,19 +326,19 @@ func cleanMessages(msgs []any) bool {
 			continue
 		}
 		if v, ok := msg["content"]; ok {
-			if nc, ch := cleanContent(v); ch {
+			if nc, ch := sanitizeContent(v); ch {
 				msg["content"] = nc
 				changed = true
 			}
 		}
 		if rc, ok := msg["reasoning_content"].(string); ok {
-			if s := cleanText(rc); s != rc {
+			if s := sanitizeText(rc); s != rc {
 				msg["reasoning_content"] = s
 				changed = true
 			}
 		}
 		if tc, ok := msg["tool_calls"]; ok {
-			if cleanToolCalls(tc) {
+			if sanitizeToolCalls(tc) {
 				changed = true
 			}
 		}

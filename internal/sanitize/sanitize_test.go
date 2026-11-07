@@ -24,7 +24,7 @@ const (
 	dshWebGUI = "DeepSeek Harness Web GUI"
 )
 
-// 本包 featHeaders 的逐字节快照（9 项活跃，全小写——上游判据大小写不敏感，
+// 本包 sanitizeFeatures 的逐字节快照（9 项活跃，全小写——上游判据大小写不敏感，
 // 配合 asciiContainsFold 折叠匹配）。2026-11-02 探针停用项（11128 / webgui /
 // 品牌串超集）不在快照内，证据见实现处注释；恢复时须同步本快照 + upstream 侧。
 var wantFeatures = []string{
@@ -39,7 +39,7 @@ var wantFeatures = []string{
 	"relative paths resolve from the workspace root",  // DSH @ 路径句（跨句指纹后半，2026-10-28 实测，2026-11-02 复现仍拦）
 }
 
-// 本包 stringRewrites 的逐字节快照（5 对活跃；11128 / WebGUI 两对 2026-11-02 探针
+// 本包 sanitizeStringRewrites 的逐字节快照（5 对活跃；11128 / WebGUI 两对 2026-11-02 探针
 // 实测停用，见实现处注释）。
 var wantRewrites = [][2]string{
 	{"You are Claude Code, Anthropic's official CLI for Claude",
@@ -55,7 +55,7 @@ var wantRewrites = [][2]string{
 	{dshIdentity, "You are an AI agent powered by DSH"},
 }
 
-// 本包 regexpRewrites 的逐字节快照（2 对活跃；WebGUI 对 2026-11-02 探针实测停用）。
+// 本包 sanitizeRegexpRewrites 的逐字节快照（2 对活跃；WebGUI 对 2026-11-02 探针实测停用）。
 var wantRegexpRewrites = []struct{ pattern, repl string }{
 	{`(?i)you\s+are\s+an\s+ai\s+agent\s+powered\s+by\s+(?:the\s+)?deepseek[\s\-_]*harness`,
 		"You are an AI agent powered by DSH"},
@@ -64,33 +64,33 @@ var wantRegexpRewrites = []struct{ pattern, repl string }{
 }
 
 func TestTablesByteExactSnapshot(t *testing.T) {
-	if len(featHeaders) != len(wantFeatures) {
-		t.Fatalf("featHeaders 项数=%d want %d（改表必须同步本快照 + upstream 侧快照）",
-			len(featHeaders), len(wantFeatures))
+	if len(sanitizeFeatures) != len(wantFeatures) {
+		t.Fatalf("sanitizeFeatures 项数=%d want %d（改表必须同步本快照 + upstream 侧快照）",
+			len(sanitizeFeatures), len(wantFeatures))
 	}
 	for i, want := range wantFeatures {
-		if featHeaders[i] != want {
-			t.Errorf("featHeaders[%d]=%q want %q", i, featHeaders[i], want)
+		if sanitizeFeatures[i] != want {
+			t.Errorf("sanitizeFeatures[%d]=%q want %q", i, sanitizeFeatures[i], want)
 		}
 	}
-	if len(stringRewrites) != len(wantRewrites) {
-		t.Fatalf("stringRewrites 对数=%d want %d", len(stringRewrites), len(wantRewrites))
+	if len(sanitizeStringRewrites) != len(wantRewrites) {
+		t.Fatalf("sanitizeStringRewrites 对数=%d want %d", len(sanitizeStringRewrites), len(wantRewrites))
 	}
 	for i, want := range wantRewrites {
-		if stringRewrites[i][0] != want[0] || stringRewrites[i][1] != want[1] {
-			t.Errorf("stringRewrites[%d]=%q→%q want %q→%q", i,
-				stringRewrites[i][0], stringRewrites[i][1], want[0], want[1])
+		if sanitizeStringRewrites[i][0] != want[0] || sanitizeStringRewrites[i][1] != want[1] {
+			t.Errorf("sanitizeStringRewrites[%d]=%q→%q want %q→%q", i,
+				sanitizeStringRewrites[i][0], sanitizeStringRewrites[i][1], want[0], want[1])
 		}
 	}
-	if len(regexpRewrites) != len(wantRegexpRewrites) {
-		t.Fatalf("regexpRewrites 对数=%d want %d", len(regexpRewrites), len(wantRegexpRewrites))
+	if len(sanitizeRegexpRewrites) != len(wantRegexpRewrites) {
+		t.Fatalf("sanitizeRegexpRewrites 对数=%d want %d", len(sanitizeRegexpRewrites), len(wantRegexpRewrites))
 	}
 	for i, want := range wantRegexpRewrites {
-		if got := regexpRewrites[i].re.String(); got != want.pattern {
-			t.Errorf("regexpRewrites[%d].re=%q want %q", i, got, want.pattern)
+		if got := sanitizeRegexpRewrites[i].re.String(); got != want.pattern {
+			t.Errorf("sanitizeRegexpRewrites[%d].re=%q want %q", i, got, want.pattern)
 		}
-		if got := regexpRewrites[i].repl; got != want.repl {
-			t.Errorf("regexpRewrites[%d].repl=%q want %q", i, got, want.repl)
+		if got := sanitizeRegexpRewrites[i].repl; got != want.repl {
+			t.Errorf("sanitizeRegexpRewrites[%d].repl=%q want %q", i, got, want.repl)
 		}
 	}
 }
@@ -251,11 +251,11 @@ func TestUserMessageUntouchedWhileSystemSanitized(t *testing.T) {
 // 预检可能因裸键名变体命中，但没有任何规则生效；此时不得 TrimSpace 改首尾空白。
 func TestBareHeaderPrecheckKeepsWhitespace(t *testing.T) {
 	in := "  x-anthropic-billing-h-e-a-d-e-r  "
-	if out := cleanText(in); out != in {
+	if out := sanitizeText(in); out != in {
 		t.Errorf("无规则生效时被 TrimSpace 改动: %q -> %q", in, out)
 	}
 	// 有实际改写时仍应 TrimSpace。
-	if out := cleanText("  x-anthropic-billing-header: cc_version=1.0;  "); out != "" {
+	if out := sanitizeText("  x-anthropic-billing-header: cc_version=1.0;  "); out != "" {
 		t.Errorf("实际改写后未 TrimSpace: %q", out)
 	}
 }
