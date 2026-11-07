@@ -52,6 +52,55 @@ var sanitizeFeatures = []string{
 	"relative paths resolve from the workspace root",
 }
 
+// sanitizeStringRewrites 字符串匹配改写表
+//
+// 身份句的匹配串**不带结尾标点**（只到 "…for Claude" 为止）：
+// CLI 版这句以句号收尾（"…for Claude."），桌面版（claude-desktop-3p / Agent SDK）
+// 以逗号接后继内容（"…for Claude, running within the Claude Agent SDK."）。
+// 带句号的整句只匹配前者，桌面版会漏网、指纹原样发上游 → 400 code=11128。
+// 去掉结尾标点后两种形态一并覆盖（替换串同样不带标点，让原有标点原样保留）。
+// 注意仍要求 "You are Claude Code, " 前缀，不做更宽的子串替换，
+// 以免误伤 TestExactMatchOnlyVariantNotTouched 所保护的零散文本。
+var sanitizeStringRewrites = [][2]string{
+	{
+		"You are Claude Code, Anthropic's official CLI for Claude",
+		"You are Claude Code, Anthropic's official CLI tool for Claude",
+	},
+	{
+		"Main branch (you will usually use this for PRs)",
+		"Default branch (you will usually use this for PRs)",
+	},
+	{
+		"You are a coding agent running in the Codex CLI, a terminal-based coding assistant.",
+		"You are a coding agent running within the Codex CLI, a terminal-based coding assistant.",
+	},
+	{
+		// 反馈句：整句带 Anthropic 仓库链接，上游按整句拦截（只留链接或只留半边均不拦，
+		// 实测需整句同时出现）。give→provide 一词之差即可绕过，语义不变。
+		"To give feedback, users should report the issue at https://github.com/anthropics/claude-code/issues",
+		"To provide feedback, users should report the issue at https://github.com/anthropics/claude-code/issues",
+	},
+
+	// 2026-11-02 停用: (探针 sanitize_workbuddy_test.go 实测结果正常且未被拦截)
+	// {
+	// 	"11128",
+	// 	"11\u2011128"
+	// },
+
+	// 2026-11-02 改动: 关键词替换 , (探针 sanitize_workbuddy_test.go 实测结果正常且未被拦截)
+	{
+		"You are an AI agent powered by DeepSeek Harness",
+		// "You are an AI agent powered by the DeepSeek Harness",
+		"You are an AI agent powered by DSH",
+	},
+
+	// 2026-11-02 停用: (探针 sanitize_workbuddy_test.go 实测结果正常且未被拦截)
+	// {
+	// 	"DeepSeek Harness Web GUI",
+	// 	"DSH Web GUI",
+	// },
+}
+
 // 宽松键名正则：键名内部允许夹任意非字母序列（全角/Unicode 连字符、空格、零宽等），
 // 且 h/e/a/d/e/r 逐字母容忍分隔——header 全形态与 hdr 缩写形态都命中。
 // 注意不能简单写 `hdr`：原始键名 "header" 不含连续 "hdr"，会漏掉键值整段剥离。
@@ -110,55 +159,6 @@ var sanitizeRegexpRewrites = []regexpRewriteStruct{
 		regexp.MustCompile(`(?i)relative\s+paths\s+resolve\s+from\s+the\s+workspace\s+root`),
 		"Relative paths are resolved from the workspace root",
 	},
-}
-
-// sanitizeStringRewrites 字符串匹配改写表
-//
-// 身份句的匹配串**不带结尾标点**（只到 "…for Claude" 为止）：
-// CLI 版这句以句号收尾（"…for Claude."），桌面版（claude-desktop-3p / Agent SDK）
-// 以逗号接后继内容（"…for Claude, running within the Claude Agent SDK."）。
-// 带句号的整句只匹配前者，桌面版会漏网、指纹原样发上游 → 400 code=11128。
-// 去掉结尾标点后两种形态一并覆盖（替换串同样不带标点，让原有标点原样保留）。
-// 注意仍要求 "You are Claude Code, " 前缀，不做更宽的子串替换，
-// 以免误伤 TestExactMatchOnlyVariantNotTouched 所保护的零散文本。
-var sanitizeStringRewrites = [][2]string{
-	{
-		"You are Claude Code, Anthropic's official CLI for Claude",
-		"You are Claude Code, Anthropic's official CLI tool for Claude",
-	},
-	{
-		"Main branch (you will usually use this for PRs)",
-		"Default branch (you will usually use this for PRs)",
-	},
-	{
-		"You are a coding agent running in the Codex CLI, a terminal-based coding assistant.",
-		"You are a coding agent running within the Codex CLI, a terminal-based coding assistant.",
-	},
-	{
-		// 反馈句：整句带 Anthropic 仓库链接，上游按整句拦截（只留链接或只留半边均不拦，
-		// 实测需整句同时出现）。give→provide 一词之差即可绕过，语义不变。
-		"To give feedback, users should report the issue at https://github.com/anthropics/claude-code/issues",
-		"To provide feedback, users should report the issue at https://github.com/anthropics/claude-code/issues",
-	},
-
-	// 2026-11-02 停用: (探针 sanitize_workbuddy_test.go 实测结果正常且未被拦截)
-	// {
-	// 	"11128",
-	// 	"11\u2011128"
-	// },
-
-	// 2026-11-02 改动: 关键词替换 , (探针 sanitize_workbuddy_test.go 实测结果正常且未被拦截)
-	{
-		"You are an AI agent powered by DeepSeek Harness",
-		// "You are an AI agent powered by the DeepSeek Harness",
-		"You are an AI agent powered by DSH",
-	},
-
-	// 2026-11-02 停用: (探针 sanitize_workbuddy_test.go 实测结果正常且未被拦截)
-	// {
-	// 	"DeepSeek Harness Web GUI",
-	// 	"DSH Web GUI",
-	// },
 }
 
 // sanitizeMessagesInPlace 对已解码的 body 做脱敏，返回是否有改动。

@@ -53,6 +53,47 @@ var sanitizeFeatures = []string{
 	"relative paths resolve from the workspace root",
 }
 
+// sanitizeStringRewrites 字符串匹配改写表
+var sanitizeStringRewrites = [][2]string{
+	{
+		"You are Claude Code, Anthropic's official CLI for Claude",
+		"You are Claude Code, Anthropic's official CLI tool for Claude",
+	},
+	{
+		"Main branch (you will usually use this for PRs)",
+		"Default branch (you will usually use this for PRs)",
+	},
+	{
+		"You are a coding agent running in the Codex CLI, a terminal-based coding assistant.",
+		"You are a coding agent running within the Codex CLI, a terminal-based coding assistant.",
+	},
+	{
+		// 反馈句：整句带 Anthropic 仓库链接，上游按整句拦截（只留链接或只留半边均不拦，
+		// 实测需整句同时出现）。give→provide 一词之差即可绕过，语义不变。
+		"To give feedback, users should report the issue at https://github.com/anthropics/claude-code/issues",
+		"To provide feedback, users should report the issue at https://github.com/anthropics/claude-code/issues",
+	},
+
+	// 2026-11-02 停用: (探针 sanitize_workbuddy_test.go 实测结果正常且未被拦截)
+	// {
+	// 	"11128",
+	// 	"11\u2011128"
+	// },
+
+	// 2026-11-02 改动: 关键词替换 , (探针 sanitize_workbuddy_test.go 实测结果正常且未被拦截)
+	{
+		"You are an AI agent powered by DeepSeek Harness",
+		// "You are an AI agent powered by the DeepSeek Harness",
+		"You are an AI agent powered by DSH",
+	},
+
+	// 2026-11-02 停用: (探针 sanitize_workbuddy_test.go 实测结果正常且未被拦截)
+	// {
+	// 	"DeepSeek Harness Web GUI",
+	// 	"DSH Web GUI",
+	// },
+}
+
 // 宽松键名正则：键名内部允许夹任意非字母序列（全角/Unicode 连字符、空格、零宽等），
 // 且 h/e/a/d/e/r 逐字母容忍分隔——header 全形态与 hdr 缩写形态都命中。
 // 注意不能简单写 `hdr`：原始键名 "header" 不含连续 "hdr"，会漏掉键值整段剥离。
@@ -105,47 +146,6 @@ var sanitizeRegexpRewrites = []regexpRewriteStruct{
 		regexp.MustCompile(`(?i)relative\s+paths\s+resolve\s+from\s+the\s+workspace\s+root`),
 		"Relative paths are resolved from the workspace root",
 	},
-}
-
-// sanitizeStringRewrites 字符串匹配改写表
-var sanitizeStringRewrites = [][2]string{
-	{
-		"You are Claude Code, Anthropic's official CLI for Claude",
-		"You are Claude Code, Anthropic's official CLI tool for Claude",
-	},
-	{
-		"Main branch (you will usually use this for PRs)",
-		"Default branch (you will usually use this for PRs)",
-	},
-	{
-		"You are a coding agent running in the Codex CLI, a terminal-based coding assistant.",
-		"You are a coding agent running within the Codex CLI, a terminal-based coding assistant.",
-	},
-	{
-		// 反馈句：整句带 Anthropic 仓库链接，上游按整句拦截（只留链接或只留半边均不拦，
-		// 实测需整句同时出现）。give→provide 一词之差即可绕过，语义不变。
-		"To give feedback, users should report the issue at https://github.com/anthropics/claude-code/issues",
-		"To provide feedback, users should report the issue at https://github.com/anthropics/claude-code/issues",
-	},
-
-	// 2026-11-02 停用: (探针 sanitize_workbuddy_test.go 实测结果正常且未被拦截)
-	// {
-	// 	"11128",
-	// 	"11\u2011128"
-	// },
-
-	// 2026-11-02 改动: 关键词替换 , (探针 sanitize_workbuddy_test.go 实测结果正常且未被拦截)
-	{
-		"You are an AI agent powered by DeepSeek Harness",
-		// "You are an AI agent powered by the DeepSeek Harness",
-		"You are an AI agent powered by DSH",
-	},
-
-	// 2026-11-02 停用: (探针 sanitize_workbuddy_test.go 实测结果正常且未被拦截)
-	// {
-	// 	"DeepSeek Harness Web GUI",
-	// 	"DSH Web GUI",
-	// },
 }
 
 // Messages 已停用，改用 MessagesInPlace。
