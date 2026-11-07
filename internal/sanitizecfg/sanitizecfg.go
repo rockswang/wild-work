@@ -54,7 +54,7 @@ const FileSeed = `# 自定义脱敏规则（可选），改完重启程序生效
 #   - 示例条目已写在各自的 [ ] 里，去掉行首的 # 即可生效，不要重复写字段名。
 #   - 普通内容优先用英文单引号包住（反斜杠原样保留）；改用双引号须自行转义反斜杠，正则请务必用单引号。
 #   - 新增指纹时，把指纹原文同时写进 sanitizeFeatures 和替换列表。
-#   - 触发词不区分大小写。
+#   - 触发词不区分大小写。(另外两个字段仍然区分大小写)
 #   - 国际版填第一段，国内版填第二段；不确定就两段都填。
 #   - enabled = false 只停用本段自定义规则，内置规则照常生效。
 #
@@ -74,7 +74,7 @@ sanitizeFeatures = [
     # 'you are an ai agent powered by deepseek harness',
 ]
 sanitizeStringRewrites = [
-    # ['you are an ai agent powered by deepseek harness', 'you are an ai agent powered by DSH'],
+    # ['You are an AI agent powered by DeepSeek Harness', 'You are an AI agent powered by DSH'],
 ]
 sanitizeRegexpRewrites = [
     # ['(?i)deepseek[\s\-_]*harness', 'DSH'],
@@ -87,7 +87,7 @@ sanitizeFeatures = [
     # 'you are an ai agent powered by deepseek harness',
 ]
 sanitizeStringRewrites = [
-    # ['you are an ai agent powered by deepseek harness', 'you are an ai agent powered by DSH'],
+    # ['You are an AI agent powered by DeepSeek Harness', 'You are an AI agent powered by DSH'],
 ]
 sanitizeRegexpRewrites = [
     # ['(?i)deepseek[\s\-_]*harness', 'DSH'],
