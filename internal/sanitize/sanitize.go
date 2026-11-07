@@ -136,6 +136,47 @@ var stringRewrites = [][2]string{
 	// },
 }
 
+// Messages 已停用，改用 MessagesInPlace。
+/*
+// Messages 脱敏 body 中 messages 的 content / reasoning_content / tool_calls.arguments。
+// body 不可解析时原样返回，绝不阻塞请求（降级语义：宁可发指纹原文也不丢消息）。
+// 只动结构化字段，不做整包替换。
+func Messages(body []byte) []byte {
+	if len(body) == 0 {
+		return body
+	}
+	// 预检：零分配快速路径，普通请求全不中。
+	if !hasFingerprint(toString(body)) {
+		return body
+	}
+	var obj map[string]any
+	if err := json.Unmarshal(body, &obj); err != nil {
+		return body
+	}
+	msgs, _ := obj["messages"].([]any)
+	if len(msgs) == 0 {
+		return body
+	}
+	if cleanMessages(msgs) {
+		if out, err := json.Marshal(obj); err == nil {
+			return out
+		}
+	}
+	return body
+}
+
+func toString(b []byte) string { return string(b) }
+*/
+
+// MessagesInPlace 对已解码的 body 做脱敏，返回是否有改动。
+func MessagesInPlace(obj map[string]any) bool {
+	msgs, _ := obj["messages"].([]any)
+	if len(msgs) == 0 {
+		return false
+	}
+	return cleanMessages(msgs)
+}
+
 // cleanText 单段文本净化：预检不中 → 返回原串（零分配）。
 func cleanText(text string) string {
 	if !hasFingerprint(text) {
@@ -170,35 +211,6 @@ func cleanText(text string) string {
 	}
 	return strings.TrimSpace(text)
 }
-
-// Messages 脱敏 body 中 messages 的 content / reasoning_content / tool_calls.arguments。
-// body 不可解析时原样返回，绝不阻塞请求（降级语义：宁可发指纹原文也不丢消息）。
-// 只动结构化字段，不做整包替换。
-func Messages(body []byte) []byte {
-	if len(body) == 0 {
-		return body
-	}
-	// 预检：零分配快速路径，普通请求全不中。
-	if !hasFingerprint(toString(body)) {
-		return body
-	}
-	var obj map[string]any
-	if err := json.Unmarshal(body, &obj); err != nil {
-		return body
-	}
-	msgs, _ := obj["messages"].([]any)
-	if len(msgs) == 0 {
-		return body
-	}
-	if cleanMessages(msgs) {
-		if out, err := json.Marshal(obj); err == nil {
-			return out
-		}
-	}
-	return body
-}
-
-func toString(b []byte) string { return string(b) }
 
 // hasFingerprint 特征预检：featHeaders 全小写 + ASCII 折叠匹配（上游判据大小写
 // 不敏感），再以 reBareHdr 兜住键名形态。asciiContainsFold 命中与否都零分配，

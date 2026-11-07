@@ -149,6 +149,15 @@ var sanitizeStringRewrites = [][2]string{
 	// },
 }
 
+// sanitizeMessagesInPlace 对已解码的 body 做脱敏，返回是否有改动。
+func sanitizeMessagesInPlace(obj map[string]any) bool {
+	msgs, _ := obj["messages"].([]any)
+	if len(msgs) == 0 {
+		return false
+	}
+	return sanitizeMessages(msgs)
+}
+
 // sanitizeText 单段文本净化：预检不中 → 返回原串（零分配）。
 func sanitizeText(text string) string {
 	if !hasFingerprint(text) {

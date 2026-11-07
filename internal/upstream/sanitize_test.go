@@ -597,11 +597,11 @@ func TestSanitizeTablesParityDirect(t *testing.T) {
 		sanitizeMessages(msgs)
 		upSys, _ := msgs[0].(map[string]any)["content"].(string)
 
-		prod := sanitize.Messages(append([]byte(nil), body...))
 		var obj map[string]any
-		if err := json.Unmarshal(prod, &obj); err != nil {
+		if err := json.Unmarshal(body, &obj); err != nil {
 			t.Fatalf("unmarshal prod: %v", err)
 		}
+		sanitize.MessagesInPlace(obj)
 		prodMsgs, _ := obj["messages"].([]any)
 		prodSys, _ := prodMsgs[0].(map[string]any)["content"].(string)
 		if upSys != prodSys {

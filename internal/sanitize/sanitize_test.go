@@ -99,7 +99,7 @@ func TestTablesByteExactSnapshot(t *testing.T) {
 // WebGUI 段 2026-11-02 探针实测放行（规则停用）——原样保留不得再改。
 func TestDSHFullPromptSanitizedViaMessages(t *testing.T) {
 	in := dshIdentity + ". " + dshWebGUI + ", not the CLI or desktop app. If the user says gui, they mean this GUI."
-	out := string(Messages(bodyWithSystem(t, in)))
+	out := string(messagesInPlace(t, bodyWithSystem(t, in)))
 	if strings.Contains(out, dshIdentity) {
 		t.Fatalf("身份句指纹残留: %q", out)
 	}
@@ -124,7 +124,7 @@ func TestDSHVariantsUntouched(t *testing.T) {
 		"DeepSeek Harness CLI",                              // 含品牌但不是 Web GUI 段
 		"You use the web GUI to do work.",                   // 含 web gui 但不是 DSH 短语
 	} {
-		if got := systemOf(t, Messages(bodyWithSystem(t, in))); got != in {
+		if got := systemOf(t, messagesInPlace(t, bodyWithSystem(t, in))); got != in {
 			t.Errorf("变体被误改: %q -> %q", in, got)
 		}
 	}
@@ -133,7 +133,7 @@ func TestDSHVariantsUntouched(t *testing.T) {
 // 无指纹请求必须零改动（同一切片返回，不重新序列化）。
 func TestNoFingerprintSameBytes(t *testing.T) {
 	body := bodyWithSystem(t, "帮我看下这段日志。")
-	if got := Messages(body); string(got) != string(body) {
+	if got := messagesInPlace(t, body); string(got) != string(body) {
 		t.Errorf("无指纹请求被改写: %s", got)
 	}
 }
@@ -143,7 +143,7 @@ func TestNoFingerprintSameBytes(t *testing.T) {
 func TestACPCrossSentenceFingerprintSanitized(t *testing.T) {
 	in := "Tokens prefixed with @ are paths the user explicitly referenced. " +
 		"Relative paths resolve from the workspace root; anything else is a file: use the read tool."
-	out := string(Messages(bodyWithSystem(t, in)))
+	out := string(messagesInPlace(t, bodyWithSystem(t, in)))
 	if strings.Contains(out, "Relative paths resolve from the workspace root") {
 		t.Fatalf("@ 路径句跨句指纹未被改写: %q", out)
 	}
@@ -151,7 +151,7 @@ func TestACPCrossSentenceFingerprintSanitized(t *testing.T) {
 		t.Errorf("@ 路径句改写缺失: %q", out)
 	}
 	// 前半句单独出现：不是指纹（上游按跨句连写锚定），零改动。
-	if got := systemOf(t, Messages(bodyWithSystem(t, "Tokens prefixed with @ are paths the user explicitly referenced."))); got != "Tokens prefixed with @ are paths the user explicitly referenced." {
+	if got := systemOf(t, messagesInPlace(t, bodyWithSystem(t, "Tokens prefixed with @ are paths the user explicitly referenced."))); got != "Tokens prefixed with @ are paths the user explicitly referenced." {
 		t.Errorf("前半句被误改: %q", got)
 	}
 }
@@ -159,7 +159,7 @@ func TestACPCrossSentenceFingerprintSanitized(t *testing.T) {
 // 上游大小写不敏感（2026-10-28 真机实测：全小写身份句回 400）：预检与改写必须认出全小写变体。
 func TestLowercaseIdentitySanitized(t *testing.T) {
 	in := "you are an ai agent powered by deepseek harness. 你是助手。"
-	out := systemOf(t, Messages(bodyWithSystem(t, in)))
+	out := systemOf(t, messagesInPlace(t, bodyWithSystem(t, in)))
 	if strings.Contains(strings.ToLower(out), "deepseek harness") {
 		t.Fatalf("小写变体未被改写（上游大小写不敏感，仍会 400）: %q", out)
 	}
@@ -174,7 +174,7 @@ func TestLowercaseIdentitySanitized(t *testing.T) {
 func TestRefutedRulesStayInactive(t *testing.T) {
 	in := "You are Claude Code, Anthropic's official CLI for Claude. " +
 		"The upstream returned code=11128; see `x-anthropic-billing-header` for the billing key."
-	out := systemOf(t, Messages(bodyWithSystem(t, in)))
+	out := systemOf(t, messagesInPlace(t, bodyWithSystem(t, in)))
 	if !strings.Contains(out, "code=11128") {
 		t.Errorf("裸 11128 被误改写（判据 2026-11-02 实测已失效）: %q", out)
 	}
@@ -200,7 +200,7 @@ func TestUserMessageUntouched(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if out := Messages(body); string(out) != string(body) {
+	if out := messagesInPlace(t, body); string(out) != string(body) {
 		t.Errorf("user 内容被清洗（上游不扫 user）: %s -> %s", body, out)
 	}
 }
@@ -216,7 +216,7 @@ func TestUserToolFunctionMessagesUntouched(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if out := Messages(body); string(out) != string(body) {
+	if out := messagesInPlace(t, body); string(out) != string(body) {
 		t.Errorf("user/tool/function 内容被清洗（上游不扫这三类角色）: %s -> %s", body, out)
 	}
 }
@@ -230,7 +230,7 @@ func TestUserMessageUntouchedWhileSystemSanitized(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	out := Messages(body)
+	out := messagesInPlace(t, body)
 	var obj map[string]any
 	if err := json.Unmarshal(out, &obj); err != nil {
 		t.Fatal(err)
@@ -281,6 +281,23 @@ func TestSystemHead(t *testing.T) {
 	if got := SystemHead(b2, 2); got != "你好" {
 		t.Errorf("SystemHead rune 截断=%q want %q", got, "你好")
 	}
+}
+
+// messagesInPlace 解码后调用 MessagesInPlace；无改动时返回原 body。
+func messagesInPlace(t *testing.T, body []byte) []byte {
+	t.Helper()
+	var obj map[string]any
+	if err := json.Unmarshal(body, &obj); err != nil {
+		t.Fatalf("unmarshal: %v body=%s", err, body)
+	}
+	if !MessagesInPlace(obj) {
+		return body
+	}
+	out, err := json.Marshal(obj)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	return out
 }
 
 func bodyWithSystem(t *testing.T, sys string) []byte {

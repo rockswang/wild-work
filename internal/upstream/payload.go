@@ -7,18 +7,13 @@ import (
 	"encoding/json"
 	"log"
 	"strings"
-
-	"wild-work/internal/sanitize"
 )
 
 // PrepareBody 单 pass 改写；无法解析时原样返回。
-// 出站脱敏在 sanitize.Messages 内完成（只动 messages 结构化字段，不做整包替换——
-// 上游对 tools 等非 messages 字段的品牌串实测放行，整包兜底已于 2026-11-02 删除）。
 func PrepareBody(src []byte) []byte {
-	return sanitize.Messages(prepareBodyInner(src))
+	return prepareBodyInner(src)
 }
 
-// prepareBodyInner 同 PrepareBody 但不含脱敏（供内部调用）。
 func prepareBodyInner(src []byte) []byte {
 	if len(src) == 0 {
 		return src
@@ -61,11 +56,8 @@ func prepareBodyInner(src []byte) []byte {
 		// 否则 repack 单独生效的结果会被原 slice 覆盖丢失。
 		obj["messages"] = msgs
 	}
-	// 出站脱敏（全改写完成后、Marshal 前）：剥离上游内容审核黑名单指纹
-	// （Claude Code / Codex CLI 注入的模板句、billing header、11128 等，见 sanitize.go）。
-	if msgs, ok := obj["messages"].([]any); ok {
-		sanitizeMessages(msgs)
-	}
+	// 出站脱敏（规则见 sanitize.go）
+	sanitizeMessagesInPlace(obj)
 	out, err := json.Marshal(obj)
 	if err != nil {
 		return src

@@ -78,7 +78,7 @@ func TestSanitizeEmptyToolCallArgumentsParity(t *testing.T) {
 		t.Fatalf("无 tool_calls: %s", body)
 		return ""
 	}
-	viaProd := argsOf(sanitize.Messages(mkBody()))
+	viaProd := argsOf(prodSanitize(t, mkBody()))
 	viaBoth := argsOf(upstream.PrepareBody(mkBody()))
 	if viaProd != viaBoth {
 		t.Errorf("两表对空串 arguments 的处理不一致: prod=%q both=%q", viaProd, viaBoth)
@@ -91,7 +91,7 @@ func TestSanitizeEmptyToolCallArgumentsParity(t *testing.T) {
 func TestSanitizeTablesParity(t *testing.T) {
 	for _, in := range parityPayloads {
 		body := mustBody(t, in)
-		viaProd := systemContent(t, sanitize.Messages(append([]byte(nil), body...)))
+		viaProd := systemContent(t, prodSanitize(t, append([]byte(nil), body...)))
 		viaBoth := systemContent(t, upstream.PrepareBody(append([]byte(nil), body...)))
 		if viaProd != viaBoth {
 			t.Errorf("两表净化结果不一致（漏改一份等于没修，见 R115）\n in=%q\n sanitize=%q\n upstream=%q",
@@ -116,6 +116,23 @@ func mustBody(t *testing.T, sys string) []byte {
 		t.Fatal(err)
 	}
 	return b
+}
+
+// prodSanitize 解码后用生产表脱敏；无改动时返回原 body。
+func prodSanitize(t *testing.T, body []byte) []byte {
+	t.Helper()
+	var obj map[string]any
+	if err := json.Unmarshal(body, &obj); err != nil {
+		t.Fatalf("unmarshal: %v body=%s", err, body)
+	}
+	if !sanitize.MessagesInPlace(obj) {
+		return body
+	}
+	out, err := json.Marshal(obj)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	return out
 }
 
 func systemContent(t *testing.T, body []byte) string {

@@ -65,6 +65,18 @@ func TestPrepareBodyEmptyMessages(t *testing.T) {
 	}
 }
 
+// TestPrepareBodySanitizesSystemFingerprint 脱敏随 PrepareBody 生效（system 指纹）。
+func TestPrepareBodySanitizesSystemFingerprint(t *testing.T) {
+	const fp = "You are an AI agent powered by DeepSeek Harness"
+	out := PrepareBody([]byte(`{"model":"hy3","messages":[{"role":"system","content":"` + fp + `"},{"role":"user","content":"hi"}]}`))
+	if strings.Contains(string(out), "powered by DeepSeek Harness") {
+		t.Fatalf("system 指纹未被净化: %s", out)
+	}
+	if !strings.Contains(string(out), "powered by DSH") {
+		t.Fatalf("身份句改写缺失: %s", out)
+	}
+}
+
 // TestNormalizeToolChoiceFunctionObject 对象形式必须转为字符串名（实测 11101）。
 func TestNormalizeToolChoiceFunctionObject(t *testing.T) {
 	out := PrepareBody([]byte(`{"model":"hy3","tool_choice":{"type":"function","function":{"name":"get_weather"}},"messages":[{"role":"system","content":"s"}]}`))
