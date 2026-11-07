@@ -7,7 +7,6 @@
 package sanitize
 
 import (
-	"log"
 	"regexp"
 
 	"wild-work/internal/sanitizecfg"
@@ -23,7 +22,7 @@ func Load(path string) {
 		return
 	}
 	if !rules.Enabled {
-		log.Printf("%s sanitize.toml 中 enabled = false，跳过本段自定义规则（内置规则照常生效）", sanitizeTomlLogTag)
+		sanitizecfg.Logf(path, "%s sanitize.toml 中 enabled = false，跳过本段自定义规则（内置规则照常生效）", sanitizeTomlLogTag)
 		return
 	}
 
@@ -37,7 +36,7 @@ func Load(path string) {
 	for i, pair := range rules.SanitizeRegexpRewrites {
 		re, err := regexp.Compile(pair[0])
 		if err != nil {
-			log.Printf("%s 自定义正则第 %d 条编译失败，已跳过: %v（pattern=%q）",
+			sanitizecfg.Logf(path, "%s 自定义正则第 %d 条编译失败，已跳过: %v（pattern=%q）",
 				sanitizeTomlLogTag, i+1, err, pair[0])
 			continue
 		}
@@ -46,9 +45,9 @@ func Load(path string) {
 	}
 
 	if n := len(rules.SanitizeFeatures) + len(rules.SanitizeStringRewrites) + addedRegexps; n > 0 {
-		log.Printf("%s 已追加自定义规则共 %d 条：sanitizeFeatures %d 条、sanitizeStringRewrites %d 条、sanitizeRegexpRewrites %d 条",
+		sanitizecfg.Logf(path, "%s 已追加自定义规则共 %d 条：sanitizeFeatures %d 条、sanitizeStringRewrites %d 条、sanitizeRegexpRewrites %d 条",
 			sanitizeTomlLogTag, n, len(rules.SanitizeFeatures), len(rules.SanitizeStringRewrites), addedRegexps)
-		log.Printf("%s 生效下标：sanitizeFeatures=%v、sanitizeStringRewrites=%v、sanitizeRegexpRewrites=%v",
+		sanitizecfg.Logf(path, "%s 生效下标：sanitizeFeatures=%v、sanitizeStringRewrites=%v、sanitizeRegexpRewrites=%v",
 			sanitizeTomlLogTag,
 			indexRange(featureStart, len(rules.SanitizeFeatures)),
 			indexRange(rewriteStart, len(rules.SanitizeStringRewrites)),

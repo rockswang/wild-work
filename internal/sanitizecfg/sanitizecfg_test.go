@@ -254,6 +254,25 @@ sanitizeFeatures = ['  padded feature  ']
 	}
 }
 
+// 解析告警必须写进与 sanitize.toml 同目录的独立 sanitize.log（不进 data/app.log），
+// 否则托盘形态启动时，改坏的配置不会有任何可见反馈。
+func TestLoadWritesSanitizeLog(t *testing.T) {
+	path := writeTOML(t, `
+["internal/sanitize/sanitize.go"]
+sanitizeRegexpRewrites = [[111, 'DSH']]
+`)
+	if _, ok := Load(path, SanitizeSection); !ok {
+		t.Fatal("坏条目应逐条跳过，不影响整份配置")
+	}
+	raw, err := os.ReadFile(filepath.Join(filepath.Dir(path), "sanitize.log"))
+	if err != nil {
+		t.Fatalf("sanitize.log 未生成: %v", err)
+	}
+	if !strings.Contains(string(raw), "原文与替换文都必须是字符串") {
+		t.Fatalf("sanitize.log 未记录坏条目告警: %q", raw)
+	}
+}
+
 // 目录不能被当成可用的配置文件。
 func TestEnsureFileRejectsDirectory(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "sanitize.toml")

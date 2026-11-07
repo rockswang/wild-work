@@ -6,7 +6,8 @@
 // 变量是包私有的，由两包各自的 Load 做 append 接线。
 //
 // 设计约束：只追加、不覆盖、不删除内置规则；不隐式补预检。
-// 文件不存在、读失败、超限或语法错误只记日志并保留内置规则。
+// 文件不存在、读失败、超限或语法错误只记日志并保留内置规则；
+// 这些日志统一写入 sanitize.toml 同目录的 sanitize.log，不混入 data/app.log。
 package sanitizecfg
 
 import (
@@ -15,6 +16,7 @@ import (
 	"io/fs"
 	"log"
 	"os"
+	"path/filepath"
 	"strings"
 	"unicode/utf8"
 
@@ -39,7 +41,25 @@ const (
 	sanitizeTomlLogTag = "[sanitize.toml:config]"
 	// maxLoadFile 启动期读取上限：脱敏规则是几十行的小配置，超过即视为异常。
 	maxLoadFile = 1 << 20
+
+	// sanitizeLogName 日志文件名：固定放在 sanitize.toml 所在目录，
+	// 使用户改坏配置时无论进程以托盘还是控制台形态启动，都能在配置旁看到告警。
+	sanitizeLogName = "sanitize.log"
 )
+
+// Logf 把一条消息写入 sanitize.toml 同目录的 sanitize.log，供本包与
+// internal/sanitize、internal/upstream 的接线层共用；文件打不开时退回 stderr。
+// 配置只在启动期读取一次、日志条数很少，故逐条开关文件，不长期持有句柄。
+func Logf(tomlPath, format string, args ...any) {
+	f, err := os.OpenFile(filepath.Join(filepath.Dir(tomlPath), sanitizeLogName),
+		os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		log.New(os.Stderr, "", log.LstdFlags|log.Lmicroseconds).Printf(format, args...)
+		return
+	}
+	defer f.Close()
+	log.New(f, "", log.LstdFlags|log.Lmicroseconds).Printf(format, args...)
+}
 
 // FileSeed 首次生成的 sanitize.toml 内容：完整模板（含两段的 enabled 与全部字段），
 // 与仓库根的 sanitize.example.toml 保持一致；纯注释也是合法 TOML。
@@ -112,10 +132,10 @@ func EnsureFile(path string) bool {
 		if info.Mode().IsRegular() {
 			return true
 		}
-		log.Printf("检查 %s 失败：不是普通文件", path)
+		Logf(path, "检查 %s 失败：不是普通文件", path)
 		return false
 	} else if !errors.Is(err, fs.ErrNotExist) {
-		log.Printf("检查 %s 失败：%v", path, err)
+		Logf(path, "检查 %s 失败：%v", path, err)
 		return false
 	}
 
@@ -124,18 +144,18 @@ func EnsureFile(path string) bool {
 		if errors.Is(err, fs.ErrExist) { // 并发进程刚创建，或路径是悬空符号链接
 			return isRegularFile(path)
 		}
-		log.Printf("创建 %s 失败：%v", path, err)
+		Logf(path, "创建 %s 失败：%v", path, err)
 		return false
 	}
 	// Go 字符串按源码的 UTF-8 字节原样写入，不经任何转码，落盘即为 UTF-8 且无 BOM。
 	if _, err := f.WriteString(FileSeed); err != nil {
-		log.Printf("写入 %s 失败：%v", path, err)
+		Logf(path, "写入 %s 失败：%v", path, err)
 		_ = f.Close()
 		removePartial(path)
 		return false
 	}
 	if err := f.Close(); err != nil {
-		log.Printf("关闭 %s 失败：%v", path, err)
+		Logf(path, "关闭 %s 失败：%v", path, err)
 		removePartial(path)
 		return false
 	}
@@ -151,7 +171,7 @@ func isRegularFile(path string) bool {
 // removePartial 删除未写成功的文件，避免下次启动把空/半截文件当成可用配置。
 func removePartial(path string) {
 	if err := os.Remove(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
-		log.Printf("清理未写完的 %s 失败：%v", path, err)
+		Logf(path, "清理未写完的 %s 失败：%v", path, err)
 	}
 }
 
@@ -162,7 +182,7 @@ func Load(path, section string) (Rules, bool) {
 	switch section {
 	case SanitizeSection, UpstreamSection:
 	default:
-		log.Printf("%s 未知段 %q，已跳过", sanitizeTomlLogTag, section)
+		Logf(path, "%s 未知段 %q，已跳过", sanitizeTomlLogTag, section)
 		return Rules{}, false
 	}
 	raw, ok := readFile(path)
@@ -174,12 +194,12 @@ func Load(path, section string) (Rules, bool) {
 	// （例如漏写段头的 sanitizeFeatures = [...]）时只忽略该键，不能拖垮整份配置。
 	var sections map[string]any
 	if err := toml.Unmarshal(raw, &sections); err != nil {
-		log.Printf("%s 解析 %s 失败，保留内置规则: %v", sanitizeTomlLogTag, path, err)
+		Logf(path, "%s 解析 %s 失败，保留内置规则: %v", sanitizeTomlLogTag, path, err)
 		return Rules{}, false
 	}
 	for key := range sections {
 		if key != SanitizeSection && key != UpstreamSection {
-			log.Printf("%s %s 出现未知顶层键 %q，已忽略（自定义规则必须写在段内）",
+			Logf(path, "%s %s 出现未知顶层键 %q，已忽略（自定义规则必须写在段内）",
 				sanitizeTomlLogTag, path, key)
 		}
 	}
@@ -190,7 +210,7 @@ func Load(path, section string) (Rules, bool) {
 	}
 	sec, ok := secValue.(map[string]any)
 	if !ok {
-		log.Printf("%s %s 段 %s 不是表，已跳过本段", sanitizeTomlLogTag, path, section)
+		Logf(path, "%s %s 段 %s 不是表，已跳过本段", sanitizeTomlLogTag, path, section)
 		return Rules{Enabled: true}, true
 	}
 
@@ -200,22 +220,22 @@ func Load(path, section string) (Rules, bool) {
 		switch key {
 		case enabled, sanitizeFeatures, sanitizeStringRewrites, sanitizeRegexpRewrites:
 		default:
-			log.Printf("%s %s：未知字段 %q，已忽略（请检查拼写）", sanitizeTomlLogTag, scope, key)
+			Logf(path, "%s %s：未知字段 %q，已忽略（请检查拼写）", sanitizeTomlLogTag, scope, key)
 		}
 	}
 	var rules Rules
 	rules.Enabled = true // 默认加载本段自定义规则
 	if v, ok := sec[enabled]; ok {
-		rules.Enabled = decodeEnabled(v, scope, enabled)
+		rules.Enabled = decodeEnabled(v, path, scope, enabled)
 	}
 	if v, ok := sec[sanitizeFeatures]; ok {
-		rules.SanitizeFeatures = decodeFeatures(v, scope, sanitizeFeatures)
+		rules.SanitizeFeatures = decodeFeatures(v, path, scope, sanitizeFeatures)
 	}
 	if v, ok := sec[sanitizeStringRewrites]; ok {
-		rules.SanitizeStringRewrites = decodeRewrites(v, scope, sanitizeStringRewrites)
+		rules.SanitizeStringRewrites = decodeRewrites(v, path, scope, sanitizeStringRewrites)
 	}
 	if v, ok := sec[sanitizeRegexpRewrites]; ok {
-		rules.SanitizeRegexpRewrites = decodeRewrites(v, scope, sanitizeRegexpRewrites)
+		rules.SanitizeRegexpRewrites = decodeRewrites(v, path, scope, sanitizeRegexpRewrites)
 	}
 	return rules, true
 }
@@ -225,30 +245,30 @@ func readFile(path string) ([]byte, bool) {
 	info, err := os.Stat(path)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
-			log.Printf("%s %s 不存在，跳过自定义规则（内置规则照常生效）", sanitizeTomlLogTag, path)
+			Logf(path, "%s %s 不存在，跳过自定义规则（内置规则照常生效）", sanitizeTomlLogTag, path)
 		} else {
-			log.Printf("%s 读取 %s 失败，保留内置规则: %v", sanitizeTomlLogTag, path, err)
+			Logf(path, "%s 读取 %s 失败，保留内置规则: %v", sanitizeTomlLogTag, path, err)
 		}
 		return nil, false
 	}
 	if info.Size() > maxLoadFile {
-		log.Printf("%s %s 超过 %d 字节，忽略", sanitizeTomlLogTag, path, maxLoadFile)
+		Logf(path, "%s %s 超过 %d 字节，忽略", sanitizeTomlLogTag, path, maxLoadFile)
 		return nil, false
 	}
 	raw, err := os.ReadFile(path)
 	if err != nil {
-		log.Printf("%s 读取 %s 失败，保留内置规则: %v", sanitizeTomlLogTag, path, err)
+		Logf(path, "%s 读取 %s 失败，保留内置规则: %v", sanitizeTomlLogTag, path, err)
 		return nil, false
 	}
 	// Stat 与 ReadFile 之间文件可能增长或被换靶，按实际读到的字节数再判一次。
 	if len(raw) > maxLoadFile {
-		log.Printf("%s %s 实际读取 %d 字节，超过 %d 字节上限，忽略",
+		Logf(path, "%s %s 实际读取 %d 字节，超过 %d 字节上限，忽略",
 			sanitizeTomlLogTag, path, len(raw), maxLoadFile)
 		return nil, false
 	}
 	raw = bytes.TrimPrefix(raw, []byte{0xEF, 0xBB, 0xBF}) // 容忍 UTF-8 BOM
 	if len(bytes.TrimSpace(raw)) == 0 {
-		log.Printf("%s %s 为空，跳过自定义规则（内置规则照常生效）", sanitizeTomlLogTag, path)
+		Logf(path, "%s %s 为空，跳过自定义规则（内置规则照常生效）", sanitizeTomlLogTag, path)
 		return nil, false
 	}
 	return raw, true
@@ -256,10 +276,10 @@ func readFile(path string) ([]byte, bool) {
 
 // decodeEnabled 解析段级开关：字段缺失由调用方按 true 处理，这里只处理
 // 出现但类型不对的形态——非布尔值同样退回默认 true，并记一条日志。
-func decodeEnabled(v any, scope, key string) bool {
+func decodeEnabled(v any, tomlPath, scope, key string) bool {
 	b, ok := v.(bool)
 	if !ok {
-		log.Printf("%s %s：%s 不是布尔值，按默认 true 处理", sanitizeTomlLogTag, scope, key)
+		Logf(tomlPath, "%s %s：%s 不是布尔值，按默认 true 处理", sanitizeTomlLogTag, scope, key)
 		return true
 	}
 	return b
@@ -267,22 +287,22 @@ func decodeEnabled(v any, scope, key string) bool {
 
 // decodeFeatures 逐条解析特征串：非数组、非字符串或去空白后为空的条目跳过，
 // 不影响其余条目。入表前去掉首尾空白，否则 ' x ' 永远匹配不到 'x'。
-func decodeFeatures(v any, scope, key string) []string {
+func decodeFeatures(v any, tomlPath, scope, key string) []string {
 	list, ok := v.([]any)
 	if !ok {
-		log.Printf("%s %s：%s 必须是字符串数组，已跳过", sanitizeTomlLogTag, scope, key)
+		Logf(tomlPath, "%s %s：%s 必须是字符串数组，已跳过", sanitizeTomlLogTag, scope, key)
 		return nil
 	}
 	out := make([]string, 0, len(list))
 	for i, item := range list {
 		s, ok := item.(string)
 		if !ok {
-			log.Printf("%s %s：%s[%d] 不是字符串，已跳过", sanitizeTomlLogTag, scope, key, i)
+			Logf(tomlPath, "%s %s：%s[%d] 不是字符串，已跳过", sanitizeTomlLogTag, scope, key, i)
 			continue
 		}
 		s = strings.TrimSpace(s)
 		if s == "" {
-			log.Printf("%s %s：%s[%d] 去空白后为空，已跳过", sanitizeTomlLogTag, scope, key, i)
+			Logf(tomlPath, "%s %s：%s[%d] 去空白后为空，已跳过", sanitizeTomlLogTag, scope, key, i)
 			continue
 		}
 		out = append(out, s)
@@ -291,37 +311,37 @@ func decodeFeatures(v any, scope, key string) []string {
 }
 
 // decodeRewrites 逐条解析 [原文, 替换文]：形状错误、过短原文、空替换文均跳过。
-func decodeRewrites(v any, scope, key string) [][2]string {
+func decodeRewrites(v any, tomlPath, scope, key string) [][2]string {
 	list, ok := v.([]any)
 	if !ok {
-		log.Printf("%s %s：%s 必须是二元数组的数组，已跳过", sanitizeTomlLogTag, scope, key)
+		Logf(tomlPath, "%s %s：%s 必须是二元数组的数组，已跳过", sanitizeTomlLogTag, scope, key)
 		return nil
 	}
 	out := make([][2]string, 0, len(list))
 	for i, item := range list {
 		pair, ok := item.([]any)
 		if !ok || len(pair) != 2 {
-			log.Printf("%s %s：%s[%d] 需要恰好两项 [原文, 替换文]，已跳过",
+			Logf(tomlPath, "%s %s：%s[%d] 需要恰好两项 [原文, 替换文]，已跳过",
 				sanitizeTomlLogTag, scope, key, i)
 			continue
 		}
 		from, ok1 := pair[0].(string)
 		to, ok2 := pair[1].(string)
 		if !ok1 || !ok2 {
-			log.Printf("%s %s：%s[%d] 原文与替换文都必须是字符串，已跳过",
+			Logf(tomlPath, "%s %s：%s[%d] 原文与替换文都必须是字符串，已跳过",
 				sanitizeTomlLogTag, scope, key, i)
 			continue
 		}
 		// 过短原文会让 strings.ReplaceAll 误伤整段文本（如 "a"），必须拒绝。
 		// 按字符数判断：两个中文字是 6 字节，用 len 会误放行。
 		if utf8.RuneCountInString(from) < 4 || strings.TrimSpace(from) == "" {
-			log.Printf("%s %s：%s[%d] 原文为空或短于 4 字符，已跳过",
+			Logf(tomlPath, "%s %s：%s[%d] 原文为空或短于 4 字符，已跳过",
 				sanitizeTomlLogTag, scope, key, i)
 			continue
 		}
 		// 本层语义是最小改写；空替换文等于整段删除，不允许。
 		if to == "" {
-			log.Printf("%s %s：%s[%d] 替换文为空（本层不做删除），已跳过",
+			Logf(tomlPath, "%s %s：%s[%d] 替换文为空（本层不做删除），已跳过",
 				sanitizeTomlLogTag, scope, key, i)
 			continue
 		}
