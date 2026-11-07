@@ -65,10 +65,10 @@ var sanitizeBareHdrRe = regexp.MustCompile(`(?i)` + hdrKeyRe)
 // sanitizeKvRe 剥离层：尾随裸键值（cc_xxx=...;）循环清理。
 var sanitizeKvRe = regexp.MustCompile(`(?i)\bcc_[a-z0-9_]+=[^;\n]*;?\s*`)
 
-// regexpRewriteStruct 正则改写对：re = 匹配正则，repl = 替换串。
+// regexpRewriteStruct 正则改写对：regexp = 匹配正则，replace = 替换串。
 type regexpRewriteStruct struct {
-	re   *regexp.Regexp
-	repl string
+	regexp  *regexp.Regexp
+	replace string
 }
 
 // sanitizeRegexpRewrites 正则匹配改写表
@@ -189,7 +189,7 @@ func sanitizeText(text string) string {
 	}
 	// 正则匹配改写表: (2026-11-02 改动: 改成遍历该表而非代码写死)
 	for _, rw := range sanitizeRegexpRewrites {
-		text = rw.re.ReplaceAllString(text, rw.repl)
+		text = rw.regexp.ReplaceAllString(text, rw.replace)
 	}
 	if sanitizeHdrRe.MatchString(text) {
 		text = sanitizeHdrRe.ReplaceAllString(text, "")

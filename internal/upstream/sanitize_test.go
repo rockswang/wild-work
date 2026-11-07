@@ -527,7 +527,7 @@ func TestSanitizeLiteralByteExact(t *testing.T) {
 	}
 
 	// 正则改写表的逐字节快照：WebGUI 对已停用（2026-11-02 探针实测放行），只锁 2 对活跃项。
-	wantRegexpRewrites := []struct{ pattern, repl string }{
+	wantRegexpRewrites := []struct{ pattern, replace string }{
 		{`(?i)you\s+are\s+an\s+ai\s+agent\s+powered\s+by\s+(?:the\s+)?deepseek[\s\-_]*harness`,
 			"You are an AI agent powered by DSH"},
 		{`(?i)relative\s+paths\s+resolve\s+from\s+the\s+workspace\s+root`,
@@ -537,11 +537,11 @@ func TestSanitizeLiteralByteExact(t *testing.T) {
 		t.Fatalf("sanitizeRegexpRewrites 对数=%d want %d", len(sanitizeRegexpRewrites), len(wantRegexpRewrites))
 	}
 	for i, want := range wantRegexpRewrites {
-		if got := sanitizeRegexpRewrites[i].re.String(); got != want.pattern {
-			t.Errorf("sanitizeRegexpRewrites[%d].re=%q want %q", i, got, want.pattern)
+		if got := sanitizeRegexpRewrites[i].regexp.String(); got != want.pattern {
+			t.Errorf("sanitizeRegexpRewrites[%d].regexp=%q want %q", i, got, want.pattern)
 		}
-		if got := sanitizeRegexpRewrites[i].repl; got != want.repl {
-			t.Errorf("sanitizeRegexpRewrites[%d].repl=%q want %q", i, got, want.repl)
+		if got := sanitizeRegexpRewrites[i].replace; got != want.replace {
+			t.Errorf("sanitizeRegexpRewrites[%d].replace=%q want %q", i, got, want.replace)
 		}
 	}
 
