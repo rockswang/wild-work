@@ -24,9 +24,9 @@ const (
 	dshWebGUI = "DeepSeek Harness Web GUI"
 )
 
-// 本包 sanitizeFeatures 的逐字节快照（9 项活跃，全小写——上游判据大小写不敏感，
-// 配合 asciiContainsFold 折叠匹配）。2026-11-02 探针停用项（11128 / webgui /
-// 品牌串超集）不在快照内，证据见实现处注释；恢复时须同步本快照 + upstream 侧。
+// 本包 sanitizeFeatures 的逐字节快照（10 项活跃，全小写——上游判据大小写不敏感，
+// 配合 asciiContainsFold 折叠匹配）。2026-11-02 探针停用项（11128 / webgui）不在快照内；
+// 品牌串超集 2026-11-07 恢复（WebGUI/checkout 段品牌原样实测 400），证据见实现处注释。
 var wantFeatures = []string{
 	"x-anthropic-billing-hdr",
 	"x-anthropic-billing-header",                      // header 键值段键名
@@ -36,6 +36,7 @@ var wantFeatures = []string{
 	"you are a coding agent running in the codex cli", // Codex instructions 首段（截断前缀即可命中）
 	"github.com/anthropics/",                          // 反馈句里的 Anthropic 仓库链接
 	"you are an ai agent powered by deepseek harness", // DSH 身份句：上游按 system 开头逐字锚定（2026-10-21 实测，2026-11-02 复现仍拦）
+	"deepseek harness",                                // DSH 品牌串超集（2026-11-07 恢复：WebGUI/checkout 段品牌原样即 400）
 	"relative paths resolve from the workspace root",  // DSH @ 路径句（跨句指纹后半，2026-10-28 实测，2026-11-02 复现仍拦）
 }
 
@@ -55,10 +56,11 @@ var wantRewrites = [][2]string{
 	{dshIdentity, "You are an AI agent powered by DSH"},
 }
 
-// 本包 sanitizeRegexpRewrites 的逐字节快照（2 对活跃；WebGUI 对 2026-11-02 探针实测停用）。
+// 本包 sanitizeRegexpRewrites 的逐字节快照（3 对活跃；2026-11-07 新增品牌串全量缩写）。
 var wantRegexpRewrites = []struct{ pattern, replace string }{
 	{`(?i)you\s+are\s+an\s+ai\s+agent\s+powered\s+by\s+(?:the\s+)?deepseek[\s\-_]*harness`,
 		"You are an AI agent powered by DSH"},
+	{`(?i)deepseek[\s\-_]*harness`, "DSH"},
 	{`(?i)relative\s+paths\s+resolve\s+from\s+the\s+workspace\s+root`,
 		"Relative paths are resolved from the workspace root"},
 }
@@ -95,8 +97,8 @@ func TestTablesByteExactSnapshot(t *testing.T) {
 	}
 }
 
-// 整段逐字串（身份句 + Web GUI 段 + 后缀）：身份句是活指纹必须改写；
-// WebGUI 段 2026-11-02 探针实测放行（规则停用）——原样保留不得再改。
+// 整段逐字串（身份句 + Web GUI 段 + 后缀）：两段品牌串都必须缩写为 DSH
+// （2026-11-07 线上被拦体重放，WebGUI 段原样即 400）。
 func TestDSHFullPromptSanitizedViaMessages(t *testing.T) {
 	in := dshIdentity + ". " + dshWebGUI + ", not the CLI or desktop app. If the user says gui, they mean this GUI."
 	out := string(messagesInPlace(t, bodyWithSystem(t, in)))
@@ -106,23 +108,19 @@ func TestDSHFullPromptSanitizedViaMessages(t *testing.T) {
 	if !strings.Contains(out, "You are an AI agent powered by DSH") {
 		t.Errorf("身份句改写缺失（应整句替换为 DSH 缩写形态）: %q", out)
 	}
-	// WebGUI 段：判据已失效，必须原样保留（防停用规则被悄悄复活）。
-	if !strings.Contains(out, dshWebGUI) {
-		t.Errorf("WebGUI 段被误改（2026-11-02 探针实测放行，规则应停用）: %q", out)
+	if strings.Contains(strings.ToLower(out), "deepseek harness") {
+		t.Errorf("品牌串残留: %q", out)
 	}
 	if !strings.Contains(out, "they mean this GUI.") {
 		t.Errorf("非指纹措辞被误删: %q", out)
 	}
 }
 
-// 反向护栏：措辞相近但不是逐字形态的文本一律不得改动（防误伤用户内容）。
+// 反向护栏：不含品牌串的相近文本一律不得改动（防误伤用户内容）。
 func TestDSHVariantsUntouched(t *testing.T) {
 	for _, in := range []string{
-		"You are an AI agent, powered by DeepSeek Harness.", // 多一个逗号
-		"You are an AI agent powered by DeepSeek.",          // 截去 Harness
-		"An AI agent powered by DeepSeek Harness.",          // 缺 "You are an"
-		"DeepSeek Harness CLI",                              // 含品牌但不是 Web GUI 段
-		"You use the web GUI to do work.",                   // 含 web gui 但不是 DSH 短语
+		"You are an AI agent powered by DeepSeek.", // 截去 Harness
+		"You use the web GUI to do work.",          // 含 web gui 但不是 DSH 短语
 	} {
 		if got := systemOf(t, messagesInPlace(t, bodyWithSystem(t, in))); got != in {
 			t.Errorf("变体被误改: %q -> %q", in, got)

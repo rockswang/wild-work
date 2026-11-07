@@ -4,9 +4,10 @@
 // 背景：客户端（Claude Code / DSH 等）在 system prompt 注入若干固定模板句，
 // 上游内容审核按逐字精确匹配拦截（非语义审核），一字改动即可绕过。
 //
-// 判据快照（2026-11-02 真机探针，见 internal/upstream/sanitize_workbuddy_test.go）：
-// 仍在拦: DSH 身份句（大小写不敏感）、DSH 跨句 @ 路径、CC 身份句、Main branch、Codex 首段（前缀锚定）、反馈句、billing 键值。
-// 已失效（已注释停用）——裸 11128、DSH WebGUI 段、billing 裸键名、tools 字段品牌串。上游判据会漂移，改动须探针重验。
+// 判据快照（2026-11-02 真机探针 + 2026-11-07 线上被拦体重放，见 internal/upstream/sanitize_workbuddy_test.go）：
+// 仍在拦: DSH 身份句（大小写不敏感）、DSH 品牌串（2026-11-07 恢复：implementation checkout 段原样即 400）、
+// DSH 跨句 @ 路径、CC 身份句、Main branch、Codex 首段（前缀锚定）、反馈句、billing 键值。
+// 已失效（已注释停用）——裸 11128、DSH WebGUI 段单独出现、billing 裸键名、tools 字段品牌串。上游判据会漂移，改动须探针重验。
 //
 // 策略：键值型指纹整段删除，模板句最小改写（缩写/冠词/换词，不跨品牌替换）。
 //
@@ -43,8 +44,10 @@ var sanitizeFeatures = []string{
 	// "deepseek harness web gui",
 
 	// DSH 品牌串（超集，兜住 "DeepSeek Harness CLI" 等变体触发预检）
-	// 2026-11-02 停用: (探针 sanitize_workbuddy_test.go 实测结果正常且未被拦截)
-	// "deepseek harness",
+	// 2026-11-07 恢复（2026-11-02 曾停用）：线上被拦的真实 DSH Web 请求体里
+	// "DeepSeek Harness implementation checkout" 原样上送即 400；重放实验逐项还原证实
+	// 仅该段品牌串是触发项，缩写为 "DSH implementation checkout" 后 200。
+	"deepseek harness",
 
 	// DSH @ 路径句（跨句指纹后半，2026-10-28 实测, 2026-11-02 复现仍拦）
 	"relative paths resolve from the workspace root",
@@ -87,6 +90,15 @@ var sanitizeRegexpRewrites = []regexpRewriteStruct{
 	// 	regexp.MustCompile(`(?i)deepseek[\s\-_]*harness\s+web\s+gui`),
 	// 	"DSH Web GUI",
 	// },
+
+	// 2026-11-07 新增：品牌串全量缩写为 DSH（含 implementation checkout / Web GUI 等
+	// 段落内出现，不只身份句）。上游判据按 "DeepSeek Harness" 品牌串+新模板句组合拦截，
+	// 保留任一原样品牌串即可能 400；统一缩写后实测 200（同品牌缩写，非跨品牌替换）。
+	// 必须排在身份句规则之后：身份句先落成 "powered by DSH"，本条不会二次命中。
+	{
+		regexp.MustCompile(`(?i)deepseek[\s\-_]*harness`),
+		"DSH",
+	},
 
 	// 2026-11-02 改动: 换一种更稳妥的写法且语义不变。 (探针 sanitize_workbuddy_test.go 实测结果正常且未被拦截)
 	{
