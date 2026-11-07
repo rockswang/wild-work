@@ -20,7 +20,8 @@ import (
 const (
 	// DSH 身份句：上游对 system 消息**开头**逐字前缀匹配即回 400 code=11-128。
 	dshIdentity = "You are an AI agent powered by DeepSeek Harness"
-	// DSH Web GUI 段：与后半句连成 221 字符整段逐字串才拦，单句放行。
+	// DSH Web GUI 段：2026-10-21 单发实测「与后半句连成 221 字符整段」才拦；
+	// 2026-11-07 线上被拦体重放推翻该结论——品牌串原样即可能 400，生产已统一缩写为 DSH。
 	dshWebGUI = "DeepSeek Harness Web GUI"
 )
 

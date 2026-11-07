@@ -53,7 +53,7 @@ type probeCase struct {
 	want   string // "BLOCKED" | "OK" | "?"（无既有证据）
 }
 
-// probeCases 探针集：sanitize.go 两套表的逐条覆盖（特征 9 项 + 改写产物 + DSH 变体）。
+// probeCases 探针集：sanitize.go 两套表的逐条覆盖（特征 10 项 + 改写产物 + DSH 变体）。
 // 顺序：控制组（账号健康前提）→ 11128 / 11-128 / DSH 各形态 → 其余特征逐条 → 改写产物。
 // 每例 1 次请求；本轮全量覆盖 run（31 例，2s 间隔）。
 var probeCases = []probeCase{

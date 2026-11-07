@@ -98,11 +98,11 @@ func TestSanitizeTablesParity(t *testing.T) {
 				in, viaProd, viaBoth)
 		}
 		// 指纹类输入必须真的被改写，否则说明两表同时失效（而不是「一致」）。
-		// 2026-11-02 判据快照：DSH 身份句是活指纹必须被改写；WebGUI 段实测放行
-		// 可原样保留（规则已停用），不再作为「必须消失」的断言对象。
-		if strings.Contains(in, "You are an AI agent powered by DeepSeek Harness") &&
-			strings.Contains(viaProd, "You are an AI agent powered by DeepSeek Harness") {
-			t.Errorf("改写后仍留身份句指纹: %q", viaProd)
+		// 2026-11-07 判据：DSH 身份句与品牌串都是活指纹，输入含品牌串时
+		// 净化结果里不得再出现原样品牌串（同品牌缩写为 DSH）。
+		if strings.Contains(strings.ToLower(in), "deepseek harness") &&
+			strings.Contains(strings.ToLower(viaProd), "deepseek harness") {
+			t.Errorf("改写后仍留 DSH 品牌串: %q", viaProd)
 		}
 	}
 }

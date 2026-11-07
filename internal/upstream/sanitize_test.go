@@ -25,8 +25,8 @@ const (
 	// DSH 身份句：上游对 system 消息**开头**逐字前缀匹配这一串即回 400 code=11-128
 	// （放 user role、非开头、或写成 "powered by DeepSeek." 都放行，2026-10-21 单发 A/B 实测）。
 	dshIdentity = "You are an AI agent powered by DeepSeek Harness"
-	// DSH Web GUI 段：与后半句（"they mean this GUI."）连成 221 字符整段逐字串；单独出现任一半
-	// 或截短一字符均放行，只有完整串回 400 code=11-128（2026-10-21 单发 A/B 实测）。
+	// DSH Web GUI 段：2026-10-21 单发实测「与后半句连成 221 字符整段」才拦；
+	// 2026-11-07 线上被拦体重放推翻该结论——品牌串原样即可能 400，生产已统一缩写为 DSH。
 	dshWebGUI = "DeepSeek Harness Web GUI"
 )
 
@@ -459,13 +459,14 @@ func TestPrepareBodySanitizesSystem(t *testing.T) {
 	}
 }
 
-// TestSanitizeLiteralByteExact 逐字节快照护栏：把 sanitizeFeatures 9 项 +
-// sanitizeStringRewrites 5 对 + 5 个活跃正则的当前字节值硬编码断言。
+// TestSanitizeLiteralByteExact 逐字节快照护栏：把 sanitizeFeatures 10 项 +
+// sanitizeStringRewrites 5 对 + 3 个活跃正则的当前字节值硬编码断言。
 // 这些字面量是实验逆向出的上游内容审核黑名单（无契约可引用），上游按逐字精确
 // 匹配拦截，一字之差即漏拦（400 code=11128）或误伤。任何未来改动（含看似无害的
 // 统一常量/抽配置、以及复活 2026-11-02 探针停用的规则）都会先红在本测试——必须
 // 先用 sanitize_workbuddy_test.go 探针真机重验，再同步更新本快照（判据快照
-// 2026-11-02：11128 / WebGUI / 裸键名 / tools 品牌串实测放行，规则已注释停用）。
+// 2026-11-02：11128 / 裸键名 / tools 品牌串实测放行，规则仍停用；
+// 2026-11-07：品牌串恢复为活指纹，并新增「品牌串全量缩写为 DSH」正则）。
 func TestSanitizeLiteralByteExact(t *testing.T) {
 	// 全小写表（上游判据大小写不敏感，配合 asciiContainsFold 折叠匹配）。
 	features := []string{
@@ -643,8 +644,9 @@ func TestLowercaseIdentityRewritten(t *testing.T) {
 }
 
 // TestToolsBrandFieldUntouched tools[].function.description 含品牌串实测放行
-// （2026-11-02 补测 case 4），整包兜底 BodyFallback 已删除——PrepareBody 必须
-// 原样保留该字段（防整包替换被重新引入）。
+// （2026-11-02 补测 case 4）；2026-11-07 品牌串在 messages 内恢复为活指纹，
+// 但 tools 字段仍按原判据放行，且整包兜底 BodyFallback 已删除——PrepareBody
+// 必须原样保留该字段（防整包替换被重新引入）。
 func TestToolsBrandFieldUntouched(t *testing.T) {
 	body := []byte(`{"model":"glm-5.2","messages":[{"role":"user","content":"hi"}],` +
 		`"tools":[{"type":"function","function":{"name":"f","description":"Powered by DeepSeek Harness"}}]}`)
