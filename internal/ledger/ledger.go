@@ -90,9 +90,20 @@ func New(dir string) (*Ledger, error) {
 	return l, nil
 }
 
+// monthTagShift 返回 t 往前 back 个月的月份标签（200601）。
+//
+// 必须先把日期归到「当月 1 号」再做月份减法：直接 t.AddDate(0,-back,0) 在月末会溢出——
+// 10 月 31 日减 1 个月得到「9 月 31 日」，Go 规整成 10 月 1 日，标签与本月**完全相同**。
+// 后果：保留期 cutoff 往后跳一格，启动清理时把本该保留的上月分段也删掉
+// （keepMonths=1 时，31 日启动会连当月之外的两个月一起删）。
+func monthTagShift(t time.Time, back int) string {
+	first := time.Date(t.Year(), t.Month(), 1, 0, 0, 0, 0, t.Location())
+	return first.AddDate(0, -back, 0).Format("200601")
+}
+
 // cleanup 删除保留窗口之外的月分段文件（失败静默：锦上添花功能不阻塞启动）。
 func (l *Ledger) cleanup() {
-	cutoff := time.Now().AddDate(0, -keepMonths, 0).Format("200601")
+	cutoff := monthTagShift(time.Now(), keepMonths)
 	ents, err := os.ReadDir(l.dir)
 	if err != nil {
 		return
