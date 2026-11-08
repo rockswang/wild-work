@@ -703,13 +703,19 @@ func (s *Scheduler) refreshForCheckin(a *auth.Auth, uid string) error {
 	if s.refreshOverride != nil { // 仅测试注入
 		return s.refreshOverride(a, uid)
 	}
-	if err := s.cfg.Upstream.RefreshToken(a); err != nil {
+	// 单飞：签到与请求路径/保活/credit 循环并发，同账号并发刷新会互相作废 refresh_token。
+	if err := provider.RefreshOnce(a, func() error {
+		if rerr := s.cfg.Upstream.RefreshToken(a); rerr != nil {
+			return rerr
+		}
+		if serr := a.SaveAtomic(); serr != nil {
+			log.Printf("refresh save failed platform=%s uid=%s err=%v", name, uid, serr)
+			return fmt.Errorf("refresh save: %w", serr)
+		}
+		return nil
+	}); err != nil {
 		log.Printf("refresh failed platform=%s uid=%s err=%v", name, uid, err)
 		return err
-	}
-	if err := a.SaveAtomic(); err != nil {
-		log.Printf("refresh save failed platform=%s uid=%s err=%v", name, uid, err)
-		return fmt.Errorf("refresh save: %w", err)
 	}
 	log.Printf("refresh success platform=%s uid=%s expires_at=%d", name, uid, a.ExpiresAt)
 	return nil
@@ -734,7 +740,17 @@ func (s *Scheduler) RunKeepaliveNow() {
 			continue
 		}
 		log.Printf("refresh start platform=%s uid=%s reason=keepalive", name, st.UID)
-		if err := s.cfg.Upstream.RefreshToken(a); err != nil {
+		// 单飞：保活与请求路径/签到/credit 循环并发，同账号并发刷新会互相作废 refresh_token。
+		// saveErr 由真正执行刷新的那个 goroutine 写入；等待者不执行 fn，其 saveErr 保持 nil
+		// 是正确语义 —— 落盘已由执行者完成。
+		var saveErr error
+		if err := provider.RefreshOnce(a, func() error {
+			if rerr := s.cfg.Upstream.RefreshToken(a); rerr != nil {
+				return rerr
+			}
+			saveErr = a.SaveAtomic()
+			return nil
+		}); err != nil {
 			log.Printf("refresh failed platform=%s uid=%s err=%v", name, st.UID, err)
 			var ue *provider.Error
 			if errors.As(err, &ue) && ue.Kind == provider.ErrSessionDead {
@@ -744,9 +760,9 @@ func (s *Scheduler) RunKeepaliveNow() {
 			s.notifyRefresh(st.UID, false, err.Error())
 			continue
 		}
-		if err := a.SaveAtomic(); err != nil {
-			log.Printf("refresh save failed platform=%s uid=%s err=%v", name, st.UID, err)
-			s.notifyRefresh(st.UID, false, "refresh save: "+err.Error())
+		if saveErr != nil {
+			log.Printf("refresh save failed platform=%s uid=%s err=%v", name, st.UID, saveErr)
+			s.notifyRefresh(st.UID, false, "refresh save: "+saveErr.Error())
 			continue
 		}
 		log.Printf("refresh success platform=%s uid=%s expires_at=%d", name, st.UID, a.ExpiresAt)

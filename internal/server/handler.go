@@ -1047,7 +1047,21 @@ func (h *Handler) serveRotation(
 		tried[acct.UID] = true
 		if acct.NeedsRefresh(h.cfg.RefreshSkew) {
 			log.Printf("refresh start platform=%s uid=%s reason=request", rt.Kind, acct.UID)
-			if err := rt.Upstream.RefreshToken(acct); err != nil {
+			// 单飞 + 内层重检：同一账号的并发请求只放一次刷新出去。这一步最关键 ——
+			// refresh_token 是单会话的，并发刷新必然一方拿到 refresh_conflict，而失败方
+			// 会被下面这个分支推进冷却（默认 10 分钟），表现为「一并发就 503」。
+			if err := provider.RefreshOnce(acct, func() error {
+				if !acct.NeedsRefresh(h.cfg.RefreshSkew) {
+					return nil // 已被并发的另一次刷新刷过
+				}
+				if rerr := rt.Upstream.RefreshToken(acct); rerr != nil {
+					return rerr
+				}
+				if serr := acct.SaveAtomic(); serr != nil {
+					log.Printf("refresh save failed platform=%s uid=%s err=%v", rt.Kind, acct.UID, serr)
+				}
+				return nil
+			}); err != nil {
 				log.Printf("refresh failed platform=%s uid=%s err=%v", rt.Kind, acct.UID, err)
 				lastErr = err
 				h.stickyClear(rt)
@@ -1068,9 +1082,6 @@ func (h *Handler) serveRotation(
 					rt.Pool.Cooldown(acct.UID, pool.CoolErr, h.cfg.ErrCooldown, "refresh: "+err.Error())
 				}
 				continue
-			}
-			if err := acct.SaveAtomic(); err != nil {
-				log.Printf("refresh save failed platform=%s uid=%s err=%v", rt.Kind, acct.UID, err)
 			}
 			log.Printf("refresh success platform=%s uid=%s expires_at=%d", rt.Kind, acct.UID, acct.ExpiresAt)
 		}
