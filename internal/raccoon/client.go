@@ -638,9 +638,16 @@ type pointsBill struct {
 }
 
 // pointsBillsResp /api/web/points/v1/bills 的响应。
-// 分页用 `paging.limit` / `paging.offset`（`type` 之类参数会 400）；服务端另有
-// 返回条数上限（实测 limit=1000 只回 61 条），故本渠道只取最近一页即可——
-// 每日积分 7 天窗口最多 8 笔在效发放。
+//
+// 分页用 `paging.limit`；`paging.offset` 实测无效（offset>0 恒返回空数组），
+// 服务端另有条数上限（limit=1000 仍只回 100 条），所以只有「最近 N 条」这一页可用。
+//
+// `type` 是**筛选枚举**（all / expense / income，缺省 all），传其它值会
+// `400 params_invalid_error: param type invalid`。官方桌面客户端「积分明细」页
+// 的「全部/消耗/收入」三个页签就是靠它切的（见 app.asar 里
+// `getBills({limit, cursor, type})`；客户端走 v2/bills + cursor，v1 同样认该枚举）。
+// 本渠道只关心收入，故固定 `type=income` —— 收入流水每天最多几笔，不会被
+// 消耗流水挤出窗口（详见 fetchDailyGrants）。
 type pointsBillsResp struct {
 	Code int `json:"code"`
 	Data struct {
@@ -714,8 +721,16 @@ func (c *Client) UserResourceDetail(a *auth.Auth) (int64, []provider.ResourceIte
 // 到期日的额度，且消耗按**先进先出**（最老的一笔先被花掉，实测：三账号 10-13
 // 那笔各花掉 100/109/111，其后的发放笔笔满额，到期清零额恰好等于老笔的剩余）。
 // 升序即「消耗顺序」，供 withDailyExpiry 做先进先出拆分。
+//
+// 为什么必须带 `type=income`（2026-11-09 实测，源自官方客户端「收入明细」页签）：
+// 不带筛选时这一页混着「桌面端 LLM 对话消耗」，每笔对话都占一条。实测该账号约
+// 11 条/小时，而服务端只给最近 100 条且 offset 翻不页 ⇒ 当天的发放记录在几小时
+// 后就被挤出窗口，grants 变空，面板「有效期」整列随之消失、今日到期恒为 0
+// （2026-11-01～11-08 每天 22:06 的 checkin 日志 earliest 均为零值即此）。
+// 收入流水每天 1 笔左右（偶有 reward_grant），100 条足够覆盖数月，窗口不会再被
+// 消耗记录冲掉。
 func (c *Client) fetchDailyGrants(a *auth.Auth) ([]dailyGrant, error) {
-	resp, raw, err := c.do(http.MethodGet, c.authBaseURL()+EpPointsBills+"?paging.limit=50&paging.offset=0", a, nil)
+	resp, raw, err := c.do(http.MethodGet, c.authBaseURL()+EpPointsBills+"?paging.limit=100&type=income", a, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -768,9 +783,15 @@ func (c *Client) fetchDailyGrants(a *auth.Auth) ([]dailyGrant, error) {
 //     Expire 取到的是**最早**那一笔的到期时刻，正好是 `ledger.expired()` 需要的判据
 //     （最早一笔过期 ⇒ 本轮余额下降归因 expire 而非 spend）。
 //
-// 余额拆分口径：池子总额（daily_points）按到期升序逐笔扣减（先进先出），最后一笔
-// 承接全部余量 —— 保证拆分后 Remain 之和恒等于 daily_points（`provider.Summarize`
-// 与 pool 快照据此取值，差一分都会让面板与余额对不上）。
+// 余额拆分口径：上游按**先进先出**消耗（最老的一笔先花，见 R107 实测：10-13 那笔
+// 各花 100/109/111、其后发放笔笔满额、到期清零额恰等于老笔剩余），因此池子里剩下的
+// 余额属于**最新的那几笔**。拆分从到期最晚的一笔往前分配，再按到期升序输出 ——
+// Remain 之和恒等于 daily_points（`provider.Summarize` 与 pool 快照据此取值），
+// 输出升序则让账本聚合后取到的 Expire 是最早一笔（`ledger.expired()` 的判据）。
+//
+// ⚠️ 方向不能反：反着填（余额先给最早的一笔）会让「300 分今晚到期」这种假临期
+// 出现在面板上。2026-11-09 实盘：6 笔在效发放共 1800、池子只剩 300，正确归属是
+// 今天那笔（11-15 到期），反着填会算成 11-09 23:59 到期、今日到期虚报 300。
 func withDailyExpiry(items []provider.ResourceItem, grants []dailyGrant) []provider.ResourceItem {
 	idx := -1
 	for i, it := range items {
@@ -784,15 +805,24 @@ func withDailyExpiry(items []provider.ResourceItem, grants []dailyGrant) []provi
 	}
 	daily := items[idx]
 	if daily.Remain <= 0 {
-		return items // 池子已空：没有可拆的余额，也就没有可展示的到期
+		// 池子已空：没有可拆的余额，但仍要给这一条挂上**最早一笔在效发放**的到期
+		// 时刻 —— 否则「有效期」整列会随当日额度花完而消失（面板时有时无的另一半：
+		// 早上领的 300 一到下午用完，表格里就再没有任何带到期日的条目）。
+		// Total/Remain/Name/Key 一律原样（余额汇总与账本差分键都不受影响），只补 ExpireAt。
+		out := make([]provider.ResourceItem, len(items))
+		copy(out, items)
+		out[idx].ExpireAt = grants[0].ExpireAt
+		return out
 	}
 
 	budget := daily.Remain
 	split := make([]provider.ResourceItem, 0, len(grants))
-	for _, g := range grants {
+	// grants 按到期升序，故从后往前 = 从最新的发放往前分配（先进先出的余额归属）。
+	for i := len(grants) - 1; i >= 0 && budget > 0; i-- {
+		g := grants[i]
 		take := g.Points
 		if take > budget {
-			take = budget // 池子不够：本笔已被花掉一部分
+			take = budget // 池子不够：这笔只承接剩下的余额
 		}
 		if take <= 0 {
 			continue
@@ -802,19 +832,20 @@ func withDailyExpiry(items []provider.ResourceItem, grants []dailyGrant) []provi
 			ExpireAt: g.ExpireAt, Usable: daily.Usable,
 		})
 		budget -= take
-		if budget <= 0 {
-			break
-		}
 	}
 	if len(split) == 0 {
 		return items
 	}
 	if budget > 0 {
-		// 上游口径漂移（池子比 bills 里在效发放之和还大）：余量挂到**最新**那一笔上，
-		// 保证 Remain 之和仍等于 daily_points。宁可到期日略偏，也不让余额对不上。
-		last := &split[len(split)-1]
-		last.Total += budget
-		last.Remain += budget
+		// 上游口径漂移（池子比 bills 里在效发放之和还大）：余量挂到**最新**那一笔上
+		// （此刻 split[0] 即最新），保证 Remain 之和仍等于 daily_points。
+		// 宁可到期日略偏，也不让余额对不上。
+		split[0].Total += budget
+		split[0].Remain += budget
+	}
+	// 输出按到期升序：ledger 按 key 聚合取首个非空 Expire，必须是最早那笔。
+	for i, j := 0, len(split)-1; i < j; i, j = i+1, j-1 {
+		split[i], split[j] = split[j], split[i]
 	}
 
 	out := make([]provider.ResourceItem, 0, len(items)-1+len(split))

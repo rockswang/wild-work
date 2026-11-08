@@ -29,8 +29,11 @@ const (
 	// reward_points,topup_points,topup_frozen}}。路径取自 renderer chunk
 	// `75741-*.js` 的 `class extends ... static get baseUrl(){return `${origin}/api/web/points/v1`}`。
 	EpPointsBalance = "/api/web/points/v1/balance"
-	// EpPointsBills 积分流水（分页参数为 `paging.limit` / `paging.offset` 或 `cursor`，
-	// 另需合法 `type`；暂无必要，保留备查）。
+	// EpPointsBills 积分流水。`paging.limit` 有效、`paging.offset` 实测无效
+	// （offset>0 恒空），条数另有上限（limit=1000 仍只回 100 条）。
+	// `type` 是筛选枚举 all / expense / income（缺省 all，其它值 400）——
+	// 官方桌面客户端「积分明细」页的「全部/消耗/收入」页签即靠它切换。
+	// 本渠道取发放记录时固定带 `type=income`，理由见 fetchDailyGrants。
 	EpPointsBills = "/api/web/points/v1/bills"
 
 	// EpOfficeSettingInfo 工作台设置（配额/空间/功能开关），也是**每日积分落账的触发点**。

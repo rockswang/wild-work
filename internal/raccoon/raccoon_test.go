@@ -627,8 +627,13 @@ func TestFetchDailyGrants(t *testing.T) {
 		if r.URL.Path != EpPointsBills {
 			t.Errorf("路径不符：%s（应走 %s）", r.URL.Path, EpPointsBills)
 		}
-		if got := r.URL.Query().Get("paging.limit"); got == "" {
-			t.Error("缺少 paging.limit 分页参数（上游缺省 limit 很小）")
+		if got := r.URL.Query().Get("paging.limit"); got != "100" {
+			t.Errorf("paging.limit = %q, want 100（服务端最多只回 100 条）", got)
+		}
+		// 必须带收入筛选：不带 type 时这一页混着对话消耗，几小时后当天的发放记录
+		// 就被挤出窗口，有效期整列随之消失（2026-11-01～11-08 生产实录）。
+		if got := r.URL.Query().Get("type"); got != "income" {
+			t.Errorf("type = %q, want income（否则发放记录会被消耗流水挤出窗口）", got)
 		}
 		_, _ = w.Write([]byte(billsFixtureJSON()))
 	}))
@@ -674,10 +679,11 @@ func TestFetchDailyGrantsDropsExpired(t *testing.T) {
 	}
 }
 
-// TestWithDailyExpiryFIFO 余额按到期升序逐笔扣减（先进先出），余量挂最后一笔。
+// TestWithDailyExpiryFIFO 余额按先进先出归属：剩下的余额落在**最新**的发放上。
 //
 // 这是本改动的**口径核心**：拆开后 Remain 之和必须恒等于 daily_points，
-// 否则 pool 快照与面板余额对不上（Summarize 直接求和）。
+// 否则 pool 快照与面板余额对不上（Summarize 直接求和）。方向也必须对：
+// 上游按先进先出消耗（最老先花），池子里剩下的余额属于最新的那几笔。
 func TestWithDailyExpiryFIFO(t *testing.T) {
 	items := parsePointsBalanceOnly(pointsBalanceData{
 		AvailablePoints: 1000, DailyPoints: 500, RewardPoints: 500,
@@ -700,21 +706,54 @@ func TestWithDailyExpiryFIFO(t *testing.T) {
 	if sum != 500 {
 		t.Fatalf("拆分后每日额度合计 = %d, want 500（必须等于 daily_points）", sum)
 	}
-	// 500 分池子 + 三笔 300：前两笔满额 300，最后一笔只剩 0 → 不产生空条目。
+	// 500 分池子 + 三笔 300：最老那笔已被花光（剩 0 → 不出条目），
+	// 余下 500 落在最新的两笔上（300@23 + 200@22），输出按到期升序。
 	if len(daily) != 2 {
-		t.Fatalf("拆分条目 = %d, want 2（第三笔余额为 0 应省略）: %+v", len(daily), daily)
+		t.Fatalf("拆分条目 = %d, want 2（最老一笔余额为 0 应省略）: %+v", len(daily), daily)
 	}
-	if daily[0].Remain != 300 || daily[0].ExpireAt != grants[0].ExpireAt {
-		t.Fatalf("第一笔应按最早到期满额: %+v", daily[0])
+	if daily[0].Remain != 200 || daily[0].ExpireAt != grants[1].ExpireAt {
+		t.Fatalf("次新一笔应承接余量 200: %+v", daily[0])
 	}
-	if daily[1].Remain != 200 {
-		t.Fatalf("第二笔应承接余量 200: %+v", daily[1])
+	if daily[1].Remain != 300 || daily[1].ExpireAt != grants[2].ExpireAt {
+		t.Fatalf("最新一笔应满额: %+v", daily[1])
 	}
 
 	// Summarize 必须仍等于可用余额（拆分对 pool 快照零影响）。
 	usable, _ := provider.Summarize(got)
 	if usable != 1000 {
 		t.Fatalf("Summarize 可用 = %d, want 1000", usable)
+	}
+}
+
+// TestWithDailyExpiryRemainderOnNewest 复刻 2026-11-09 实盘：6 笔在效发放共 1800，
+// 池子只剩 300（当天那笔未动）。余额必须归到到期最晚的一笔，否则面板会虚报
+// 「今晚 300 到期」，today_spent/今日到期 一起错。
+func TestWithDailyExpiryRemainderOnNewest(t *testing.T) {
+	items := parsePointsBalanceOnly(pointsBalanceData{AvailablePoints: 11261, DailyPoints: 300, RewardPoints: 10961})
+	grants := []dailyGrant{
+		{Points: 300, ExpireAt: "2026-11-09T23:59:59+08:00"},
+		{Points: 300, ExpireAt: "2026-11-10T23:59:59+08:00"},
+		{Points: 300, ExpireAt: "2026-11-11T23:59:59+08:00"},
+		{Points: 300, ExpireAt: "2026-11-13T23:59:59+08:00"},
+		{Points: 300, ExpireAt: "2026-11-14T23:59:59+08:00"},
+		{Points: 300, ExpireAt: "2026-11-15T23:59:59+08:00"},
+	}
+	got := withDailyExpiry(items, grants)
+
+	var daily []provider.ResourceItem
+	for _, it := range got {
+		if it.Name == dailyItemName {
+			daily = append(daily, it)
+		}
+	}
+	if len(daily) != 1 {
+		t.Fatalf("每日额度条目 = %d, want 1（300 分只够最新一笔）: %+v", len(daily), daily)
+	}
+	if daily[0].Remain != 300 || daily[0].ExpireAt != "2026-11-15T23:59:59+08:00" {
+		t.Fatalf("300 分应归到最新一笔（11-15 到期），实际 %+v", daily[0])
+	}
+	if usable, _ := provider.Summarize(got); usable != 11261 {
+		t.Fatalf("Summarize 可用 = %d, want 11261", usable)
 	}
 }
 
@@ -769,6 +808,49 @@ func TestWithDailyExpirySharesOneLedgerKey(t *testing.T) {
 	}
 	if len(keys) != 1 {
 		t.Fatalf("拆分条目应共用 1 个差分键，实际 %d 个: %v", len(keys), keys)
+	}
+}
+
+// TestWithDailyExpiryEmptyPoolKeepsExpiry 每日额度花完后仍要保留到期时刻。
+//
+// 生产症状（2026-11-01～11-08）：每天 22:06 的 checkin 日志 earliest 恒为零值，
+// 面板「有效期」整列随之消失——上午领的 300 到下午用完，表格里就没有任何条目
+// 带到期日了。这里锁住：余额为 0 也必须带上最早一笔在效发放的到期时刻，
+// 且不得凭空造出余额、不得就地修改入参。
+func TestWithDailyExpiryEmptyPoolKeepsExpiry(t *testing.T) {
+	items := parsePointsBalanceOnly(pointsBalanceData{DailyPoints: 0, RewardPoints: 10961})
+	grants := []dailyGrant{
+		{Points: 300, ExpireAt: "2026-11-15T23:59:59+08:00"},
+		{Points: 300, ExpireAt: "2026-11-16T23:59:59+08:00"},
+	}
+	got := withDailyExpiry(items, grants)
+
+	var daily []provider.ResourceItem
+	for _, it := range got {
+		if it.Name == dailyItemName {
+			daily = append(daily, it)
+		}
+	}
+	if len(daily) != 1 {
+		t.Fatalf("每日额度条目 = %d, want 1（池子为空不拆笔）: %+v", len(daily), daily)
+	}
+	if daily[0].ExpireAt != grants[0].ExpireAt {
+		t.Fatalf("到期时刻 = %q, want 最早一笔 %q", daily[0].ExpireAt, grants[0].ExpireAt)
+	}
+	if daily[0].Remain != 0 || daily[0].Total != 0 {
+		t.Fatalf("不得凭空造余额: %+v", daily[0])
+	}
+	if daily[0].Key != "" {
+		t.Fatalf("差分键不得改变（Key 必须为空）: %+v", daily[0])
+	}
+	// 入参是调用方的切片，改它会污染同一轮里的其它读取（如 pool 快照）。
+	for _, it := range items {
+		if it.ExpireAt != "" {
+			t.Fatalf("不得就地修改入参: %+v", it)
+		}
+	}
+	if usable, _ := provider.Summarize(got); usable != 10961 {
+		t.Fatalf("Summarize 可用 = %d, want 10961（余额口径不变）", usable)
 	}
 }
 
