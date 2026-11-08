@@ -1014,7 +1014,7 @@ func (a *App) needsPollFor(kind string) bool {
 // 不接受也不知道怎么消费用户粘回来的 URL，故一律为 false。
 func manualCallbackKind(kind provider.Kind) bool {
 	switch kind {
-	case provider.CodeArts, provider.LobsterAI, provider.TraeWork, provider.QwenWork, provider.Gemini:
+	case provider.CodeArts, provider.LobsterAI, provider.TraeWork, provider.Gemini:
 		return true
 	}
 	return false
@@ -4276,12 +4276,6 @@ func (a *App) HandleAPI(mux *http.ServeMux) {
 			// 状态在文件（login-state.json）而非内存会话，故把路径传进去；
 			// 凭证解析/写入与自动回调同一条 state 通道，Poll 零分叉。
 			if err := logintrae.SubmitCallbackURL(a.loginStateFP, req.URL); err != nil {
-				apiError(w, http.StatusBadRequest, err.Error())
-				return
-			}
-		case provider.QwenWork:
-			// 内存 pending 通道（与自动回调同一条，见 internal/login_qwenwork SubmitCallbackURL）。
-			if err := loginqwenwork.SubmitCallbackURL(req.URL); err != nil {
 				apiError(w, http.StatusBadRequest, err.Error())
 				return
 			}
