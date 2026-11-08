@@ -523,9 +523,16 @@ func (c *Client) UserResourceDetail(a *auth.Auth) (int64, []provider.ResourceIte
 	}
 	var rec pointsRecord
 	if err := json.Unmarshal(raw, &rec); err != nil {
-		return 0, nil, nil // 结构未知：不报错、不留余额（避免把账号误判为异常）
+		return 0, nil, fmt.Errorf("loomy 额度响应解析失败: %w（body: %s）", err, truncate(string(raw), 200))
 	}
 	remain, items := parsePoints(rec)
+	if len(items) == 0 {
+		// 没有任何可识别的余额字段：**绝不能当 0 返回**。
+		// 上游偶发回 HTTP 200 + 不含余额字段的响应（{"code":0,"data":{}} 一类），
+		// 当 0 返回会让余额一步归零、账本记成 expire，下一轮回正常再记一条 earn。
+		// 真正的 0 余额仍带字段（balance=0/dailyBalance=0），items 非空，不受此拦。
+		return 0, nil, fmt.Errorf("loomy 额度响应缺少余额字段（上游协议可能已变化，body: %s）", truncate(string(raw), 200))
+	}
 	return remain, items, nil
 }
 
