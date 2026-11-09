@@ -351,6 +351,10 @@ func TestClassify(t *testing.T) {
 		// 403 invalid ohmyagent request：签名/协议错误，绝不能当账号问题
 		{http.StatusForbidden, `{"error":"invalid ohmyagent request"}`, provider.ErrPassthrough},
 		{http.StatusUnauthorized, `{"error":"unauthorized"}`, provider.ErrSessionDead},
+		// 402 积分耗尽：上游原文是纯文本中文（2026-11-08 生产实录），
+		// 必须归 hard_credit —— 否则账号不冷却、模型降级链不触发、原文直透。
+		{http.StatusPaymentRequired, `积分已耗尽，调用失败`, provider.ErrHardCredit},
+		{http.StatusPaymentRequired, `{"code":"402","message":"payment required"}`, provider.ErrHardCredit},
 		{http.StatusTooManyRequests, `{}`, provider.ErrSoftRate},
 		{http.StatusBadGateway, `{}`, provider.ErrServer},
 		{http.StatusBadRequest, `{"error":{"code":"model_not_found"}}`, provider.ErrBadParams},

@@ -578,6 +578,14 @@ func (c *Client) Classify(status int, body string) provider.ErrKind {
 	switch {
 	case status == http.StatusUnauthorized:
 		return provider.ErrSessionDead // key 失效：需重新导入客户端凭据
+	case status == http.StatusPaymentRequired:
+		// 402 积分耗尽（上游原文形如「积分已耗尽，调用失败」）。
+		// 必须归 hard_credit，否则掉进下面的 `>= 400 → ErrPassthrough`：
+		//   · 账号不进硬冷却，后续请求继续命中这个已耗尽的号；
+		//   · fallbackWorthy(ErrHardCredit||ErrSoftRate) 判否 ⇒ 模型降级链不触发；
+		//   · 上游原文直透给客户端。
+		// 与 upstream/workbuddyai/raccoon/qwenwork/qodercom/qodercn/zcode 的 402 口径一致。
+		return provider.ErrHardCredit
 	case status == http.StatusTooManyRequests:
 		return provider.ErrSoftRate
 	case status >= 500:
