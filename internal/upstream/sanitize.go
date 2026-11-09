@@ -4,9 +4,10 @@
 // 背景：客户端（Claude Code / DSH 等）在 system prompt 注入若干固定模板句，
 // 上游内容审核按逐字精确匹配拦截（非语义审核），一字改动即可绕过。
 //
-// 判据快照（2026-11-02 真机探针，见 internal/upstream/sanitize_workbuddy_test.go）：
-// 仍在拦: DSH 身份句（大小写不敏感）、DSH 跨句 @ 路径、CC 身份句、Main branch、Codex 首段（前缀锚定）、反馈句、billing 键值。
-// 已失效（已注释停用）——裸 11128、DSH WebGUI 段、billing 裸键名、tools 字段品牌串。上游判据会漂移，改动须探针重验。
+// 判据快照（2026-11-02 真机探针 + 2026-11-07 线上被拦体重放，见 internal/upstream/sanitize_workbuddy_test.go）：
+// 仍在拦: DSH 身份句（大小写不敏感）、DSH 品牌串（2026-11-07 恢复：implementation checkout 段原样即 400）、
+// DSH 跨句 @ 路径、CC 身份句、Main branch、Codex 首段（前缀锚定）、反馈句、billing 键值。
+// 已失效（已注释停用）——裸 11128、DSH WebGUI 段单独出现、billing 裸键名、tools 字段品牌串。上游判据会漂移，改动须探针重验。
 //
 // 策略：键值型指纹整段删除，模板句最小改写（缩写/冠词/换词，不跨品牌替换）。
 //
@@ -14,6 +15,7 @@
 package upstream
 
 import (
+	"encoding/json"
 	"regexp"
 	"strings"
 )
@@ -42,62 +44,13 @@ var sanitizeFeatures = []string{
 	// "deepseek harness web gui",
 
 	// DSH 品牌串（超集，兜住 "DeepSeek Harness CLI" 等变体触发预检）
-	// 2026-11-02 停用: (探针 sanitize_workbuddy_test.go 实测结果正常且未被拦截)
-	// "deepseek harness",
+	// 2026-11-07 恢复（2026-11-02 曾停用）：线上被拦的真实 DSH Web 请求体里
+	// "DeepSeek Harness implementation checkout" 原样上送即 400；重放实验逐项还原证实
+	// 仅该段品牌串是触发项，缩写为 "DSH implementation checkout" 后 200。
+	"deepseek harness",
 
 	// DSH @ 路径句（跨句指纹后半，2026-10-28 实测, 2026-11-02 复现仍拦）
 	"relative paths resolve from the workspace root",
-}
-
-// 宽松键名正则：键名内部允许夹任意非字母序列（全角/Unicode 连字符、空格、零宽等），
-// 且 h/e/a/d/e/r 逐字母容忍分隔——header 全形态与 hdr 缩写形态都命中。
-// 注意不能简单写 `hdr`：原始键名 "header" 不含连续 "hdr"，会漏掉键值整段剥离。
-const hdrKeyRe = `x[^a-z]*anthropic[^a-z]*billing[^a-z]*h[^a-z]*(?:e[^a-z]*)?(?:a[^a-z]*)?d[^a-z]*(?:e[^a-z]*)?r`
-
-// sanitizeHdrRe 剥离层：header 键名即触发（与值无关），整段删除。
-var sanitizeHdrRe = regexp.MustCompile(`(?i)` + hdrKeyRe + `\s*:[^;\n]*;?\s*`)
-
-// sanitizeBareHdrRe 兜底层：裸键名（无冒号无值）同样是指纹——2026-09-13 实验 F4
-// 证实 assistant 消息里反引号引用裸键名即触发 11128，而剥离层要求冒号、对裸串无效。
-// 键值形态被整段删除后，残留的裸键名做最小缩写（header→hdr）：破坏逐字匹配、
-// 语义不变、保留可读性。大小写不敏感，覆盖 X-Anthropic-... 变体。
-//
-// 注意该正则不要求冒号，是 sanitizeHdrRe 的超集——hasFingerprint 与 sanitizeText
-// 中两者并用：先删键值形态（sanitizeHdrRe），再缩写残留裸键名（本正则），
-// 替换语义不同（整段删除 vs 最小缩写），不可合并为一个正则。
-var sanitizeBareHdrRe = regexp.MustCompile(`(?i)` + hdrKeyRe)
-
-// sanitizeKvRe 剥离层：尾随裸键值（cc_xxx=...;）循环清理。
-var sanitizeKvRe = regexp.MustCompile(`(?i)\bcc_[a-z0-9_]+=[^;\n]*;?\s*`)
-
-// regexpRewriteStruct 正则改写对：re = 匹配正则，repl = 替换串。
-type regexpRewriteStruct struct {
-	re   *regexp.Regexp
-	repl string
-}
-
-// sanitizeRegexpRewrites 正则匹配改写表
-// 左 = *regexp.Regexp    右 = 替换串
-var sanitizeRegexpRewrites = []regexpRewriteStruct{
-	// 2026-11-02 重要改动: deepseek harness 替换为 DSH
-	// 不得换成他身份串如 claude code, 因为dsh的系统提示词后文大量出现 DSH 这种关键词，
-	// 此前的错误做法(自称 claude code) 只会让模型自我认知错乱。
-	{
-		regexp.MustCompile(`(?i)you\s+are\s+an\s+ai\s+agent\s+powered\s+by\s+(?:the\s+)?deepseek[\s\-_]*harness`),
-		"You are an AI agent powered by DSH",
-	},
-
-	// 2026-11-02 停用: (探针 sanitize_workbuddy_test.go 实测结果正常且未被拦截)
-	// {
-	// 	regexp.MustCompile(`(?i)deepseek[\s\-_]*harness\s+web\s+gui`),
-	// 	"DSH Web GUI",
-	// },
-
-	// 2026-11-02 改动: 换一种更稳妥的写法且语义不变。 (探针 sanitize_workbuddy_test.go 实测结果正常且未被拦截)
-	{
-		regexp.MustCompile(`(?i)relative\s+paths\s+resolve\s+from\s+the\s+workspace\s+root`),
-		"Relative paths are resolved from the workspace root",
-	},
 }
 
 // sanitizeStringRewrites 字符串匹配改写表
@@ -149,6 +102,75 @@ var sanitizeStringRewrites = [][2]string{
 	// },
 }
 
+// 宽松键名正则：键名内部允许夹任意非字母序列（全角/Unicode 连字符、空格、零宽等），
+// 且 h/e/a/d/e/r 逐字母容忍分隔——header 全形态与 hdr 缩写形态都命中。
+// 注意不能简单写 `hdr`：原始键名 "header" 不含连续 "hdr"，会漏掉键值整段剥离。
+const hdrKeyRe = `x[^a-z]*anthropic[^a-z]*billing[^a-z]*h[^a-z]*(?:e[^a-z]*)?(?:a[^a-z]*)?d[^a-z]*(?:e[^a-z]*)?r`
+
+// sanitizeHdrRe 剥离层：header 键名即触发（与值无关），整段删除。
+var sanitizeHdrRe = regexp.MustCompile(`(?i)` + hdrKeyRe + `\s*:[^;\n]*;?\s*`)
+
+// sanitizeBareHdrRe 兜底层：裸键名（无冒号无值）同样是指纹——2026-09-13 实验 F4
+// 证实 assistant 消息里反引号引用裸键名即触发 11128，而剥离层要求冒号、对裸串无效。
+// 键值形态被整段删除后，残留的裸键名做最小缩写（header→hdr）：破坏逐字匹配、
+// 语义不变、保留可读性。大小写不敏感，覆盖 X-Anthropic-... 变体。
+//
+// 注意该正则不要求冒号，是 sanitizeHdrRe 的超集——hasFingerprint 与 sanitizeText
+// 中两者并用：先删键值形态（sanitizeHdrRe），再缩写残留裸键名（本正则），
+// 替换语义不同（整段删除 vs 最小缩写），不可合并为一个正则。
+var sanitizeBareHdrRe = regexp.MustCompile(`(?i)` + hdrKeyRe)
+
+// sanitizeKvRe 剥离层：尾随裸键值（cc_xxx=...;）循环清理。
+var sanitizeKvRe = regexp.MustCompile(`(?i)\bcc_[a-z0-9_]+=[^;\n]*;?\s*`)
+
+// regexpRewriteStruct 正则改写对：regexp = 匹配正则，replace = 替换串。
+type regexpRewriteStruct struct {
+	regexp  *regexp.Regexp
+	replace string
+}
+
+// sanitizeRegexpRewrites 正则匹配改写表
+// 左 = *regexp.Regexp    右 = 替换串
+var sanitizeRegexpRewrites = []regexpRewriteStruct{
+	// 2026-11-02 重要改动: deepseek harness 替换为 DSH
+	// 不得换成他身份串如 claude code, 因为dsh的系统提示词后文大量出现 DSH 这种关键词，
+	// 此前的错误做法(自称 claude code) 只会让模型自我认知错乱。
+	{
+		regexp.MustCompile(`(?i)you\s+are\s+an\s+ai\s+agent\s+powered\s+by\s+(?:the\s+)?deepseek[\s\-_]*harness`),
+		"You are an AI agent powered by DSH",
+	},
+
+	// 2026-11-02 停用: (探针 sanitize_workbuddy_test.go 实测结果正常且未被拦截)
+	// {
+	// 	regexp.MustCompile(`(?i)deepseek[\s\-_]*harness\s+web\s+gui`),
+	// 	"DSH Web GUI",
+	// },
+
+	// 2026-11-07 新增：品牌串全量缩写为 DSH（含 implementation checkout / Web GUI 等
+	// 段落内出现，不只身份句）。上游判据按 "DeepSeek Harness" 品牌串+新模板句组合拦截，
+	// 保留任一原样品牌串即可能 400；统一缩写后实测 200（同品牌缩写，非跨品牌替换）。
+	// 必须排在身份句规则之后：身份句先落成 "powered by DSH"，本条不会二次命中。
+	{
+		regexp.MustCompile(`(?i)deepseek[\s\-_]*harness`),
+		"DSH",
+	},
+
+	// 2026-11-02 改动: 换一种更稳妥的写法且语义不变。 (探针 sanitize_workbuddy_test.go 实测结果正常且未被拦截)
+	{
+		regexp.MustCompile(`(?i)relative\s+paths\s+resolve\s+from\s+the\s+workspace\s+root`),
+		"Relative paths are resolved from the workspace root",
+	},
+}
+
+// sanitizeMessagesInPlace 对已解码的 body 做脱敏，返回是否有改动。
+func sanitizeMessagesInPlace(obj map[string]any) bool {
+	msgs, _ := obj["messages"].([]any)
+	if len(msgs) == 0 {
+		return false
+	}
+	return sanitizeMessages(msgs)
+}
+
 // sanitizeText 单段文本净化：预检不中 → 返回原串（零分配）。
 func sanitizeText(text string) string {
 	if !hasFingerprint(text) {
@@ -161,7 +183,7 @@ func sanitizeText(text string) string {
 	}
 	// 正则匹配改写表: (2026-11-02 改动: 改成遍历该表而非代码写死)
 	for _, rw := range sanitizeRegexpRewrites {
-		text = rw.re.ReplaceAllString(text, rw.repl)
+		text = rw.regexp.ReplaceAllString(text, rw.replace)
 	}
 	if sanitizeHdrRe.MatchString(text) {
 		text = sanitizeHdrRe.ReplaceAllString(text, "")
@@ -284,6 +306,9 @@ func sanitizeToolCalls(v any) bool {
 			continue
 		}
 		if s := sanitizeText(args); s != args {
+			if !json.Valid([]byte(s)) { // 自定义替换可能破坏字符串化 JSON，不能把坏参数发上游
+				continue
+			}
 			fn["arguments"] = s
 			changed = true
 		}

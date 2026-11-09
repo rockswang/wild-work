@@ -7,6 +7,7 @@ cmd/wild-work/icon.ico
 data/
 auths/
 config.json
+sanitize.toml
 *.log
 
 # 参考项目（第三方克隆，不纳入版本控制）

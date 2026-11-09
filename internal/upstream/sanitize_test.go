@@ -16,6 +16,21 @@ import (
 	"wild-work/internal/sanitize"
 )
 
+func TestCustomRewriteKeepsToolArgumentsJSON(t *testing.T) {
+	origFeatures, origRewrites := sanitizeFeatures, sanitizeStringRewrites
+	t.Cleanup(func() { sanitizeFeatures, sanitizeStringRewrites = origFeatures, origRewrites })
+	sanitizeFeatures = append(append([]string(nil), origFeatures...), "secret")
+	sanitizeStringRewrites = append(append([][2]string(nil), origRewrites...), [2]string{"secret", `"`})
+	obj := map[string]any{"messages": []any{map[string]any{"role": "assistant", "tool_calls": []any{
+		map[string]any{"function": map[string]any{"arguments": `{"q":"secret"}`}},
+	}}}}
+	sanitizeMessagesInPlace(obj)
+	args := obj["messages"].([]any)[0].(map[string]any)["tool_calls"].([]any)[0].(map[string]any)["function"].(map[string]any)["arguments"].(string)
+	if !json.Valid([]byte(args)) || args != `{"q":"secret"}` {
+		t.Fatalf("非法自定义替换必须跳过工具参数: %q", args)
+	}
+}
+
 const (
 	ccIdentity = "You are Claude Code, Anthropic's official CLI for Claude."
 	ccBranch   = "Main branch (you will usually use this for PRs)"
@@ -25,8 +40,8 @@ const (
 	// DSH 身份句：上游对 system 消息**开头**逐字前缀匹配这一串即回 400 code=11-128
 	// （放 user role、非开头、或写成 "powered by DeepSeek." 都放行，2026-10-21 单发 A/B 实测）。
 	dshIdentity = "You are an AI agent powered by DeepSeek Harness"
-	// DSH Web GUI 段：与后半句（"they mean this GUI."）连成 221 字符整段逐字串；单独出现任一半
-	// 或截短一字符均放行，只有完整串回 400 code=11-128（2026-10-21 单发 A/B 实测）。
+	// DSH Web GUI 段：2026-10-21 单发实测「与后半句连成 221 字符整段」才拦；
+	// 2026-11-07 线上被拦体重放推翻该结论——品牌串原样即可能 400，生产已统一缩写为 DSH。
 	dshWebGUI = "DeepSeek Harness Web GUI"
 )
 
@@ -67,16 +82,17 @@ func TestPrepareBodySanitizesDSHSystem(t *testing.T) {
 	}
 }
 
-// Web GUI 段 2026-11-02 探针实测放行（真实段落与短语均 200，规则停用）：
-// 必须原样保留，防停用规则被悄悄复活。
-func TestDSHWebGuiUntouchedAfterProbe(t *testing.T) {
+// Web GUI 段 2026-11-07 复测改判：真实 DSH system 里该段原样即 400（线上被拦体重放），
+// 品牌串须缩写为 DSH。2026-11-02「放行」结论已被推翻。
+func TestDSHWebGuiRewritten(t *testing.T) {
 	in := dshWebGUI + ", not the CLI or desktop app. If the user says GUI, they mean this GUI."
-	if out := sanitizeText(in); out != in {
-		t.Errorf("WebGUI 段被误改（判据 2026-11-02 实测已失效）: %q -> %q", in, out)
+	want := "DSH Web GUI, not the CLI or desktop app. If the user says GUI, they mean this GUI."
+	if out := sanitizeText(in); out != want {
+		t.Errorf("WebGUI 段应缩写为 DSH: %q -> %q (want %q)", in, out, want)
 	}
 }
 
-// 身份句是活指纹必须改写；WebGUI 段判据已失效（2026-11-02 探针）原样保留。
+// 身份句与 WebGUI 段都必须缩写为 DSH（品牌全称从 system 彻底消失）。
 func TestDSHFullPromptBroken(t *testing.T) {
 	in := dshIdentity + ". " + dshWebGUI + ", not the CLI or desktop app. " +
 		"If the user says gui, they mean this GUI."
@@ -87,20 +103,19 @@ func TestDSHFullPromptBroken(t *testing.T) {
 	if !strings.Contains(out, "You are an AI agent powered by DSH") {
 		t.Errorf("身份句改写缺失: %q", out)
 	}
-	// WebGUI 段：判据已失效，必须原样保留（防停用规则被悄悄复活）。
-	if !strings.Contains(out, dshWebGUI) {
-		t.Errorf("WebGUI 段被误改（2026-11-02 探针实测放行）: %q", out)
+	if strings.Contains(strings.ToLower(out), "deepseek harness") {
+		t.Errorf("品牌串残留: %q", out)
 	}
 	if !strings.Contains(out, "they mean this GUI.") {
 		t.Errorf("后半句被误删: %q", out)
 	}
 }
 
-// 反向护栏：不含 Web GUI 段的文本不得被该规则介入（实测只含身份句的 prompt 单发回 200）。
+// 反向护栏：不含 DSH 品牌串的文本不得被该规则介入。
 func TestDSHWebGuiRuleDoesNotLeak(t *testing.T) {
 	for _, in := range []string{
 		"You use the web GUI to do work.", // 含 web gui 但不是 DSH 品牌短语
-		"DeepSeek Harness CLI",            // 含品牌但不是 Web GUI 段
+		"DeepSeek CLI",                    // 含 DeepSeek 但不含 Harness 品牌串
 	} {
 		if out := sanitizeText(in); out != in {
 			t.Errorf("非指纹文本被改动: %q -> %q", in, out)
@@ -108,12 +123,11 @@ func TestDSHWebGuiRuleDoesNotLeak(t *testing.T) {
 	}
 }
 
-// 反向护栏：措辞相近但非逐字形态不得被改写（防误伤）。
+// 反向护栏：措辞相近但无品牌串（"DeepSeek Harness"）的文本不得被改写（防误伤）。
 func TestDSHVariantNotTouched(t *testing.T) {
 	for _, in := range []string{
-		"You are an AI agent, powered by DeepSeek Harness.", // 多一个逗号
-		"You are an AI agent powered by DeepSeek.",          // 截去 Harness
-		"An AI agent powered by DeepSeek Harness.",          // 缺 "You are an"
+		"You are an AI agent powered by DeepSeek.",
+		"You are an AI agent powered by DSH.",
 	} {
 		if out := sanitizeText(in); out != in {
 			t.Errorf("variant wrongly rewritten: %q -> %q", in, out)
@@ -460,13 +474,14 @@ func TestPrepareBodySanitizesSystem(t *testing.T) {
 	}
 }
 
-// TestSanitizeLiteralByteExact 逐字节快照护栏：把 sanitizeFeatures 9 项 +
-// sanitizeStringRewrites 5 对 + 5 个活跃正则的当前字节值硬编码断言。
+// TestSanitizeLiteralByteExact 逐字节快照护栏：把 sanitizeFeatures 10 项 +
+// sanitizeStringRewrites 5 对 + 3 个活跃正则的当前字节值硬编码断言。
 // 这些字面量是实验逆向出的上游内容审核黑名单（无契约可引用），上游按逐字精确
 // 匹配拦截，一字之差即漏拦（400 code=11128）或误伤。任何未来改动（含看似无害的
 // 统一常量/抽配置、以及复活 2026-11-02 探针停用的规则）都会先红在本测试——必须
 // 先用 sanitize_workbuddy_test.go 探针真机重验，再同步更新本快照（判据快照
-// 2026-11-02：11128 / WebGUI / 裸键名 / tools 品牌串实测放行，规则已注释停用）。
+// 2026-11-02：11128 / 裸键名 / tools 品牌串实测放行，规则仍停用；
+// 2026-11-07：品牌串恢复为活指纹，并新增「品牌串全量缩写为 DSH」正则）。
 func TestSanitizeLiteralByteExact(t *testing.T) {
 	// 全小写表（上游判据大小写不敏感，配合 asciiContainsFold 折叠匹配）。
 	features := []string{
@@ -479,6 +494,8 @@ func TestSanitizeLiteralByteExact(t *testing.T) {
 		"github.com/anthropics/",                          // 反馈句里的 Anthropic 仓库链接
 		// DSH 身份句：上游按 system 开头逐字锚定（2026-10-21 实测，2026-11-02 复现仍拦）
 		"you are an ai agent powered by deepseek harness",
+		// DSH 品牌串超集（2026-11-07 恢复：WebGUI/checkout 段品牌原样即 400）
+		"deepseek harness",
 		// DSH @ 路径句（跨句指纹后半，2026-10-28 实测，2026-11-02 复现仍拦）
 		"relative paths resolve from the workspace root",
 	}
@@ -526,10 +543,11 @@ func TestSanitizeLiteralByteExact(t *testing.T) {
 		}
 	}
 
-	// 正则改写表的逐字节快照：WebGUI 对已停用（2026-11-02 探针实测放行），只锁 2 对活跃项。
-	wantRegexpRewrites := []struct{ pattern, repl string }{
+	// 正则改写表的逐字节快照：3 对活跃（2026-11-07 新增品牌串全量缩写）。
+	wantRegexpRewrites := []struct{ pattern, replace string }{
 		{`(?i)you\s+are\s+an\s+ai\s+agent\s+powered\s+by\s+(?:the\s+)?deepseek[\s\-_]*harness`,
 			"You are an AI agent powered by DSH"},
+		{`(?i)deepseek[\s\-_]*harness`, "DSH"},
 		{`(?i)relative\s+paths\s+resolve\s+from\s+the\s+workspace\s+root`,
 			"Relative paths are resolved from the workspace root"},
 	}
@@ -537,11 +555,11 @@ func TestSanitizeLiteralByteExact(t *testing.T) {
 		t.Fatalf("sanitizeRegexpRewrites 对数=%d want %d", len(sanitizeRegexpRewrites), len(wantRegexpRewrites))
 	}
 	for i, want := range wantRegexpRewrites {
-		if got := sanitizeRegexpRewrites[i].re.String(); got != want.pattern {
-			t.Errorf("sanitizeRegexpRewrites[%d].re=%q want %q", i, got, want.pattern)
+		if got := sanitizeRegexpRewrites[i].regexp.String(); got != want.pattern {
+			t.Errorf("sanitizeRegexpRewrites[%d].regexp=%q want %q", i, got, want.pattern)
 		}
-		if got := sanitizeRegexpRewrites[i].repl; got != want.repl {
-			t.Errorf("sanitizeRegexpRewrites[%d].repl=%q want %q", i, got, want.repl)
+		if got := sanitizeRegexpRewrites[i].replace; got != want.replace {
+			t.Errorf("sanitizeRegexpRewrites[%d].replace=%q want %q", i, got, want.replace)
 		}
 	}
 
@@ -597,11 +615,11 @@ func TestSanitizeTablesParityDirect(t *testing.T) {
 		sanitizeMessages(msgs)
 		upSys, _ := msgs[0].(map[string]any)["content"].(string)
 
-		prod := sanitize.Messages(append([]byte(nil), body...))
 		var obj map[string]any
-		if err := json.Unmarshal(prod, &obj); err != nil {
+		if err := json.Unmarshal(body, &obj); err != nil {
 			t.Fatalf("unmarshal prod: %v", err)
 		}
+		sanitize.MessagesInPlace(obj)
 		prodMsgs, _ := obj["messages"].([]any)
 		prodSys, _ := prodMsgs[0].(map[string]any)["content"].(string)
 		if upSys != prodSys {
@@ -641,8 +659,9 @@ func TestLowercaseIdentityRewritten(t *testing.T) {
 }
 
 // TestToolsBrandFieldUntouched tools[].function.description 含品牌串实测放行
-// （2026-11-02 补测 case 4），整包兜底 BodyFallback 已删除——PrepareBody 必须
-// 原样保留该字段（防整包替换被重新引入）。
+// （2026-11-02 补测 case 4）；2026-11-07 品牌串在 messages 内恢复为活指纹，
+// 但 tools 字段仍按原判据放行，且整包兜底 BodyFallback 已删除——PrepareBody
+// 必须原样保留该字段（防整包替换被重新引入）。
 func TestToolsBrandFieldUntouched(t *testing.T) {
 	body := []byte(`{"model":"glm-5.2","messages":[{"role":"user","content":"hi"}],` +
 		`"tools":[{"type":"function","function":{"name":"f","description":"Powered by DeepSeek Harness"}}]}`)
