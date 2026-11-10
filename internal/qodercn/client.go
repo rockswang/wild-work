@@ -29,6 +29,7 @@ type Client struct {
 	HTTP    *http.Client
 	Base    string // 业务 API，默认 https://openapi.qoder.com.cn
 	Gateway string // 推理网关，默认 https://gateway.qoder.com.cn
+	Web     string // 网页端，默认 https://qoder.cn（换票取 cookie 用）
 	// StreamHTTP 用于对话流（SSE）：不设整体 Timeout，避免长回答在超时点被掐断
 	// 且无终止帧（R35 / issue #42）。
 	StreamHTTP *http.Client
@@ -45,6 +46,11 @@ type Client struct {
 	// utMu 保护 uid→userType 实测缓存（登录后/首次请求时填充）。
 	utMu      sync.RWMutex
 	userTypes map[string]string
+
+	// webMu 保护按凭据隔离的网页会话缓存（cookie + 最早到期时刻）。
+	// cookie 可复用；ticket 一次性，用完即废。详见 web_expiry.go。
+	webMu       sync.Mutex
+	webSessions map[string]*webSession
 }
 
 // New 生产默认。Qoder gateway 对 HTTP/2 不友好（stream INTERNAL_ERROR），强制 HTTP/1.1。
@@ -66,8 +72,10 @@ func NewWithTimeout(timeout time.Duration) *Client {
 		IdleTimeout: idle.DefaultTimeout,         // 流中空闲监控兜底（见 internal/idle）
 		Base:        OpenAPIBase,
 		Gateway:     GatewayBase,
+		Web:         WebBase,
 		modelMap:    map[string]string{},
 		userTypes:   map[string]string{},
+		webSessions: map[string]*webSession{},
 	}
 }
 
@@ -402,6 +410,32 @@ func (c *Client) UserResourceDetail(a *auth.Auth) (int64, []provider.ResourceIte
 	}
 	if q.AddOnQuota.Total > 0 || q.AddOnQuota.Remaining > 0 {
 		items = append(items, provider.ResourceItem{Name: "赠送额度", Total: int64(q.AddOnQuota.Total), Used: int64(q.AddOnQuota.Used), Remain: int64(q.AddOnQuota.Remaining), Key: "addOnQuota", Usable: true})
+	}
+
+	// 最早到期时刻：/api/v2/quota/usage 不下发该字段，只能从网页端按笔读取积分包。
+	// 网页链路失败时 earliestWebExpiry 返回零值，下面整段跳过 —— 余额读取照常成功、
+	// ExpireAt 留空，绝不因网页接口挂掉把账号判成异常。
+	if expireAt := webExpireAtString(c.earliestWebExpiry(dt)); expireAt != "" {
+		// EarliestExpire 取全体最早值且跳过 Remain<=0 的条目，填在哪条都一样。
+		// 优先填「赠送额度」（积分包通常落在该池），否则退到第一条有剩余的条目。
+		idx := -1
+		for i := range items {
+			if items[i].Key == "addOnQuota" && items[i].Remain > 0 {
+				idx = i
+				break
+			}
+		}
+		if idx < 0 {
+			for i := range items {
+				if items[i].Usable && items[i].Remain > 0 {
+					idx = i
+					break
+				}
+			}
+		}
+		if idx >= 0 {
+			items[idx].ExpireAt = expireAt
+		}
 	}
 	return total, items, nil
 }

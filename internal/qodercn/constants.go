@@ -16,6 +16,7 @@ import (
 const (
 	OpenAPIBase = "https://openapi.qoder.com.cn" // 业务 API（dt- Bearer，无签名）
 	GatewayBase = "https://gateway.qoder.com.cn" // 推理网关（COSY 签名）
+	WebBase     = "https://qoder.cn"             // 网页端（换票取 cookie 用）
 
 	EpQuotaUsage = "/api/v2/quota/usage"
 	EpCampaigns  = "/sash/api/v1/me/campaigns" // 活动列表+领取（唯一领取路径；daily-check-in 已 DISABLED）
@@ -24,6 +25,11 @@ const (
 	EpDTRefresh  = "/api/v1/deviceToken/refresh"
 	EpModels     = "/algo/api/v2/model/list?Encode=1"
 	EpChat       = "/algo/api/v2/service/pro/sse/agent_chat_generation?FetchKeys=llm_model_result&AgentId=agent_common&Encode=1"
+
+	// 网页端积分包明细链路：quota/usage 不下发到期时间，只能从 big_model_credits 按笔读取。
+	EpWebSessionTransfers = "/api/v1/auth/session-transfers"
+	EpWebCredits          = "/api/v2/me/usages/big_model_credits"
+	WebUsageTarget        = "/account/usage?client=qoder&sourceType=IDE"
 
 	clientUA = "Go-http-client/2.0"
 )
