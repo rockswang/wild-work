@@ -609,6 +609,25 @@ check("无档位声明的模型不显示档位标", (feesHtml.match(/effort-tag/
 check("费率表上游命名空间 ID 直通（cline-free/*）",
   feesHtml.includes('data-mid="cline-free/mimo-v2.6-flash"'), feesHtml.slice(0, 300));
 
+// 双模型行与奇数尾行：手机端 CSS 按 DOM 顺序将四格排成两行，
+// 故必须验证第二模型实际存在，且尾行不输出空模型/空倍率单元格。
+{
+  const panels = [...feesHtml.matchAll(/<div class="fees-panel[^>]*data-feepanel="([^"]+)">([\s\S]*?)<\/table>/g)];
+  const rowsOf = (ch) => [...((panels.find((p) => p[1] === ch)?.[2] || "").split("<tbody>")[1] || "").matchAll(/<tr>([\s\S]*?)<\/tr>/g)]
+    .map((m) => m[1]);
+  const qoderRows = rowsOf("qodercn");
+  const clineRows = rowsOf("cline");
+  check("费率表双模型行保留两组模型与倍率（手机逐行展示）",
+    qoderRows.length === 1 &&
+    ["qodercn/glm-5.3", "qodercn/qwen3.8-flash"].every((id) => qoderRows[0].includes(`data-mid="${id}"`)) &&
+    (qoderRows[0].match(/<td>/g) || []).length === 4 &&
+    qoderRows[0].includes("x0.50") && qoderRows[0].includes("x0.30"), qoderRows[0]);
+  check("费率表奇数尾行仅有真实模型两格（无空数据）",
+    clineRows.length === 1 && (clineRows[0].match(/<td>/g) || []).length === 2 &&
+    clineRows[0].includes('data-mid="cline-free/mimo-v2.6-flash"') && clineRows[0].includes("Free"), clineRows[0]);
+}
+
+
 // ---- 场景 2.75：模型查找面板无档位声明时不显示档位 ----
 T.renderModelSearch("deepseek");
 msHtml = document.getElementById("modelSearchList").innerHTML;
@@ -815,11 +834,10 @@ check("模型费率区块骨架存在（feesBox/btnRefreshFees）", /id="feesBox
 check("模型费率区块在 section 内（不再是独立 section）", /<div class="mtab-body hidden" id="mtabFees">[\s\S]*?<\/section>/.test(html) && !/<!-- 模型列表和费率 -->\s*<section class="panel">/.test(html));
 const css = readFileSync(new URL("../cmd/wild-work/web/style.css", import.meta.url), "utf8");
 check("style.css 含运行统计样式段（#mtabStats .st-plat-row 等）", /#mtabStats \.st-token/.test(css) && /#mtabStats \.st-plat-row/.test(css));
-// ---- Token 多天行单行：不许回退成 wrap（wrap 会在内容长度临界时抖动换行）----
-check("Token 多天行 st-token 单行不折行（nowrap，极窄整条截尾）",
+// 桌面保持单行；手机端允许换行，让每个 Token 数字都可见。
+check("Token 多天行桌面单行、手机折行完整显示",
   /#mtabStats \.st-token \{[^}]*flex-wrap: nowrap/.test(css) &&
-  /#mtabStats \.st-token \{[^}]*overflow: hidden/.test(css) &&
-  !/#mtabStats \.st-token \{[^}]*flex-wrap: wrap/.test(css));
+  /@media \(max-width: 640px\) \{[\s\S]*?#mtabStats \.st-token \{[^}]*flex-wrap: wrap; overflow: visible;/.test(css));
 // 合计行配色：资产紫/琥珀，锁住防漂移
 // 平台表动态列宽：JS 实测经 --plat-cols 应用（固定 px 遇大额数字会截断）
 check("表格剩余宽度由平台列吸收（minmax(实测,1fr)），末列既不吸收也不压缩",
@@ -838,10 +856,6 @@ check("合计行当前积分=资产紫、Token=琥珀（与汇总条同色系）
 check("今日作废列配色为 danger（与今日消耗的 warn 区分）",
   /#mtabStats \.st-plat-expd \{ color: var\(--danger\)/.test(css) &&
   !/#mtabStats \.st-plat-out[^\n]*\.st-plat-expd/.test(css));
-check("Token 多天行 st-token 单行不折行（nowrap，极窄整条截尾）",
-  /#mtabStats \.st-token \{[^}]*flex-wrap: nowrap/.test(css) &&
-  /#mtabStats \.st-token \{[^}]*overflow: hidden/.test(css) &&
-  !/#mtabStats \.st-token \{[^}]*flex-wrap: wrap/.test(css));
 check("更新角标失败警示样式存在（#stUpdated.st-stale）", /#stUpdated\.st-stale/.test(css));
 // ---- 用量 tab 五卡同行（5 列 grid，不换行）----
 check("用量卡片 5 列同行（.usage-cards repeat(5)）", /\.usage-cards \{[^}]*grid-template-columns: repeat\(5, 1fr\)/.test(css));
@@ -1130,7 +1144,9 @@ for (const [label, re] of uniq) {
       /地区限制/.test(html) && /备用上游通道/.test(html)],
     ["顶栏 1fr 下界解除（minmax(0,1fr)）", /\.top-info \{[^}]*grid-template-columns: minmax\(0, 1fr\)/.test(css)],
     ["账号卡片允许收缩（minmax(0,1fr)）", /\.acct-grid \{ grid-template-columns: minmax\(0, 1fr\); \}/.test(css)],
-    ["费率表窄屏隐藏第 3/4 列（4 列布局手机必溢出）", /\.fees table th:nth-child\(n\+3\)[\s\S]*?display: none/.test(css)],
+    ["费率表窄屏四格重排为模型/倍率两列（不隐藏第二模型）",
+      /@media \(max-width: 719px\) \{[\s\S]*?\.fees tbody tr \{\s*display: grid;\s*grid-template-columns: minmax\(0, 1fr\) auto;/.test(css) &&
+      !/\.fees (?:table )?(?:th|td):nth-child\(n\+3\)/.test(css)],
     ["运行统计宽表给横向滚动容器", /#mtabStats \.st-plat,\s*\n\s*#mtabStats \.st-ex-scroll,\s*\n\s*#mtabStats \.st-ab-scroll,\s*\n\s*#mtabStats \.st-scroll \{ max-width: 100%; overflow-x: auto; \}/.test(css)],
     ["触控目标仅在粗指针设备放大（桌面鼠标不吃）", /@media \(hover: none\) and \(pointer: coarse\)/.test(css)],
   ];

@@ -973,6 +973,7 @@ select.input::-ms-expand, .select::-ms-expand { display: none; }
   box-shadow: 0 4px 16px rgba(0,0,0,.15); font-size: 12px;
   box-sizing: border-box;
 }
+.credit-tip .detail-table-wrap { max-width: 100%; overflow-x: auto; }
 .credit-tip .detail-head {
   display: grid; grid-template-columns: 1fr auto 1fr auto; align-items: center;
   gap: 6px; margin-bottom: 6px;
@@ -1071,7 +1072,7 @@ select.input::-ms-expand, .select::-ms-expand { display: none; }
 .table .num { text-align: right; font-variant-numeric: tabular-nums; }
 .table .empty-cell { text-align: center; color: var(--muted); padding: 18px; }
 
-/* 主面板双 Tab（账号管理 / 用量与流水） */
+/* 主面板四个 Tab */
 .main-tabs { display: flex; gap: 2px; border-bottom: 1px solid var(--border); margin-bottom: 14px; }
 .mtab { border: 0; background: transparent; padding: 10px 18px; font-size: 15px; font-weight: 600; cursor: pointer; color: var(--muted); border-bottom: 2px solid transparent; margin-bottom: -1px; }
 .mtab.active { color: var(--primary); border-bottom-color: var(--primary); }
@@ -1463,7 +1464,15 @@ select.input::-ms-expand, .select::-ms-expand { display: none; }
 
 @media (max-width: 640px) {
   #mtabStats .st-plat-row { font-size: 11px; } /* 列宽统一走 --plat-cols 动态实测，窄屏字号缩小后重测自然适配 */
-  #mtabStats .st-ex-row { grid-template-columns: 24px 88px 120px 96px 88px 1fr; font-size: 11px; }
+  #mtabStats .st-ex-row { grid-template-columns: 24px 88px 120px 182px 88px minmax(260px, 1fr); font-size: 11px; }
+  #mtabStats .st-sec-head { flex-wrap: wrap; gap: 4px 8px; }
+  #mtabStats .st-sec-info, #mtabStats #stUpdated { margin-left: 0; padding-left: 0; white-space: normal; overflow: visible; text-overflow: clip; }
+  #mtabStats .st-token { order: 3; flex-basis: 100%; margin-left: 0; padding-left: 0; border-left: 0; flex-wrap: wrap; overflow: visible; }
+  .main-tabs { flex-wrap: wrap; }
+  .help-mark .help-pop { left: 50%; right: auto; transform: translate(-50%, 4px); }
+  .help-mark:hover .help-pop, .help-mark:focus-within .help-pop { transform: translate(-50%, 0); }
+  .mtab { flex: 1 1 auto; padding: 9px 7px; font-size: 13px; }
+  .ucard-value { overflow-wrap: anywhere; }
   #mtabStats .st-ab-row { grid-template-columns: 24px 64px 88px 110px 1fr 76px 64px; font-size: 11px; }
 }
 
@@ -1509,11 +1518,24 @@ select.input::-ms-expand, .select::-ms-expand { display: none; }
   .acct-card .acct-mid { flex-wrap: wrap; }
 }
 
-/* 4) 费率表：4 列（模型|倍率|模型|倍率）必然溢出（390px 下 634px）。
-   实测 700px 时残余 4px、720px 已为 0，故 719px 以下只留「模型|倍率」两列。 */
+/* 4) 费率表：桌面每行两模型（模型|倍率|模型|倍率）；窄屏将同一 tr 的
+   四个单元格按 DOM 顺序排成两行，不隐藏第二个模型。奇数尾行仅有两格。 */
+@media (max-width: 899px) {
+  .fees-panel { max-width: 100%; overflow-x: auto; }
+}
 @media (max-width: 719px) {
-  .fees table th:nth-child(n+3),
-  .fees table td:nth-child(n+3) { display: none; }
+  .fees table, .fees tbody { display: block; width: 100%; }
+  .fees thead { display: none; }
+  .fees tbody tr {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+  .fees tbody td { min-width: 0; border-bottom: 0; }
+  .fees .mcell, .fees .mline { min-width: 0; max-width: 100%; }
+  .fees code.fee-model-copy { overflow-wrap: anywhere; }
+  .fees-tab { max-width: 100%; overflow-wrap: anywhere; }
+  .fees tbody tr { border-bottom: 1px solid var(--border); }
+  .fees tbody td:nth-child(2n) { white-space: nowrap; }
   .fees .full-id { white-space: normal; word-break: break-all; }
 }
 
@@ -1527,12 +1549,17 @@ select.input::-ms-expand, .select::-ms-expand { display: none; }
   #mtabStats .st-ex-scroll,
   #mtabStats .st-ab-scroll,
   #mtabStats .st-scroll { max-width: 100%; overflow-x: auto; }
+  #mtabStats .st-ex-row { min-width: 790px; }
 }
 
 /* 6) 用量与流水：模型表压缩内边距（列内文字可折行），流水行宽度写死会在窄屏被裁。 */
 @media (max-width: 640px) {
   .table th, .table td { padding: 7px 6px; }
   #tabToken { overflow-x: auto; }
+  .modal:not(.modal-wide):not(.modal-xwide) { max-height: 90dvh; overflow-y: auto; }
+  .cm-provider-row, .cm-model-row { overflow-x: auto; scrollbar-width: thin; }
+  .cm-provider-row .cm-info, .cm-model-row .cm-info { flex: 1 0 160px; }
+  .cm-provider-row .cm-btn-edit, .cm-model-row .cm-btn-edit { margin-left: auto; }
   .rline { flex-wrap: wrap; }
   .rline .rtime,
   .rline .ramount,

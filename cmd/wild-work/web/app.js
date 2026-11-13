@@ -638,7 +638,7 @@ function renderCreditDetail() {
   // 关闭按钮：桌面与触屏共用同一入口（触屏没有 hover，只能靠显式按钮）
   html += `<button type="button" class="detail-close" data-close-credit-tip="1" title="关闭" aria-label="关闭积分明细">✕</button>`;
   html += `</div>`;
-  html += `<table class="detail-table"><thead><tr><th>套餐</th><th>总额</th><th>已用</th><th>剩余</th>`;
+  html += `<div class="detail-table-wrap"><table class="detail-table"><thead><tr><th>套餐</th><th>总额</th><th>已用</th><th>剩余</th>`;
   if (hasExpiry) html += `<th>有效期</th>`;
   html += `</tr></thead><tbody>`;
   for (const it of slice) {
@@ -677,7 +677,7 @@ function renderCreditDetail() {
     if (hasExpiry) html += `<td${expCellCls}>${expCell}</td>`;
     html += `</tr>`;
   }
-  html += `</tbody></table>`;
+  html += `</tbody></table></div>`;
 
   // 小计行：只在确实存在不可用额度时才拆开展示，否则保持单数字（不制造无意义的 0）。
   const usable = d.usable_remain || 0;
@@ -1613,7 +1613,7 @@ function renderFees(fees) {
       const m2 = models[i + 1];
       const id1 = modelCellHtml(m1, ch.channel);
       const id2 = modelCellHtml(m2, ch.channel);
-      html += `<tr><td>${id1}</td><td>${rateCell(m1)}</td><td>${id2}</td><td>${rateCell(m2)}</td></tr>`;
+      html += `<tr><td>${id1}</td><td>${rateCell(m1)}</td>${m2 ? `<td>${id2}</td><td>${rateCell(m2)}</td>` : ""}</tr>`;
     }
     html += `</tbody></table>`;
     // 「显示全部模型」开着就把拉取结果列在表格下面（R122）
@@ -4898,7 +4898,7 @@ function renderExpiry(ex) {
       `<span class="st-ex-name" title="${esc(r.uid)}">${esc(r.nickname || r.uid)}</span>` +
       `<span class="st-ex-date">${esc(fmtExpireAt(r.expire_at))}</span>` +
       `<span class="st-ex-days">${esc(dayTxt)}</span>` +
-      `<span class="st-ex-amt">${fmtCredits(r.amount)}分 · 花费 ${fmtCredits(spent)}${expiredTxt}${burn}</span>` +
+      `<span class="st-ex-amt" title="${esc(`${fmtCredits(r.amount)}分 · 花费 ${fmtCredits(spent)}${expiredTxt.replace(/<[^>]*>/g, "")}${burn.replace(/<[^>]*>/g, "")}`)}">${fmtCredits(r.amount)}分 · 花费 ${fmtCredits(spent)}${expiredTxt}${burn}</span>` +
       `</div>`;
   });
   html += `</div>`;
