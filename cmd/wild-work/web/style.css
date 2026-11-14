@@ -231,16 +231,31 @@ body {
    窄屏由 .tbl-scroll 横向滚动展示全部列，**不**隐藏列也不降级回卡片。 */
 .acct-grid.list-mode { display: block; }
 .tbl-scroll { overflow-x: auto; }
-.acct-table { width: 100%; border-collapse: collapse; font-size: 13px; min-width: 560px; }
-.acct-table th, .acct-table td { padding: 7px 10px; border-bottom: 1px solid var(--border); text-align: left; vertical-align: top; }
+.acct-table { width: 100%; border-collapse: collapse; font-size: 13px; min-width: 560px;
+  /* 积分列的「单位带」宽度（闸 2 实测：最宽单位「可用积分」11px 字号 ≈44px，留 4px 间隙）。
+     单位绝对定位在这一带内 ⇒ 不占列宽、不推移数字右缘；表头 .num 也用同一个变量对齐（见下）。 */
+  --acct-cred-unit: 48px; }
+/* 行高：闸 2 实测两行制积分格把行高拉到 45.9px（700px 视口只见 15 行）。
+   收紧上下内边距到 6px + 压两行制行高，密度更贴近表格习惯，不折行、不改结构。 */
+.acct-table th, .acct-table td { padding: 6px 10px; border-bottom: 1px solid var(--border); text-align: left; vertical-align: top; }
+/* 粘性表头（闸 2 实测结论 2026-11-14，Chromium 156 / 真实 21 账号 + 126 行密集快照）：**不实现**。
+   实测数据：文档滚动 300px 时 thead.getBoundingClientRect().top = -300（= 完全跟着滚走）。
+   原因是 .tbl-scroll 的 overflow-x:auto 让它成为最近的 scrollport，而它纵向根本不滚动
+   （scrollHeight == clientHeight）⇒ 对文档滚动不粘。加 position:sticky 后数字一模一样（仍 -300）。
+   两条能让它生效的路都被 spec 闸 2 否决：① 去掉 overflow 会失去「窄屏横滚不裁列」；
+   ② 给 .tbl-scroll 加 max-height 变成表内滚动区（改滚动上下文 = 新交互，只有它才能让 sticky 生效，
+   实测 stuck=true）。结论：维持不粘性，记在验收报告里，不靠「写了样式」冒充生效。 */
 .acct-table thead th { color: var(--muted); font-weight: 500; font-size: 12px; background: var(--card); white-space: nowrap; }
 .acct-table .num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+/* 列名「积分」与数字右缘对齐（闸 2 实测：默认两者差 46px，列名浮在单位上方而非数字上方）。
+   表头带上与数据格相同的单位带 + 自身 10px 内边距 ⇒ 差值为 0。 */
+.acct-table thead th.num { padding-right: calc(var(--acct-cred-unit) + 10px); }
 .acct-table tbody tr:last-child td { border-bottom: 0; }
 .acct-table .cell-uid { font-size: 11px; color: var(--muted); }
 /* 积分格的排版在两视图下各自作用域（卡片走 .acct-card .acct-credits，既有规则勿动）：
    同样的分层——数字 / 单位小字 / 临期红 / 不可用灰 / 待刷新脉动。
    （.credit-na 是全局规则，两视图共用，不再重写。） */
-.acct-table .cell-credits { font-size: 14px; font-weight: 700; white-space: nowrap; }
+.acct-table .cell-credits { font-size: 14px; font-weight: 700; white-space: nowrap; line-height: 1.3; }
 .acct-table .cell-credits span { font-size: 11px; color: var(--muted); font-weight: 400; margin-left: 2px; }
 .acct-table .cell-credits .credit-num { font-size: 14px; font-weight: 700; color: var(--text); margin-left: 0; }
 .acct-table .cell-credits .credit-unusable { font-size: 12px; font-weight: 600; color: var(--muted); }
@@ -249,17 +264,23 @@ body {
 /* 积分列两行制（票 03）：第一行 .cr-main = 数字 + 单位，第二行 .cr-sub = 角标（临期/不可用）。
    数字右缘严格对齐：数字放进 .cr-num-box（右对齐 + 等宽数字），单位小字在其**外**、
    绝对定位进右侧预留带 ⇒ 不占列宽、不推移数字右缘（改卡片不走这套，两视图各自作用域）。 */
-.acct-table .cell-credits .cr-main { position: relative; padding-right: 46px; text-align: right; }
+.acct-table .cell-credits .cr-main { position: relative; padding-right: var(--acct-cred-unit); text-align: right; }
 /* 主文案被 待刷新 / 不适用 占据时无单位，不需要预留带，否则会白白左移。 */
 .acct-table .cell-credits .cr-main:not(.has-unit) { padding-right: 0; }
 .acct-table .cell-credits .cr-num-box { font-variant-numeric: tabular-nums; }
 .acct-table .cell-credits .cr-unit { position: absolute; right: 0; bottom: 0; font-size: 11px; color: var(--muted); font-weight: 400; }
-.acct-table .cell-credits .cr-sub { font-size: 11px; color: var(--muted); font-weight: 400; white-space: nowrap; }
+.acct-table .cell-credits .cr-sub { font-size: 11px; color: var(--muted); font-weight: 400; white-space: nowrap; line-height: 1.3; }
 .acct-table .cell-credits.clickable { cursor: pointer; }
 .acct-table .cell-credits.clickable:hover { text-decoration: underline dotted; text-underline-offset: 3px; }
 .acct-table .cell-credits.clickable:focus-visible { outline: 2px solid var(--primary); outline-offset: -2px; }
 .acct-table .cell-tags { white-space: nowrap; }
-.acct-table .cell-tags .tag { margin-right: 4px; }
+/* 状态徽标封顶：闸 2 实测——126 行快照里「已停用 · 该账号没有可用模型（未…）」这类长徽标宽
+   305px，把状态列撑到 325px、整表 904px > 890px 容器 ⇒ 1440px 视口也冒出横滚条。
+   截断后悬停仍有 title 全文（徽标本身就是 title 载体），列宽不再被最长理由单点决定。 */
+.acct-table .cell-tags .tag {
+  margin-right: 4px; display: inline-block; max-width: 180px;
+  overflow: hidden; text-overflow: ellipsis; vertical-align: bottom;
+}
 .acct-table .cell-ops { white-space: nowrap; text-align: right; }
 .acct-table tr.disabled-row { opacity: .5; background: #f9fafb; }
 .acct-table tr.cooling-row td:first-child { box-shadow: inset 3px 0 0 var(--warn); }
@@ -1578,6 +1599,22 @@ select.input::-ms-expand, .select::-ms-expand { display: none; }
   .acct-card { min-width: 0; }
   .acct-card .acct-top,
   .acct-card .acct-mid { flex-wrap: wrap; }
+}
+/* 3b) 列表视图的窄屏断点卡位（闸 2 实测，2026-11-14）：
+   真实 21 账号快照的内容需求宽度恒为 599px（= 表头/状态/操作三列之和），而
+   679px 视口的内容区只有 ≈594px ⇒ 恰在此断点开始出现横滚（679 视口溢出 5px、500 视口溢出 184px）。
+   所以在**既有 679 断点**（与卡片同一处，不新增第四档）把列表压紧：内边距 10→6、字号降一档、
+   状态列允许折行、徽标上限收紧 ⇒ 需求宽度下降，横滚出现得更晚、出现时也更短。
+   横滚容器与 min-width: 560px 保持不变：窄屏宁可横滚也不裁列、不降级回卡片。 */
+@media (max-width: 679px) {
+  .acct-table { font-size: 12px; --acct-cred-unit: 44px; }
+  .acct-table th, .acct-table td { padding: 5px 6px; }
+  .acct-table thead th { font-size: 11px; }
+  .acct-table thead th.num { padding-right: calc(var(--acct-cred-unit) + 6px); }
+  .acct-table .cell-credits { font-size: 13px; }
+  .acct-table .cell-tags { white-space: normal; }
+  .acct-table .cell-tags .tag { max-width: 150px; }
+  .acct-group-head { padding: 6px; font-size: 12px; }
 }
 
 /* 4) 费率表：桌面每行两模型（模型|倍率|模型|倍率）；窄屏将同一 tr 的
