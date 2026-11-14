@@ -537,6 +537,44 @@ type Upstream interface {
 	Aggregate(r io.Reader, model string) (map[string]any, error)
 }
 
+// ImageRequest 是生图/改图的入参（provider 无关形状，不绑定任何上游协议）。
+type ImageRequest struct {
+	// Model 是**客户端请求的全串**（`<kind>/<上游ID>`，如 `glm/image`、
+	// `modelscope/Qwen/Qwen-Image`）。渠道不得把它记在 Client 上——多账号并发会串号；
+	// 需要渠道差异时只看入参。粘性路由与模型级冷却的 key 也由调用方用它。
+	Model  string
+	Prompt string
+	// Size 是客户端传入的**原始像素串/比例串**（`1024x1024` / `16:9`，可能为空）。
+	// 「已知值校验」在 handler 层做；换算成上游比例的职责在渠道侧。
+	Size string
+	// N 期望张数；<=0 表示按上游默认（上游常固定回多张，由渠道自行截断）。
+	N int
+	// References 是参考图引用（改图用）：http(s) 公网直链，或 `data:image/...;base64,...`
+	// / 裸 base64。拼版与图床托管是调用方的事，渠道只负责把引用交给上游。
+	References []string
+}
+
+// ImageResult 是一张生图产物。
+type ImageResult struct {
+	// URL 产物引用（上游 CDN 直链，会过期：调用方按需立刻下载/转换）。
+	URL string
+	// RevisedPrompt 上游润色后的实际 prompt（部分渠道/路径没有该字段，留空）。
+	RevisedPrompt string
+}
+
+// ImageGenerator 由「会画图」的渠道实现（当前 glm；新增渠道按模型名路由接入）。
+//
+// 契约：
+//   - 入参 `req.Model` 是客户端请求的全串，渠道**不得**内部记忆状态；
+//   - 上游失败必须返回 `*provider.Error`——handler 靠 errors.As 取 Kind 决定惩罚
+//     （ErrSoftRate → 模型级冷却、ErrSessionDead → 标记重登、ErrContentBlocked → 不罚号）。
+//     裸 error 只会落到「非类型化 = 传输层」分支，把限流/内容拦截误记成账号错误；
+//   - 返回张数 <= req.N（req.N<=0 时按上游默认）。
+type ImageGenerator interface {
+	GenerateImage(a *auth.Auth, req ImageRequest) ([]ImageResult, error)
+	EditImage(a *auth.Auth, req ImageRequest) ([]ImageResult, error)
+}
+
 // StreamErrorClassifier 由「流内业务错误可分类」的渠道实现（当前 traework 的
 // SOLOStreamError）。handler 用 errors.As 取值，据此决定账号惩罚——
 // 使 server 层不必 import 具体渠道包。

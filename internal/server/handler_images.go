@@ -1,15 +1,13 @@
 // handler_images.go OpenAI Images 兼容端点：/v1/images/generations + /v1/images/edits。
 //
-// 接入模式参考本项目 /v1/systemone（OpenCode Zen）：专用端点 + 统一 API key 鉴权 +
-// 渠道能力直达。与 systemone 的差异：glm 是多账号渠道，选号/惩罚走 Runtime 池
-// （粘性选号 + 错误分类惩罚 + SessionDead 标记），但不做请求内换号轮转——生图是
-// 同步长操作（4~22s），轮转代价高；惩罚已保证下一次请求自动换号（粘性记录被清）。
+// 渠道**按客户端请求的模型名选择**：`<kind>/<上游ID>` → provider.SplitModelID → Runtime
+// → Upstream 的 provider.ImageGenerator 实现（可选能力）。当前唯一实现是 glm
+// （对外模型名 `glm/image`，也是改造前本端点唯一认识的模型名）。
 //
-// 用户决议（2026-10-20）：
-//   - 本端点**不支持换模型**（model 字段忽略），依赖且仅依赖 glm 渠道；
-//   - 生图产物/会话**不自动删除**（与保活对话的「立即删会话」相反）。
+// 与 chat 的差异：**不做请求内换号轮转**——生图是同步长操作（4~22s），轮转代价高；
+// 惩罚已保证下一次请求自动换号（粘性记录被清）。请求内换号是后续票的范围。
 //
-// 协议要点（[实证] chatglm-cli docs/生图协议与实操.md）：
+// 协议要点（[实证] chatglm-cli docs/生图协议与实操.md，均为 glm 渠道内部细节）：
 //   - 文生图：一次 4 图、12~15s、不扣积分；产物 CDN 直链会过期 ⇒ 默认下载转 b64_json；
 //   - size→ratio 映射必须严格：上游对非法比例**静默降级 1:1**，故本层 400 拒绝；
 //   - 参考图改图：单图硬约束 ⇒ 多图走「客户端拼版（imgutil.BuildRefSheet）+ 图床托管
@@ -19,8 +17,8 @@ package server
 
 import (
 	"encoding/base64"
-	"errors"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -29,14 +27,16 @@ import (
 	"time"
 
 	"wild-work/internal/auth"
-	"wild-work/internal/glm"
 	"wild-work/internal/imgutil"
 	"wild-work/internal/pool"
 	"wild-work/internal/provider"
 )
 
-// ratioBySize OpenAI size → 清言 aspect_ratio 映射（尺寸取自 2026-10-15 实测全集）。
-// 也接受直接传比例（"1:1" 等）。未知值必须 400，不得透传（上游会静默降级 1:1）。
+// ratioBySize OpenAI size → 比例串的**校验表**（尺寸取自 2026-10-15 glm 实测全集）。
+// 也接受直接传比例（"1:1" 等）。未知值必须 400——上游会静默降级 1:1，而客户端无从察觉。
+// 本表只用来判「这个值能不能生图」，像素串原值（req.Size）照旧下传给渠道：
+// 换算是各渠道自己的语义（glm 有自己的同名映射，见 internal/glm/image.go）。
+// 不可删除：未知 size 的 400 是外部契约（TestImagesGenerationsBadSize）。
 var ratioBySize = map[string]string{
 	"1024x1024": "1:1",
 	"864x1152":  "3:4",
@@ -55,12 +55,36 @@ var ratioBySize = map[string]string{
 // 拼版排版是工具侧产物，模型不得复刻。
 const editPromptConstraint = "根据参考图中的人或物，按照下面提示词绘制结果图，不要复刻参考图的排版样式。"
 
+// legacyImageModel 本端点改造前唯一对外模型名。
+// 客户端不带 model（或带了个无 `<kind>/` 前缀的裸名，如 OpenAI 的 `gpt-image-1`）时
+// 回落它——改造前 model 是**忽略**的，不能让老客户端因此变红（既有用例零改动）。
+const legacyImageModel = "glm/image"
+
 // glmRuntime 取 glm 渠道 Runtime；未接入返回 nil。
+// 路由已改走 imageRuntimeFor；本访问器保留给「glm 特判」与既有测试使用。
 func (h *Handler) glmRuntime() *Runtime {
 	return h.cfg.Runtimes[provider.GLM]
 }
 
-// imagesGenerations POST /v1/images/generations —— 文生图（走 glm 画图 agent）。
+// imageRuntimeFor 按客户端请求的模型名选出「会画图」的渠道。
+//
+// 返回 (runtime, 该渠道上游的 ImageGenerator 实现, 解析出的渠道 kind, ok)：
+// ok=false 表示「这个模型名不能用于生图」——未知渠道、渠道不实现 ImageGenerator、
+// 或 runtime 未装配（rt 是否为 nil 由调用方决定报错形态）。
+func (h *Handler) imageRuntimeFor(model string) (rt *Runtime, gen provider.ImageGenerator, kind provider.Kind, ok bool) {
+	k, _, split := provider.SplitModelID(model)
+	if !split {
+		return nil, nil, "", false
+	}
+	rt = h.cfg.Runtimes[k]
+	if rt == nil {
+		return nil, nil, k, false
+	}
+	gen, ok = rt.Upstream.(provider.ImageGenerator)
+	return rt, gen, k, ok
+}
+
+// imagesGenerations POST /v1/images/generations —— 文生图（按 model 选渠道的画图能力）。
 func (h *Handler) imagesGenerations(w http.ResponseWriter, r *http.Request) {
 	body, err := ReadBodyLimited(r)
 	if err != nil {
@@ -88,8 +112,7 @@ func (h *Handler) imagesGenerations(w http.ResponseWriter, r *http.Request) {
 	if ratio == "" {
 		ratio = "1:1"
 	}
-	mapped, ok := ratioBySize[ratio]
-	if !ok {
+	if _, ok := ratioBySize[ratio]; !ok {
 		writeOpenAIError(w, http.StatusBadRequest, "invalid_request",
 			fmt.Sprintf("unsupported size %q: use 1024x1024/864x1152/1152x864/720x1280/1280x720（或 1:1/3:4/4:3/9:16/16:9）", req.Size))
 		return
@@ -103,17 +126,16 @@ func (h *Handler) imagesGenerations(w http.ResponseWriter, r *http.Request) {
 	}
 	wantB64 := req.ResponseFormat != "url" // gpt-image-1 语义：默认 b64_json
 
-	imgsAny, err := h.runGLM(w, r, "glm/image", func(up provider.Upstream, acct *auth.Auth) (any, error) {
-		client, ok := up.(*glm.Client)
-		if !ok {
-			return nil, fmt.Errorf("glm 上游实现类型异常: %T", up)
-		}
-		return client.GenerateImage(acct, req.Prompt, mapped, n)
+	imgs, err := h.runImage(w, r, req.Model, func(gen provider.ImageGenerator, acct *auth.Auth) ([]provider.ImageResult, error) {
+		// Size 传**像素串原值**（不是本层换算出的比例）：各渠道自行取用，
+		// glm 在自己的包里换算，T2 的魔搭直通上游。
+		return gen.GenerateImage(acct, provider.ImageRequest{
+			Model: req.Model, Prompt: req.Prompt, Size: req.Size, N: n,
+		})
 	})
 	if err != nil {
 		return // 响应已写出
 	}
-	imgs := imgsAny.([]glm.GeneratedImage)
 	data := make([]map[string]any, 0, len(imgs))
 	for _, im := range imgs {
 		item := map[string]any{"revised_prompt": im.RevisedPrompt}
@@ -141,7 +163,9 @@ func (h *Handler) imagesGenerations(w http.ResponseWriter, r *http.Request) {
 //   - JSON：{"prompt": "...", "image": ["https://... | data:image/...;base64,..." ...]}。
 func (h *Handler) imagesEdits(w http.ResponseWriter, r *http.Request) {
 	ct := r.Header.Get("Content-Type")
+	var model string
 	var prompt string
+	var sizeStr string // 客户端像素串（glm 忽略：输出比例强制跟随输入图）
 	var raws [][]byte  // 每张参考图的原始字节（URL 形态在 resolve 时特判直传）
 	var outFmt string  // output_format（png 时产物转真 PNG）
 
@@ -150,7 +174,9 @@ func (h *Handler) imagesEdits(w http.ResponseWriter, r *http.Request) {
 			writeOpenAIError(w, http.StatusBadRequest, "invalid_request", "parse multipart: "+err.Error())
 			return
 		}
+		model = r.FormValue("model")
 		prompt = r.FormValue("prompt")
+		sizeStr = r.FormValue("size")
 		// OpenAI 官方 SDK 用 image 字段；gpt-image 系适配器（如 whalechan）用 image[]。
 		// 两者都收，文件在前（顺序即参考图顺序）。
 		for _, key := range []string{"image", "image[]"} {
@@ -179,7 +205,9 @@ func (h *Handler) imagesEdits(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		var req struct {
+			Model        string   `json:"model"`
 			Prompt       string   `json:"prompt"`
+			Size         string   `json:"size"`
 			Image        []string `json:"image"`
 			OutputFormat string   `json:"output_format"`
 		}
@@ -187,7 +215,9 @@ func (h *Handler) imagesEdits(w http.ResponseWriter, r *http.Request) {
 			writeOpenAIError(w, http.StatusBadRequest, "invalid_request", "invalid JSON body: "+err.Error())
 			return
 		}
+		model = req.Model
 		prompt = req.Prompt
+		sizeStr = req.Size
 		outFmt = req.OutputFormat
 		for _, s := range req.Image {
 			raws = append(raws, []byte(strings.TrimSpace(s)))
@@ -216,17 +246,19 @@ func (h *Handler) imagesEdits(w http.ResponseWriter, r *http.Request) {
 		outPrompt = fmt.Sprintf("参考图中共有 %d 个以 reference1..%d 从左到右标注的单元，按序号对应下面提示词中的对象。", len(raws), len(raws)) + outPrompt
 	}
 
-	imgURL, err := h.runGLM(w, r, "glm/image", func(up provider.Upstream, acct *auth.Auth) (any, error) {
-		client, ok := up.(*glm.Client)
-		if !ok {
-			return nil, fmt.Errorf("glm 上游实现类型异常: %T", up)
-		}
-		return client.EditImage(acct, refURL, outPrompt)
+	results, err := h.runImage(w, r, model, func(gen provider.ImageGenerator, acct *auth.Auth) ([]provider.ImageResult, error) {
+		return gen.EditImage(acct, provider.ImageRequest{
+			Model: model, Prompt: outPrompt, Size: sizeStr, N: 1, References: []string{refURL},
+		})
 	})
 	if err != nil {
 		return // 响应已写出
 	}
-	url := imgURL.(string)
+	if len(results) == 0 || strings.TrimSpace(results[0].URL) == "" {
+		writeOpenAIError(w, http.StatusBadGateway, "upstream_error", "上游未返回产物图")
+		return
+	}
+	url := results[0].URL
 	item := map[string]any{"url": url}
 	if b64, err := fetchImageB64(imageCDNURL(url, outFmt)); err == nil {
 		item = map[string]any{"b64_json": b64}
@@ -269,7 +301,7 @@ func resolveReferenceURL(raws [][]byte) (string, error) {
 			}
 		}
 	}
-var sheet []byte
+	var sheet []byte
 	var err error
 	if len(images) == 1 {
 		// 单图（base64/dataURI/webp 等形态）：统一转 JPEG 后托管——
@@ -291,27 +323,49 @@ var sheet []byte
 	return url, nil
 }
 
-// runGLM 选 glm 账号执行生图调用，统一错误分类与惩罚。
+// runImage 按模型名选渠道 + 选号执行生图调用，统一错误分类与惩罚。
 //
 // 与 chat 的 serveRotation 不同：**不做请求内换号轮转**——生图是同步长操作
 // （4~22s），轮转代价高；惩罚已保证下一次请求自动换号（粘性记录被清）。
 // 无健康账号/上游错误时写出响应并返回 error（调用方直接收尾）。
 //
-// model 固定 "glm/image"：粘性路由 key 与模型级冷却都落在这个虚拟模型名上，
-// 与对话模型（chatglm:moe_53f 等）互不干扰。
-func (h *Handler) runGLM(w http.ResponseWriter, r *http.Request, model string, call func(provider.Upstream, *auth.Auth) (any, error)) (any, error) {
-	rt := h.glmRuntime()
-	if rt == nil {
-		writeOpenAIError(w, http.StatusServiceUnavailable, "channel_unavailable", "glm 渠道未接入（未绑定账号）")
-		return nil, errors.New("no glm runtime")
+// model 是**客户端请求的全串**：粘性路由 key 与模型级冷却 key 都落在它上面——
+// `glm/image` 因此与改造前逐字一致，T2 的 `modelscope/Qwen/Qwen-Image` 各自独立冷却。
+func (h *Handler) runImage(w http.ResponseWriter, r *http.Request, model string,
+	call func(provider.ImageGenerator, *auth.Auth) ([]provider.ImageResult, error)) ([]provider.ImageResult, error) {
+	if strings.TrimSpace(model) == "" {
+		model = legacyImageModel
+	} else if _, _, split := provider.SplitModelID(model); !split {
+		// 无 `<kind>/` 前缀（如 OpenAI 的 `gpt-image-1`/`gpt-image-2`）：改造前 model 是
+		// **忽略**的，老客户端不能因为带了个装饰性模型名就变红 ⇒ 回落改造前的语义。
+		model = legacyImageModel
 	}
+	rt, gen, kind, ok := h.imageRuntimeFor(model)
+	if !ok {
+		if kind == provider.GLM && rt == nil {
+			// 旧语义（改造前唯一路径）：`glm/image` 未接入 → 503 可操作引导。
+			writeOpenAIError(w, http.StatusServiceUnavailable, "channel_unavailable", "glm 渠道未接入（未绑定账号）")
+			return nil, errors.New("no glm runtime")
+		}
+		reason := fmt.Sprintf("渠道 %s 不支持生图", provider.DisplayName(kind))
+		if rt == nil {
+			reason = fmt.Sprintf("渠道 %s 未接入（未知渠道或未装配）", model[:strings.IndexByte(model, '/')])
+		}
+		// 必须 400，不得 404：404 归 ErrNotFound（Rotatable）⇒ handler 换号 + NoteError，
+		// 换到的号照样被本地拒，几次之后整条渠道进冷却（R139 同款事故）。
+		log.Printf("images invalid model=%s kind=%s reason=%s", model, kind, reason)
+		writeOpenAIError(w, http.StatusBadRequest, "invalid_model",
+			fmt.Sprintf("模型 %q 不能用于生图：%s", model, reason))
+		return nil, fmt.Errorf("invalid image model: %s", model)
+	}
+	platform := provider.DisplayName(rt.Kind)
 	acct := h.pickWithSticky(rt, model)
 	if acct == nil {
 		writeOpenAIError(w, http.StatusServiceUnavailable, "no_healthy_account",
-			"glm 渠道无可用账号（全部冷却/登录态失效），请在面板检查账号状态")
-		return nil, errors.New("no healthy glm account")
+			platform+" 渠道无可用账号（全部冷却/登录态失效），请在面板检查账号状态")
+		return nil, errors.New("no healthy image account")
 	}
-	res, err := call(rt.Upstream, acct)
+	res, err := call(gen, acct)
 	if err == nil {
 		rt.Pool.NoteSuccess(acct.UID)
 		h.stickySuccess(rt)
@@ -324,30 +378,30 @@ func (h *Handler) runGLM(w http.ResponseWriter, r *http.Request, model string, c
 		case provider.ErrSessionDead:
 			// 登录态失效：标记（挑号跳过 + 面板徽标），401 自愈由下次请求的 refresh 链完成
 			rt.Pool.MarkSessionDead(acct.UID, pe.Msg)
-			log.Printf("images session dead platform=glm uid=%s err=%s", acct.UID, pe.Msg)
-			writeOpenAIError(w, http.StatusUnauthorized, "session_dead", "glm 账号登录态失效，请重新登录："+pe.Msg)
+			log.Printf("images session dead platform=%s uid=%s err=%s", platform, acct.UID, pe.Msg)
+			writeOpenAIError(w, http.StatusUnauthorized, "session_dead", platform+" 账号登录态失效，请重新登录："+pe.Msg)
 		case provider.ErrSoftRate:
-			// 限流/风控瞬时拒绝：模型级冷却（glm/image 名下），不冻结整个账号
+			// 限流/风控瞬时拒绝：**模型级**冷却（key = 客户端请求的 model），不冻结整个账号
 			rt.Pool.CooldownModel(acct.UID, model, h.cfg.SoftCooldown, "生图限流: "+pe.Msg)
-			log.Printf("images rate limited platform=glm uid=%s err=%s", acct.UID, pe.Msg)
-			writeOpenAIError(w, http.StatusTooManyRequests, "rate_limit_exceeded", "glm 生图被限流，请稍后重试："+pe.Msg)
+			log.Printf("images rate limited platform=%s uid=%s model=%s err=%s", platform, acct.UID, model, pe.Msg)
+			writeOpenAIError(w, http.StatusTooManyRequests, "rate_limit_exceeded", platform+" 生图被限流，请稍后重试："+pe.Msg)
 		case provider.ErrWafBlock, provider.ErrAccountFault:
 			rt.Pool.Cooldown(acct.UID, pool.CoolSoft, h.cfg.SoftCooldown, pe.Kind.String())
-			log.Printf("images waf/fault platform=glm uid=%s kind=%s err=%s", acct.UID, pe.Kind, pe.Msg)
-			writeOpenAIError(w, http.StatusBadGateway, "upstream_error", "glm 上游风控拦截："+pe.Msg)
+			log.Printf("images waf/fault platform=%s uid=%s kind=%s err=%s", platform, acct.UID, pe.Kind, pe.Msg)
+			writeOpenAIError(w, http.StatusBadGateway, "upstream_error", platform+" 上游风控拦截："+pe.Msg)
 		case provider.ErrContentBlocked, provider.ErrBadParams, provider.ErrPassthrough:
 			// 请求内容问题：不罚号，透传原因
 			writeOpenAIError(w, http.StatusBadRequest, "invalid_request", pe.Msg)
 		default:
-			log.Printf("images upstream error platform=glm uid=%s kind=%s err=%s", acct.UID, pe.Kind, pe.Msg)
-			writeOpenAIError(w, http.StatusBadGateway, "upstream_error", "glm 生图失败："+pe.Msg)
+			log.Printf("images upstream error platform=%s uid=%s kind=%s err=%s", platform, acct.UID, pe.Kind, pe.Msg)
+			writeOpenAIError(w, http.StatusBadGateway, "upstream_error", platform+" 生图失败："+pe.Msg)
 		}
 		return nil, err
 	}
 	// 非类型化错误（网络层）：计错 + 502
 	rt.Pool.NoteError(acct.UID, h.cfg.ErrThreshold, h.cfg.ErrCooldown)
-	log.Printf("images transport error platform=glm uid=%s err=%v", acct.UID, err)
-	writeOpenAIError(w, http.StatusBadGateway, "upstream_error", "glm 生图网络错误："+err.Error())
+	log.Printf("images transport error platform=%s uid=%s err=%v", platform, acct.UID, err)
+	writeOpenAIError(w, http.StatusBadGateway, "upstream_error", platform+" 生图网络错误："+err.Error())
 	return nil, err
 }
 
