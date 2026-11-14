@@ -204,10 +204,10 @@ func listEntries(top any) []map[string]any {
 	case []any:
 		return mapsOf(v)
 	case map[string]any:
-		for _, key := range []string{"data", "models", "result"} {
-			if arr, ok := v[key].([]any); ok {
-				return mapsOf(arr)
-			}
+		// 只认 OpenAI 列表形状的 `data`：本渠道实测（2026-11-14）就是它，
+		// 不猜 `models`/`result` 这类别名（猜不到的别名等于多一条静默失效的路径）。
+		if arr, ok := v["data"].([]any); ok {
+			return mapsOf(arr)
 		}
 	}
 	return nil
@@ -287,27 +287,36 @@ func modelInfoFromRemote(e map[string]any) (provider.ModelInfo, bool) {
 // （静态表刻意不带能力字段，远程说了就采纳）。
 func mergeModels(static, remote []provider.ModelInfo) []provider.ModelInfo {
 	out := make([]provider.ModelInfo, 0, len(static)+len(remote))
-	index := make(map[string]int, len(static))
+	// at 只记「已入 out 的静态条目位置」；远程独有的重复 ID 由 seen 拦掉
+	// ——用同一个 map 记两者会让「远程独有条目」取到 -1 这样的假位置（越界 panic）。
+	at := make(map[string]int, len(static))
 	for _, mi := range static {
 		if mi.ID == "" {
 			continue
 		}
-		if _, dup := index[mi.ID]; dup {
+		if _, dup := at[mi.ID]; dup {
 			continue
 		}
-		index[mi.ID] = len(out)
+		at[mi.ID] = len(out)
 		out = append(out, mi)
 	}
 	var extras []provider.ModelInfo
+	extraAt := make(map[string]int, len(remote))
 	for _, mi := range remote {
 		if mi.ID == "" {
 			continue
 		}
-		if i, ok := index[mi.ID]; ok {
+		// 重复 ID 一律**合并**（不是丢弃）：静态条目补进 out 原位，远程独有条目补进
+		// extras 原位；两张表分开记下标，任何一路都不会拿到 -1 这种假位置。
+		if i, ok := at[mi.ID]; ok {
 			out[i] = fillFrom(out[i], mi)
 			continue
 		}
-		index[mi.ID] = -1
+		if j, ok := extraAt[mi.ID]; ok {
+			extras[j] = fillFrom(extras[j], mi)
+			continue
+		}
+		extraAt[mi.ID] = len(extras)
 		extras = append(extras, mi)
 	}
 	sort.Slice(extras, func(i, j int) bool { return extras[i].ID < extras[j].ID })
@@ -320,12 +329,19 @@ func fillFrom(dst, src provider.ModelInfo) provider.ModelInfo {
 	if dst.Name == "" {
 		dst.Name = src.Name
 	}
+	adopted := false
 	if dst.ContextWindow == 0 && src.ContextWindow > 0 {
 		dst.ContextWindow = src.ContextWindow
-		dst.ContextFromAPI = src.ContextFromAPI
+		adopted = true
 	}
 	if dst.MaxTokens == 0 && src.MaxTokens > 0 {
 		dst.MaxTokens = src.MaxTokens
+		adopted = true
+	}
+	// ContextFromAPI 的口径是「容量字段来自上游接口」（两个字段共用一词），
+	// 因此只要有一个容量字段被采纳就跟着搬，避免出现「MaxTokens 来自上游却标成估算」。
+	if adopted && src.ContextFromAPI {
+		dst.ContextFromAPI = true
 	}
 	dst.SupportsTools = dst.SupportsTools || src.SupportsTools
 	dst.SupportsImages = dst.SupportsImages || src.SupportsImages

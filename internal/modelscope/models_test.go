@@ -228,3 +228,27 @@ func TestModelsDoNotInventCapabilities(t *testing.T) {
 		}
 	}
 }
+
+// TestMergeModelsRemoteDuplicateIDs 上游目录出现重复 ID 时必须去重且**不得越界**：
+// 早期实现用同一个 map 既记「静态位置」又给远程独有条目写 -1 哨兵，第二条重名命中
+// 哨兵会 out[-1] panic（目录一变就把进程刷崩）。
+func TestMergeModelsRemoteDuplicateIDs(t *testing.T) {
+	static := []provider.ModelInfo{{ID: "a/static"}}
+	remote := []provider.ModelInfo{
+		{ID: "b/only-remote"},
+		{ID: "b/only-remote", ContextWindow: 4096, ContextFromAPI: true},
+		{ID: "a/static", SupportsTools: true},
+		{ID: "a/static", SupportsImages: true},
+	}
+	got := mergeModels(static, remote)
+	ids := modelIDs(got)
+	if strings.Join(ids, ",") != "a/static,b/only-remote" {
+		t.Fatalf("合并结果 = %v，期望 [a/static b/only-remote]", ids)
+	}
+	if !got[0].SupportsTools || !got[0].SupportsImages {
+		t.Errorf("重名远程条目应逐条补全静态条目，实际 %+v", got[0])
+	}
+	if got[1].ContextWindow != 4096 || !got[1].ContextFromAPI {
+		t.Errorf("重名远程条目应只入目录一次并带上游声明，实际 %+v", got[1])
+	}
+}
