@@ -3,7 +3,6 @@ package modelscope
 import (
 	"bytes"
 	"context"
-	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -27,6 +26,8 @@ type Client struct {
 	StreamHTTP *http.Client
 	// Base 上游基址覆盖（测试用）；空 = 按 Kind 取默认值。
 	Base string
+	// idle 流中空闲上限（拿到响应头之后才计时）；0 = 默认 90s。
+	idle time.Duration
 }
 
 // New 构造客户端。kind 只接受 provider.ModelScope / provider.ModelScopeAI。
@@ -86,55 +87,9 @@ func (c *Client) newRequest(ctx context.Context, method, path string, a *auth.Au
 	return req, nil
 }
 
-// ---------------------------------------------------------------------------
-// 票 02 的落地点（本票只立骨架）
-// ---------------------------------------------------------------------------
-
-// errNotImplemented 骨架期的显式「尚未实现」（票 02 替换）。
-// 不得返回 (nil, 200, nil, nil)：那会让 handler 把「没实现」当成一条成功的空流。
-// 文案是**用户可见**的（面板/客户端错误体），故不写内部票号，票号只留在代码注释里。
-func errNotImplemented(op string) error {
-	return fmt.Errorf("modelscope: %s 尚未实现", op)
-}
-
-// ChatStream 对话请求（票 02 实现：POST /v1/chat/completions，请求体原样透传）。
-func (c *Client) ChatStream(_ *auth.Auth, _ []byte) (io.ReadCloser, int, []byte, error) {
-	return nil, 0, nil, errNotImplemented("对话（ChatStream）")
-}
-
-// Stream SSE 原样转发 + model 回填（票 02）。
-func (c *Client) Stream(_ http.ResponseWriter, _ io.Reader, _ string) (map[string]any, error) {
-	return nil, errNotImplemented("流式转发（Stream）")
-}
-
-// Aggregate 非流式本地收敛（票 02）。
-func (c *Client) Aggregate(_ io.Reader, _ string) (map[string]any, error) {
-	return nil, errNotImplemented("非流式聚合（Aggregate）")
-}
-
-// FetchModels 模型目录：骨架期只回静态表；票 02 改为「静态表 ∪ 上游 /v1/models」。
-func (c *Client) FetchModels(_ *auth.Auth) ([]provider.ModelInfo, error) {
-	return StaticModels(), nil
-}
-
 // FetchModelPricing 无费率端点（上游不声明价格）：空实现，不编造。
 func (c *Client) FetchModelPricing(_ *auth.Auth) ([]provider.ModelPricing, error) {
 	return nil, nil
-}
-
-// Classify 错误分类骨架：**429 必须优先**（不变量 15：限流报文常带 quota 字样）。
-// 票 02 细化到 401/403 → SessionDead、404 → 模型级 ErrNotFound、400 参数类 → ErrBadParams。
-func (c *Client) Classify(status int, _ string) provider.ErrKind {
-	switch {
-	case status == http.StatusTooManyRequests:
-		return provider.ErrSoftRate
-	case status >= 500:
-		return provider.ErrServer
-	case status >= 400:
-		return provider.ErrClient
-	default:
-		return provider.ErrNone
-	}
 }
 
 // ---------------------------------------------------------------------------
