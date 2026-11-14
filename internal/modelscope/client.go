@@ -92,8 +92,9 @@ func (c *Client) newRequest(ctx context.Context, method, path string, a *auth.Au
 
 // errNotImplemented 骨架期的显式「尚未实现」（票 02 替换）。
 // 不得返回 (nil, 200, nil, nil)：那会让 handler 把「没实现」当成一条成功的空流。
+// 文案是**用户可见**的（面板/客户端错误体），故不写内部票号，票号只留在代码注释里。
 func errNotImplemented(op string) error {
-	return fmt.Errorf("modelscope: %s 尚未实现（见票 02）", op)
+	return fmt.Errorf("modelscope: %s 尚未实现", op)
 }
 
 // ChatStream 对话请求（票 02 实现：POST /v1/chat/completions，请求体原样透传）。

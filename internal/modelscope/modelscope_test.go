@@ -93,9 +93,9 @@ func TestStaticModelsMinimalCatalog(t *testing.T) {
 	}
 }
 
-// TestNCreditsAreZeroWithoutError 额度口径「不适用」（D5）：上游无余额端点，
+// TestNoCreditsAreZeroWithoutError 额度口径「不适用」（D5）：上游无余额端点，
 // 必须回 (0, nil) 而不是报错——报错会被面板渲染成「刷新积分失败」。
-func TestNCreditsAreZeroWithoutError(t *testing.T) {
+func TestNoCreditsAreZeroWithoutError(t *testing.T) {
 	c := New(provider.ModelScope)
 	if n, err := c.UserResource(nil); n != 0 || err != nil {
 		t.Errorf("UserResource = (%d, %v)，期望 (0, nil)", n, err)
