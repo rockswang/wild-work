@@ -46,6 +46,7 @@ import (
 	"wild-work/internal/login_wbai"
 	loginzcode "wild-work/internal/login_zcode"
 	"wild-work/internal/loopguard"
+	"wild-work/internal/modelscope"
 	"wild-work/internal/oczen"
 	"wild-work/internal/officeace"
 	"wild-work/internal/platform"
@@ -922,6 +923,14 @@ func init() {
 	}
 	loginFlows[provider.OfficeAce] = &loginFlow{
 		noFlowReason: "OfficeAce 登录是两步流程（华为云授权码 + 云端轮询捕获），请用面板的「浏览器登录」入口",
+	}
+	// ModelScope 两区：凭据是网页自助生成的 `ms-` Access Token，没有编程式登录，
+	// 也没有 cookie 换 token 的路（D4）——只引导用户去面板的粘贴层。
+	loginFlows[provider.ModelScope] = &loginFlow{
+		noFlowReason: "ModelScope 凭据需在面板粘贴 ms- Access Token（「＋ ModelScope」入口），本工具不代登录",
+	}
+	loginFlows[provider.ModelScopeAI] = &loginFlow{
+		noFlowReason: "ModelScopeAI 凭据需在面板粘贴 ms- Access Token（「＋ ModelScopeAI」入口）；两区 token 不通用，本工具不代登录",
 	}
 
 	// 自检：每条记录必须恰好表达一种「发起方式」，防止将来加渠道时漏填。
@@ -1997,6 +2006,100 @@ func (a *App) persistLingxiAccount(sid string, uid string) (string, error) {
 	a.reloadAccounts()
 	a.afterAccountAdded(provider.Lingxi)
 	return warn, nil
+}
+
+// modelscopeKindOK 粘贴登录的 kind 白名单（App 方法与 HTTP 路由共用的唯一判据）。
+//
+// 两个 kind 是**两个独立服务区域**（token 不通用），故 kind 与端点必须一一对应：
+// 只接受 modelscope / modelscopeai，其余一律拒，绝不利旧把别的 kind 塞进同一个白名单。
+func modelscopeKindOK(kind provider.Kind) bool {
+	return kind == provider.ModelScope || kind == provider.ModelScopeAI
+}
+
+// modelscopeAuths 按 kind 读已入库账号（两区各一个目录前缀，互不吞噬）。
+func modelscopeAuths(kind provider.Kind, dir string) ([]*auth.Auth, error) {
+	if kind == provider.ModelScopeAI {
+		return auth.LoadModelscopeAIDir(dir)
+	}
+	return auth.LoadModelscopeDir(dir)
+}
+
+// SubmitModelScopeToken 提交面板粘贴的魔搭 `ms-` Access Token（票 04）。
+//
+// 与 comate/lingxi 的粘贴路径同构：规整 → 校验（零费用，走 GET /v1/models）→ 落盘 → 重载池。
+// 与它们的差异：本渠道凭据是**一枚 token = 一个账号**的自助 Access Token，不存在
+// Cookie/refresh 概念，token 失效只能人工重贴（走 SessionDead 标记，不 Disable，R76）。
+func (a *App) SubmitModelScopeToken(kind provider.Kind, token string) (string, string, error) {
+	if !modelscopeKindOK(kind) {
+		return "", "", fmt.Errorf("不支持的渠道 %q：只接受 modelscope / modelscopeai", kind)
+	}
+	tok := modelscope.NormalizeToken(token)
+	if tok == "" {
+		return "", "", errors.New("Access Token 不能为空")
+	}
+	uid, err := modelscope.ValidateToken(kind, tok)
+	if err != nil {
+		return "", "", err
+	}
+	return a.persistModelScopeAccount(kind, tok, uid)
+}
+
+// persistModelScopeAccount 魔搭账号入库的唯一路径：同 token 检测 → 落盘 → 重载账号池。
+//
+// 三条纪律：
+//   - 文件名前缀按 kind 二选一（modelscope-* / modelscopeai-*），与 auth 加载器的 glob 一一对应；
+//   - ExpiresAt 必须远期（token 无过期字段，0 会让 NeedsRefresh 恒真 → 反复刷新 + 冷却）；
+//   - 昵称默认「渠道名 + token 尾 4 位」，但**用户改过的名字不得被重贴冲掉**（同 uid 复用旧昵称）。
+func (a *App) persistModelScopeAccount(kind provider.Kind, token, uid string) (string, string, error) {
+	// 同 token 检测：两区 token 不通用，但同一区里重复粘贴同一枚 token 不扩额度（它就是同一个账号）。
+	warn := ""
+	prevNick := ""
+	if existing, lerr := modelscopeAuths(kind, a.cfg.AuthDir); lerr == nil {
+		for _, e := range existing {
+			if e.AccessTokenValue() == token {
+				warn = fmt.Sprintf("这枚 Access Token 与已添加的账号 %s 相同（一枚 token 就是一个账号），"+
+					"重复添加不会增加额度。请换另一枚 token。", e.UID)
+				break
+			}
+		}
+		for _, e := range existing {
+			if e.UID == uid {
+				prevNick = e.Nickname
+				break
+			}
+		}
+	}
+
+	_ = os.MkdirAll(a.cfg.AuthDir, 0o755)
+	aa := &auth.Auth{
+		Kind:        kind.String(),
+		UID:         uid,
+		Nickname:    modelscopeNickname(kind, token, prevNick),
+		AccessToken: token,
+		// token 无过期字段：ExpiresAt 必须远期（0 会让 NeedsRefresh 恒真，不变量 21 同款陷阱）
+		ExpiresAt: modelscope.FarFutureExpiry(),
+		FilePath:  filepath.Join(a.cfg.AuthDir, kind.String()+"-"+uid+".json"),
+	}
+	if err := aa.SaveAtomic(); err != nil {
+		return "", "", fmt.Errorf("保存 ModelScope 凭据失败：%w", err)
+	}
+	a.reloadAccounts()
+	a.afterAccountAdded(kind)
+	// 日志零 token（不变量 2）：只打 uid 与渠道，绝不打完整 token
+	log.Printf("%s 账号已添加（粘贴 Access Token）uid=%s 同账号告警=%v", kind, uid, warn != "")
+	return uid, warn, nil
+}
+
+// modelscopeNickname 决定保存凭据时写的昵称：用户改过的名字优先，否则默认名（token 尾 4 位）。
+//
+// 判据是「旧昵称 ≠ 默认名」而不是「有旧昵称」：同一枚 token 重贴时旧值恰好等于默认名，
+// 那不算用户改名（否则多区/多 token 场景会把默认名当成用户定制而永不更新）。
+func modelscopeNickname(kind provider.Kind, token, prev string) string {
+	def := modelscope.DefaultNickname(kind, token)
+	if p := strings.TrimSpace(prev); p != "" && p != def {
+		return p
+	}
+	return def
 }
 
 // StartComateQRLogin 发起 WPS Comate「扫码登录」：服务端向 qr.wps.cn 申请二维码，
@@ -4416,6 +4519,29 @@ func (a *App) HandleAPI(mux *http.ServeMux) {
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "uid": uid, "warning": warn})
+	})
+	// ModelScope 两区：粘贴 `ms-` Access Token（无 CDP、无 cookie 换取，D4）。
+	// 两个端点各自绑定一个 kind —— 区域写死在路由上，前端不可能把国际站 token 提交给国内站池。
+	modelscopeToken := func(w http.ResponseWriter, r *http.Request, kind provider.Kind) {
+		var req struct {
+			Token string `json:"token"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			apiError(w, http.StatusBadRequest, "请求体解析失败")
+			return
+		}
+		uid, warn, err := a.SubmitModelScopeToken(kind, req.Token)
+		if err != nil {
+			apiError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "uid": uid, "warning": warn})
+	}
+	mux.HandleFunc("POST /api/login/modelscope_token", func(w http.ResponseWriter, r *http.Request) {
+		modelscopeToken(w, r, provider.ModelScope)
+	})
+	mux.HandleFunc("POST /api/login/modelscopeai_token", func(w http.ResponseWriter, r *http.Request) {
+		modelscopeToken(w, r, provider.ModelScopeAI)
 	})
 	// Comate 扫码登录（服务端申请二维码，手机确认后自动拿 wps_sid）：三段式。
 	mux.HandleFunc("POST /api/login/comate_qr", func(w http.ResponseWriter, r *http.Request) {
