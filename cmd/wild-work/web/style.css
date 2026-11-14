@@ -91,12 +91,11 @@ body {
 .panel-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; flex-wrap: wrap; gap: 8px; }
 .panel-head h2 { font-size: 16px; font-weight: 600; }
 
-/* 账号管理按钮区：外层 wrap 分三段 —— 左组(刷新/签到) + 弹性空白 + 右组(渠道三列 grid)。
-   左组整体靠左、右组整体靠右，中间空白自动伸缩；左组窄时 wrap 换行不溢出。 */
+/* 账号管理按钮区：外层 wrap 分两段 —— 弹性空白 + 右组(渠道添加 grid)。
+   渠道添加按钮整体靠右、中间空白自动伸缩，窄时 wrap 换行不溢出。
+   「刷新积分 / 全部签到 / 视图切换」已移到汇总条上方的功能按钮条（.fn-bar）。 */
 .panel-actions-wrap { display: flex; align-items: center; flex: 1; min-width: 0; }
 .pa-spacer { flex: 1; }
-.pa-left { display: flex; flex-direction: column; gap: 8px; }
-.pa-left .btn { white-space: nowrap; align-self: flex-start; }
 .pa-right {
   display: grid;
   grid-template-columns: repeat(6, auto);
@@ -177,6 +176,16 @@ body {
 }
 .map-editor .preset { display: inline-block; margin: 0 4px 4px 0; }
 
+/* 功能按钮条（账号页）：刷新积分 / 全部签到 / 卡片⇄列表 集中于此，
+   顶部操作行只留渠道添加按钮（避免「加账号」与「账号页级动作」混在一处）。
+   与汇总条同宽并排在它上方；窄屏随 flex-wrap 换行，不溢出。 */
+.fn-bar {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 8px;
+  margin-bottom: 10px; padding: 8px 10px;
+  background: var(--card); border: 1px solid var(--border); border-radius: var(--radius);
+}
+.fn-spacer { flex: 1; }
+
 /* 渠道积分汇总条（账号卡片上方，数据与卡片同源） */
 .credit-summary {
   display: flex; flex-wrap: wrap; gap: 8px 10px; align-items: center;
@@ -214,6 +223,51 @@ body {
 .cs-chip.cs-na.on .cs-n { color: var(--primary); }
 /* 账号筛选后隐藏的卡片（applyAcctFilter 控制） */
 .acct-grid .acct-card.hidden { display: none; }
+
+/* ===== 列表视图（卡片的替代形态） =====
+   同一容器 #acctList 加 .list-mode 后由「两列卡片网格」退化为纵向块
+   （否则表格会被网格的两条轨道挤成半宽）。表体按渠道分段（每段一个 tbody），
+   每段以跨列的分组行开头；表头唯一（thead 只在表顶部出现一次）。
+   窄屏由 .tbl-scroll 横向滚动展示全部列，**不**隐藏列也不降级回卡片。 */
+.acct-grid.list-mode { display: block; }
+.tbl-scroll { overflow-x: auto; }
+.acct-table { width: 100%; border-collapse: collapse; font-size: 13px; min-width: 560px; }
+.acct-table th, .acct-table td { padding: 7px 10px; border-bottom: 1px solid var(--border); text-align: left; vertical-align: top; }
+.acct-table thead th { color: var(--muted); font-weight: 500; font-size: 12px; background: var(--card); white-space: nowrap; }
+.acct-table .num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.acct-table tbody tr:last-child td { border-bottom: 0; }
+.acct-table .cell-uid { font-size: 11px; color: var(--muted); }
+/* 积分格的排版在两视图下各自作用域（卡片走 .acct-card .acct-credits，既有规则勿动）：
+   同样的分层——数字 / 单位小字 / 临期红 / 不可用灰 / 待刷新脉动。
+   （.credit-na 是全局规则，两视图共用，不再重写。） */
+.acct-table .cell-credits { font-size: 14px; font-weight: 700; white-space: nowrap; }
+.acct-table .cell-credits span { font-size: 11px; color: var(--muted); font-weight: 400; margin-left: 2px; }
+.acct-table .cell-credits .credit-num { font-size: 14px; font-weight: 700; color: var(--text); margin-left: 0; }
+.acct-table .cell-credits .credit-unusable { font-size: 12px; font-weight: 600; color: var(--muted); }
+.acct-table .cell-credits .credit-expiring { font-size: 12px; font-weight: 600; color: var(--danger); }
+.acct-table .cell-credits .credit-stale { font-size: 12px; font-weight: 600; color: var(--muted); animation: stale-pulse 1.6s ease-in-out infinite; }
+.acct-table .cell-credits.clickable { cursor: pointer; }
+.acct-table .cell-credits.clickable:hover { text-decoration: underline dotted; text-underline-offset: 3px; }
+.acct-table .cell-credits.clickable:focus-visible { outline: 2px solid var(--primary); outline-offset: -2px; }
+.acct-table .cell-tags { white-space: nowrap; }
+.acct-table .cell-tags .tag { margin-right: 4px; }
+.acct-table .cell-ops { white-space: nowrap; text-align: right; }
+.acct-table tr.disabled-row { opacity: .5; background: #f9fafb; }
+.acct-table tr.cooling-row td:first-child { box-shadow: inset 3px 0 0 var(--warn); }
+/* 分组行：一张表里唯一的渠道分隔（小计与汇总条 chip 同源渲染，见 app.js 的 channelSummaries）。 */
+.acct-table tr.group-row th { padding: 0; background: var(--bg); border-bottom: 1px solid var(--border); }
+.acct-group-head {
+  display: flex; align-items: center; gap: 8px; padding: 8px 10px;
+  font-size: 13px; white-space: nowrap;
+}
+.acct-group-head.clickable { cursor: pointer; }
+.acct-group-head.clickable:hover { background: #eff6ff; }
+.acct-group-head.clickable:focus-visible { outline: 2px solid var(--primary); outline-offset: -2px; }
+/* 分组行高亮 = 该渠道筛选选中（与汇总条 chip 的 .on 同一状态、同一真相） */
+.acct-group-head.on { background: #eff6ff; box-shadow: inset 3px 0 0 var(--primary); }
+.acct-group-head .g-name { font-weight: 600; }
+.acct-group-head .g-sub { display: inline-flex; align-items: center; gap: 4px; margin-left: 2px; }
+.acct-group-head .g-lbl { font-size: 11px; color: var(--muted); }
 
 /* 账号卡片网格 */
 .acct-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
@@ -1498,7 +1552,6 @@ select.input::-ms-expand, .select::-ms-expand { display: none; }
   .top-info { order: 3; flex: none; width: 100%; }
   .panel-actions-wrap { flex-direction: column; align-items: stretch; gap: 8px; }
   .pa-spacer { display: none; }
-  .pa-left { flex-direction: row; flex-wrap: wrap; }
   .pa-right { grid-template-columns: repeat(auto-fit, minmax(118px, 1fr)); width: 100%; }
   .pa-right .btn { justify-self: stretch; padding: 8px 10px; }
 }

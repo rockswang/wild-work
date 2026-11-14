@@ -48,11 +48,6 @@
     <div class="mtab-body" id="mtabAccounts">
     <div class="panel-head">
       <div class="panel-actions-wrap">
-        <!-- 左组：刷新积分/全部签到，整体靠左 -->
-        <div class="pa-group pa-left">
-          <button class="btn primary" id="btnRefreshAll">刷新积分</button>
-          <button class="btn" id="btnCheckinAll">全部签到</button>
-        </div>
         <!-- 中间弹性空白由 flex:1 撑开 -->
         <div class="pa-spacer"></div>
         <!-- 右组：渠道添加六列 grid，整体靠右；行数由渠道数决定（6 列 × 3 行 + 尾部 2 格）。
@@ -94,7 +89,20 @@
         </div>
       </div>
     </div>
+    <!-- 功能按钮条（账号页级动作集中于此；顶部操作行只留渠道添加按钮）：
+         刷新积分 / 全部签到 沿用原标识与绑定，视图切换（卡片⇄列表）新增于此。
+         与汇总条同宽并排在它上方，避免「添加账号」与「账号页级动作」混在一处。 -->
+    <div class="fn-bar" id="acctFnBar">
+      <button class="btn primary" id="btnRefreshAll">刷新积分</button>
+      <button class="btn" id="btnCheckinAll">全部签到</button>
+      <div class="fn-spacer"></div>
+      <div class="seg" id="acctViewSeg" title="切换账号视图：卡片（浏览，默认）/ 列表（按渠道分组，一行一个账号）">
+        <button class="seg-btn active" data-view="card">卡片</button>
+        <button class="seg-btn" data-view="list">列表</button>
+      </div>
+    </div>
     <div id="creditSummary" class="credit-summary hidden" title="各渠道积分汇总（与账号卡片同源）"></div>
+    <!-- 账号区：两种视图（卡片网格 / 列表）在同一容器内互斥渲染，由 app.js 切 .list-mode -->
     <div id="acctList" class="acct-grid"></div>
     <!-- 全部卡片都被「收起不适用」过滤掉时的提示（否则一片空白会被当成账号丢了） -->
     <div id="acctHiddenTip" class="empty hidden"></div>

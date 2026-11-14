@@ -703,6 +703,7 @@ function renderCreditDetail() {
 // ---------- 渲染 ----------
 function render() {
   renderTopbar();
+  syncAcctViewSeg();
   renderSummary();
   renderAccounts();
   applyAcctFilter();
@@ -1008,6 +1009,14 @@ function channelSummaries(accounts) {
   return byCh;
 }
 
+// chSummariesOrder 渠道展示顺序（R142）：已知渠道按 CH_SUMMARY_ORDER，未登记的新渠道
+// （自定义渠道等）按渠道名升序**垫后**（保证不丢行）。汇总条与列表视图的分组行必须同序，
+// 两处各排一次必然漂移，故收口到这里。
+function chSummariesOrder(byCh) {
+  return CH_SUMMARY_ORDER.filter((k) => byCh[k])
+    .concat(Object.keys(byCh).filter((k) => !CH_SUMMARY_ORDER.includes(k)).sort());
+}
+
 // renderSummary 渠道积分汇总条：每渠道一行「可用总积分 / 临期」，末尾合计。
 // 数据全部来自 state.accounts（pool 实时值），与账号卡片同源；
 // 口径与 R17 一致：不可用额度只作角标、不进合计；credits_na（匿名）不参与合计。
@@ -1020,17 +1029,15 @@ function renderSummary() {
   const byCh = channelSummaries(state.accounts);
 
   const fmt = (n) => n.toLocaleString("zh-CN");
-  // 已知渠道按固定顺序，未知渠道（新增时）按字母序垫后，保证不丢行
-  let chs = CH_SUMMARY_ORDER.filter((k) => byCh[k])
-    .concat(Object.keys(byCh).filter((k) => !CH_SUMMARY_ORDER.includes(k)).sort());
+  const chs0 = chSummariesOrder(byCh);
   // 「不适用」的虚拟渠道（oczen/kilo）默认不进汇总条：它们的 chip 只有一句「不适用」，
   // 既不反映余额也不参与合计，纯噪声。收起时改由末尾一枚开关 chip 汇总提示（点它原地展开），
   // 账号卡片同步收起。判据是「虚拟渠道」而不是「无积分」：cline/comate/自定义渠道虽然也
   // 无积分，但 chip 上的「N号」是用户亲手添加的账号，属于有效信息，不该默认消失
   // （否则用户粘完凭据只看得到一枚「不适用」开关，等于没刷出账号）。
-  const naChs = chs.filter((k) => isVirtualCh(k));
+  const naChs = chs0.filter((k) => isVirtualCh(k));
   const naAccts = naChs.reduce((n, k) => n + byCh[k].n, 0);
-  if (!showNoCredit) chs = chs.filter((k) => !isVirtualCh(k));
+  const chs = showNoCredit ? chs0 : chs0.filter((k) => !isVirtualCh(k));
 
   let total = 0, totalExp = 0, staleChs = 0;
   let html = `<span class="cs-title">积分汇总</span>`;
@@ -1077,6 +1084,34 @@ function renderSummary() {
 // 汇总条 chip 与账号卡片同源于 state.accounts，点某个渠道 chip 即筛选其账号卡片。
 let acctFilter = null;
 
+// acctView 账号页视图模式："card"（默认，两列卡片网格）| "list"（按渠道分组的单表）。
+// 偏好只存本地（localStorage，与 usageDays / showNoCredit 同款「直读写 + 失败静默」），
+// 不做服务端持久化；读到的值不是 "list"（被手改/旧值/空）一律回退**卡片**，不写盘也不报错。
+const ACCT_VIEW_KEY = "acct-view";
+let acctView = "card";
+try { if (localStorage.getItem(ACCT_VIEW_KEY) === "list") acctView = "list"; } catch (e) { /* 存储不可用时保持默认卡片 */ }
+function persistAcctView() {
+  try { localStorage.setItem(ACCT_VIEW_KEY, acctView); } catch (e) { /* 忽略 */ }
+}
+// syncAcctViewSeg 同步功能按钮条上的视图切换高亮（高亮唯一真相 = acctView）。
+function syncAcctViewSeg() {
+  const seg = $("acctViewSeg");
+  if (!seg) return;
+  seg.querySelectorAll(".seg-btn").forEach((b) => {
+    b.classList.toggle("active", b.dataset.view === acctView);
+  });
+}
+// setAcctView 切换视图：落盘 + 高亮 + 重渲染账号区。
+// 只重建账号容器内容（汇总条/费率角标与视图无关，不重算）；applyAcctFilter 紧随其后，
+// 把「渠道筛选 + 不适用收起」的可见性落到新 DOM 上，否则刚切过去的列表会先全亮一帧。
+function setAcctView(v) {
+  acctView = v === "list" ? "list" : "card";
+  persistAcctView();
+  syncAcctViewSeg();
+  renderAccounts();
+  applyAcctFilter();
+}
+
 // showNoCredit 「不适用」账号（无积分概念的渠道：oczen/kilo/cline/自定义渠道）是否展开。
 // **默认收起**：这些卡片永远只有一句「不适用」，却各占一整张卡片位置、汇总条上还各占一枚
 // chip，页面上真正有余额的渠道反被稀释（2026-10-19 用户要求「不适用的默认隐藏掉，
@@ -1111,15 +1146,20 @@ function toggleNoCredit() {
   applyAcctFilter();
 }
 
-// applyAcctFilter 按 acctFilter 显示/隐藏账号卡片（与汇总条 chip 联动）。
-// 逐张卡片读 data-group（由 renderAccounts 写入的**渠道 key**，不是 CSS 短类名）：
+// applyAcctFilter 按 acctFilter 显示/隐藏**账号单元**（卡片与列表行共用同一处判据），
+// 并顺手把过滤后一行不剩的分组容器整体隐藏（列表视图）。
+// ACCT_UNIT_SEL 是两种视图「账号单元」的唯一选择器：可见性只在这一处落地，
+// 新增视图形态只需改这个常量，不得各视图各写一份可见性（票 02 的锚点要求）。
+const ACCT_UNIT_SEL = ".acct-card, .acct-row";
+// 逐条读 data-group（由渲染函数写入的**渠道 key**，不是 CSS 短类名）：
 //   自定义渠道的短类名一律是 custom，拿类名反查会把它们全归到同一个 key 上，
 //   而“点某渠道 chip 只留该渠道”本来就不能靠类名区分（R99）。
 function applyAcctFilter() {
   const grid = $("acctList");
   if (!grid) return;
   let shown = 0;
-  grid.querySelectorAll(".acct-card").forEach((card) => {
+  grid.querySelectorAll(ACCT_UNIT_SEL).forEach((card) => {
+    // 变量名沿用 card：列表行与卡片是同一个「账号单元」，两种视图共用这条判据。
     const key = card.dataset.group || "";
     // 两道独立过滤，取「与」：① 渠道 chip 筛选；② 收起「不适用」账号。
     // 必须同时判——筛选到某渠道时也不该把它被收起的「不适用」账号漏出来。
@@ -1128,11 +1168,23 @@ function applyAcctFilter() {
     card.classList.toggle("hidden", !show);
     if (show) shown++;
   });
+  // 列表视图的分组容器：一行不留就整体隐藏（空分组没有任何信息量）。
+  // 判据**派生自**账号单元的最终可见性（不重算筛选条件），单一真相仍是上面那两行；
+  // 不得用 :has() —— 静态检查器无法覆盖隐式选择器，且它会把判据藏进 CSS。
+  grid.querySelectorAll(".acct-group").forEach((grp) => {
+    const anyVisible = Array.from(grp.querySelectorAll(ACCT_UNIT_SEL))
+      .some((u) => !u.classList.contains("hidden"));
+    grp.classList.toggle("hidden", !anyVisible);
+  });
+  // 分组行高亮与汇总条 chip 同步：两处都从 acctFilter 派生，不各自维护状态。
+  grid.querySelectorAll(".acct-group-head").forEach((h) => {
+    h.classList.toggle("on", Boolean(acctFilter) && h.dataset.wg === acctFilter);
+  });
   // 全部卡片都被收起时给出可执行的提示：留一片空白会被当成「账号丢了」。
   const tip = $("acctHiddenTip");
   if (tip) {
-    const total = grid.querySelectorAll(".acct-card").length;
-    const naTotal = grid.querySelectorAll('.acct-card[data-na="1"]').length;
+    const total = grid.querySelectorAll(ACCT_UNIT_SEL).length;
+    const naTotal = grid.querySelectorAll('.acct-card[data-na="1"], .acct-row[data-na="1"]').length;
     const hide = total > 0 && shown === 0 && naTotal > 0;
     tip.classList.toggle("hidden", !hide);
     if (hide) {
@@ -1164,17 +1216,28 @@ function bindSummaryFilter() {
     if (e.key === "Enter" || e.key === " ") { e.preventDefault(); pick(e.target); }
   });
 }
-function renderAccounts() {
-  const grid = $("acctList");
-  const empty = $("acctEmpty");
-  if (!state.accounts.length) {
-    grid.innerHTML = "";
-    empty.classList.remove("hidden");
-    return;
-  }
-  empty.classList.add("hidden");
 
-  grid.innerHTML = state.accounts.map((a) => {
+// bindAcctListFilter 列表视图的分组行点击 = 筛选该渠道（等价于点汇总条上的同名 chip），
+// 键盘 Enter/Space 同效；再点同一条 = 取消（由 setAcctFilter 的幂等切换负责）。
+// 事件委托绑在账号容器上：分组行每次渲染都会重建；高亮同步由 applyAcctFilter 统一处理
+// （唯一真相 = acctFilter），这里只把点击转成筛选动作。
+function bindAcctListFilter() {
+  const el = $("acctList");
+  if (!el) return;
+  const pick = (target) => {
+    const head = target.closest(".acct-group-head");
+    if (!head) return;
+    setAcctFilter(head.dataset.wg || null);
+  };
+  el.addEventListener("click", (e) => pick(e.target));
+  el.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" || e.key === " ") { e.preventDefault(); pick(e.target); }
+  });
+}
+// acctParts 单个账号在**两种视图下共用**的展示片段（昵称 / 状态徽标 / 操作按钮）。
+// 卡片与列表行都必须消费它：两处各推导一遍状态徽标，必然出现「停用原因只挂在卡片上、
+// 列表里悄悄丢了」这类漂移；同时卡片模板的输出也因此逐字未变（票 02 的锚点要求）。
+function acctParts(a) {
     const noCheckin = noExplicitCheckin(a.group); // 无显式签到，签到按钮灰掉
     const noCheckinTitle = a.group === "workbuddyai"
       ? "无需手动签到：定时自动对话保活并领取日活奖励"
@@ -1191,7 +1254,6 @@ function renderAccounts() {
         ? `<span class="tag ${a.last_checkin_ok ? "ok" : "bad"}">${a.last_checkin_ok ? "签到成功" : "签到失败"}</span>`
         : '<span class="tag neutral">未签到</span>';
 
-    const disabledClass = a.disabled ? " disabled" : "";
     const disableIcon = a.disabled ? "▶" : "⏸";
     const disableTitle = a.disabled ? "启用" : "停用";
     // 停用原因徽标（R135）：账号被「自动停用」时（典型：这个 WPS 账号在 Comate 侧
@@ -1212,7 +1274,6 @@ function renderAccounts() {
     const coolingTag = a.cooling
       ? `<span class="tag warn" title="${esc(a.reason || "冷却中")}">冷却至 ${esc(a.until || "-")}${a.until_ts ? `<span data-until-ts="${a.until_ts}">（${fmtLeft(a.until_ts)}）</span>` : ""}</span>`
       : "";
-    const coolingClass = a.cooling ? " cooling" : "";
     const checkinBtn = noCheckin
       ? `<span class="icon-op off" title="${esc(noCheckinTitle)}" onclick="return false">✓</span>`
       : `<span class="icon-op" title="签到" onclick="checkin('${a.uid}')">✓</span>`;
@@ -1230,9 +1291,6 @@ function renderAccounts() {
     // 的渠道也当成固定账号 ⇒ 卡片只剩 🔒，无法删除/停用/改名，而 comate 是真多账号池
     // （后端 RemoveAccount/DisableAccount 只硬拒 Oczen/Kilo）⇒ 粘错 sid 就永久卡住（2026-10-28 修正）。
     const fixedAcct = VIRTUAL_ACCOUNTS.has(a.group);
-    // 默认收起的「不适用」卡片：渲染时就带上 hidden（而不是等 applyAcctFilter），
-    // 首帧不会先闪一排「不适用」再消失；applyAcctFilter 后续负责保持同步。
-    const naHiddenClass = (!showNoCredit && isVirtualAcct(a)) ? " hidden" : "";
     // 问号图标：hover 展示 oczen 通道说明（免费反代范围/私有 Key/代理三项）。
     // 放在锁头左侧；用独立的 help 样式（正常亮度 + help 光标），不可点击但 tooltip 可用。
     // title 内换行用 &#10;（HTML 属性实体），字面 \n 会被部分浏览器吞掉导致无 tooltip。
@@ -1287,7 +1345,32 @@ function renderAccounts() {
       ? `<span class="acct-name">${esc(isOczen ? oczenName : (a.nickname || shortUid(a.uid)))}</span>`
       : `<span class="acct-name editable" title="点击修改显示名" onclick="openRename('${a.uid}','${esc(a.nickname || shortUid(a.uid)).replace(/'/g, "&#39;")}')">${esc(a.nickname || shortUid(a.uid))}</span>`;
 
-    return `
+    // 停用 / 冷却 / 默认收起在两种视图下换的是「行的样式类」，故 acctParts 只交出**事实**，
+    // 类名由各视图自取（卡片 .disabled/.cooling，列表行 .disabled-row/.cooling-row）。
+    return {
+      noCredits,
+      fixedAcct,
+      nameHtml,
+      ops,
+      disabled: Boolean(a.disabled),
+      cooling: Boolean(a.cooling),
+      // 默认收起的「不适用」账号：渲染时就带 hidden（而不是等 applyAcctFilter），
+      // 首帧不会先闪一排「不适用」再消失；applyAcctFilter 后续负责保持同步。
+      naHidden: !showNoCredit && isVirtualAcct(a),
+      tags: `${coolingTag}${disabledTag}${sessionDeadTag}${missingRTTag}${checkinTag}`,
+    };
+}
+
+// acctCardHtml 卡片模式下单个账号的卡片。
+// ⚠️ 输出**逐字保持升级前形态**：既有断言按 `class="acct-card…" data-group=` 切分取卡，
+//    字段顺序/空白一变就是几十条断言同时变红（票 02 明确要求卡片分支零改动）。
+function acctCardHtml(a) {
+  const p = acctParts(a);
+  const { noCredits, nameHtml, ops } = p;
+  const disabledClass = p.disabled ? " disabled" : "";
+  const coolingClass = p.cooling ? " cooling" : "";
+  const naHiddenClass = p.naHidden ? " hidden" : "";
+  return `
     <div class="acct-card${disabledClass}${coolingClass}${naHiddenClass}" data-group="${esc(a.group || "workbuddy")}" data-na="${isVirtualAcct(a) ? 1 : 0}">
       <div class="acct-top">
         <div>
@@ -1301,10 +1384,77 @@ function renderAccounts() {
       <div class="acct-uid">UID: ${esc(shortUid(a.uid))}</div>
       <div class="acct-mid">
         <div class="acct-credits${noCredits ? "" : " clickable"}" data-uid="${a.uid}"${noCredits ? "" : ` onclick="showCreditDetail(event,'${a.uid}')" title="点击查看积分明细（含分页）" role="button" tabindex="0" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();showCreditDetail(event,'${a.uid}')}"`}>${creditsText(a)}</div>
-        <div class="acct-checkin">${coolingTag}${disabledTag}${sessionDeadTag}${missingRTTag}${checkinTag}</div>
+        <div class="acct-checkin">${p.tags}</div>
       </div>
     </div>`;
+}
+
+// acctRowHtml 列表模式下单个账号的行（四列：账号 / 积分 / 状态 / 操作）。
+// 行本身**不可点**（行内已有停用/删除等破坏性动作），只有积分单元格与昵称各自可点；
+// 状态徽标与操作按钮全部来自 acctParts —— 卡片上有的这里必须有，不另立一套。
+// 积分格刻意沿用卡片的语义类 acct-credits（+ 表格列类 cell-credits）：
+//   明细浮窗的「点另一个账号=切换不关」与「就地回写积分格」都认 acct-credits，
+//   列表里少这个类会让那两条链路静默失灵（spec 已知风险 ④：刻意复用卡片语义类名）。
+function acctRowHtml(a) {
+  const p = acctParts(a);
+  const cls = "acct-row"
+    + (p.disabled ? " disabled-row" : "")
+    + (p.cooling ? " cooling-row" : "")
+    + (p.naHidden ? " hidden" : "");
+  return `
+      <tr class="${cls}" data-group="${esc(a.group || "workbuddy")}" data-na="${isVirtualAcct(a) ? 1 : 0}">
+        <td class="cell-acct">${chBadge(a.group)}${p.nameHtml}<div class="cell-uid">UID: ${esc(shortUid(a.uid))}</div></td>
+        <td class="num cell-credits acct-credits${p.noCredits ? "" : " clickable"}" data-uid="${a.uid}"${p.noCredits ? "" : ` onclick="showCreditDetail(event,'${a.uid}')" title="点击查看积分明细（含分页）" role="button" tabindex="0" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();showCreditDetail(event,'${a.uid}')}"`}>${creditsText(a)}</td>
+        <td class="cell-tags">${p.tags}</td>
+        <td class="cell-ops">${p.ops}</td>
+      </tr>`;
+}
+
+// acctGroupsHtml 列表视图的整表（**单表**）：唯一一处列名表头（thead），表体按渠道分段
+// ——每段一个 tbody（分组容器），首行是跨四列的分组行。
+//   · 空渠道不出现（分组键从 channelSummaries 派生，没有账号就没有键）；
+//   · 小计**只**消费 channelSummaries 的 c.body（与汇总条 chip 逐字同源，工单 01），
+//     这里不得再求一次和 —— 两处各算一份必然漂移；
+//   · 分组顺序沿用 chSummariesOrder（R142：内建按显示名字节序、自定义垫底），
+//     分组内保持后端下发原序（不排序）。
+function acctGroupsHtml() {
+  const byCh = channelSummaries(state.accounts);
+  const groups = chSummariesOrder(byCh).map((k) => {
+    const c = byCh[k];
+    if (!c || !c.n) return "";
+    const on = acctFilter === k ? " on" : "";
+    const head = `<tr class="group-row"><th colspan="4">`
+      + `<div class="acct-group-head clickable${on}" data-wg="${esc(k)}" role="button" tabindex="0"`
+      + ` title="点击筛选该渠道账号，再次点击取消">${chBadge(k)}`
+      + `<span class="g-name">${esc(chLabel(k))}</span>`
+      + `<span class="cs-n">${c.n}号</span>`
+      + `<span class="g-sub"><span class="g-lbl">小计</span>${c.body}</span></div></th></tr>`;
+    const rows = state.accounts
+      .filter((a) => (a.group || "workbuddy") === k)
+      .map(acctRowHtml).join("");
+    return `<tbody class="acct-group" data-group="${esc(k)}">${head}${rows}</tbody>`;
   }).join("");
+  return `<div class="tbl-scroll"><table class="acct-table" id="acctTable">`
+    + `<thead><tr><th class="col-acct">账号</th><th class="num">积分</th><th>状态</th><th class="col-ops">操作</th></tr></thead>`
+    + groups + `</table></div>`;
+}
+
+// renderAccounts 账号区渲染：卡片网格 / 列表两视图**互斥**（容器类名与内容一起切），
+// 使「卡片模式无表格 / 列表模式单表」在结构上不可能同时成立。
+function renderAccounts() {
+  const grid = $("acctList");
+  const empty = $("acctEmpty");
+  if (!state.accounts.length) {
+    grid.innerHTML = "";
+    grid.classList.remove("list-mode");
+    empty.classList.remove("hidden");
+    return;
+  }
+  empty.classList.add("hidden");
+
+  const listMode = acctView === "list";
+  grid.classList.toggle("list-mode", listMode);
+  grid.innerHTML = listMode ? acctGroupsHtml() : state.accounts.map(acctCardHtml).join("");
 }
 
 function renderTimes() {
@@ -4532,6 +4682,13 @@ function bindMainTabs() {
 
   bindFeesTabs(); // 费率面板渠道标签切换（事件委托一次绑定）
   bindSummaryFilter(); // 积分汇总条 chip 点击筛选账号（事件委托一次绑定）
+  bindAcctListFilter(); // 列表视图分组行点击 = 该渠道筛选（等价于点 chip）
+  // 功能按钮条的视图切换（卡片⇄列表）：按本地偏好回显高亮（默认卡片）。
+  $("acctViewSeg").addEventListener("click", (e) => {
+    const b = e.target.closest("[data-view]");
+    if (b) setAcctView(b.dataset.view);
+  });
+  syncAcctViewSeg();
 }
 
 // 面板 tab / 范围切换事件（bind 末尾调用）
