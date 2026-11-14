@@ -500,6 +500,23 @@ func LoadLingxiDir(dir string) ([]*Auth, error) {
 	return loadPrefixed(dir, "lingxi")
 }
 
+// LoadModelscopeDir 扫描魔搭国内站凭证（modelscope-*.json）。
+// 粘贴型渠道：凭据是面板手工粘贴的 `ms-` Access Token（一枚 token = 一个账号，
+// 真多 token 池），存于 AccessToken；token 无 refresh 端点 ⇒ 无保活/无签到。
+//
+// glob 边界：`modelscope-*.json` 与 `modelscopeai-*.json` **互不吞噬** ——
+// 后者在 `modelscope` 前缀之后紧接 `a` 而不是 `-`，故不匹配本前缀
+// （auth_test.go 的 TestLoadModelscopeGlobBoundary 是护栏）。
+func LoadModelscopeDir(dir string) ([]*Auth, error) {
+	return loadPrefixed(dir, "modelscope")
+}
+
+// LoadModelscopeAIDir 扫描魔搭国际站凭证（modelscopeai-*.json）。
+// 与国内站是**两个独立服务**、token 不通用 ⇒ 独立前缀与独立账号池，绝不互相兜底。
+func LoadModelscopeAIDir(dir string) ([]*Auth, error) {
+	return loadPrefixed(dir, "modelscopeai")
+}
+
 // LoadOfficeAceDir 扫描华为云果办 OfficeAce 渠道凭证（officeace-*.json）。
 // 与 cline 同为「导入型」渠道：凭据由面板从本机 OfficeAce 客户端文件发现后生成
 // （见 internal/officeace 的发现逻辑），或自助 OAuth 登录生成。

@@ -116,3 +116,20 @@ func TestComateNicknameFor(t *testing.T) {
 		})
 	}
 }
+
+// TestCreditsNAModelscope 守门魔搭两渠道的额度口径（D5）：上游没有余额/积分端点，
+// 面板必须显示「不适用」而不是 0（标成 0 会被用户读成「额度已用光」）。
+//
+// creditsUnit 保持空串：本渠道**不加**「次数」单位（D5 明确否掉了「剩余次数」展示）——
+// token 与请求数照常进 stats/ledger 的 tokens/请求数口径，与积分体系无关。
+func TestCreditsNAModelscope(t *testing.T) {
+	a := &App{cfg: &config.Config{}}
+	for _, k := range []provider.Kind{provider.ModelScope, provider.ModelScopeAI} {
+		if !a.creditsNAKind(k.String()) {
+			t.Errorf("%s 应标 credits_na（上游无余额端点，D5）", k)
+		}
+		if got := a.creditsUnit(k.String()); got != "" {
+			t.Errorf("%s creditsUnit = %q，期望空串（不得引入「次数」单位）", k, got)
+		}
+	}
+}

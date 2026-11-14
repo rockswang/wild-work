@@ -457,6 +457,8 @@ func sortChannelsByOrder[T any](items []T, kindOf func(T) provider.Kind) {
 //   - cline：上游**确无余额端点**（/credits /usage /billing /quota /me 等 12 个候选实测全 404），
 //     属于「查不到」。把这种情况显示成 0 会被误读成「额度已用光」，故同样走 NA。
 //   - 自定义渠道（R66）：无积分与额度接口，同样走 NA。
+//   - modelscope / modelscopeai（D5）：上游没有余额/积分端点（只有 token 用量），
+//     不编造「剩余次数」；token 与请求数照常进 stats/ledger，**不**把数字标成 0。
 //
 // ⚠️ comate **不在此列**（R136 起）：R130 曾据「/credits /userinfo /me 全 404」
 // 判成 NA，但真实额度端点是 `/llmproxy/v1/user/token-usage`（每日额度
@@ -468,7 +470,8 @@ func sortChannelsByOrder[T any](items []T, kindOf func(T) provider.Kind) {
 // 走 creditsUnit="token" 的「Token 计数」面板，而不是「不适用」（见 creditsUnit）。
 func (a *App) creditsNAKind(group string) bool {
 	if group == provider.Oczen.String() || group == provider.Kilo.String() ||
-		group == provider.Cline.String() {
+		group == provider.Cline.String() ||
+		group == provider.ModelScope.String() || group == provider.ModelScopeAI.String() {
 		return true
 	}
 	return a.isCustomChannel(group)

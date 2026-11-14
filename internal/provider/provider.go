@@ -76,6 +76,14 @@ const (
 	// Cookie 不轮换 ⇒ 无 RefreshToken、无保活、无签到；上游无积分查询端点（积分只能从
 	// 逐请求 usage.credits 记账）。模型面绑死上游 /models 的 items 数组原样透传。
 	Comate Kind = "comate"
+	// ModelScope 魔搭社区国内站（api-inference.modelscope.cn）：OpenAI 兼容对话面 +
+	// 异步文生图/图生图（submit + poll）；凭据是面板粘贴的 `ms-` Access Token
+	// （一枚 token = 一个账号，真多 token 池）。**两区为独立服务，token 不通用** ——
+	// 国内站与国际站的 token 不能互相使用，故拆成两个 kind、两个账号池、互不兜底。
+	ModelScope Kind = "modelscope"
+	// ModelScopeAI 魔搭国际站（api-inference.modelscope.ai）：与 ModelScope 同协议、
+	// 不同服务区域。**两区为独立服务，token 不通用**（见 ModelScope 注释）。
+	ModelScopeAI Kind = "modelscopeai"
 	// Lingxi WPS 灵犀（lingxi.kdocs.cn 网页版助手）：粘贴型渠道，凭据与 comate 同为
 	// **wps_sid Cookie**（同一 WPS 账号体系但**门禁独立**——灵犀侧开通即可用）。
 	// 有每日签到（领智点）与余额端点；对话是 sessions+completions 两段式（每请求新建
@@ -107,7 +115,7 @@ func BuiltinKinds() map[string]bool {
 var builtinKindList = []Kind{
 	WorkBuddy, WorkBuddyAI, TraeWork, Qoder, QoderCN, QoderCOM,
 	QwenWork, MonkeyCode, Raccoon, Loomy, TraeCode, Oczen, GLM, Cline, OfficeAce, Kilo, Minimax, LobsterAI,
-	Gemini, CodeArts, ZCode, Comate, Lingxi,
+	Gemini, CodeArts, ZCode, Comate, Lingxi, ModelScope, ModelScopeAI,
 }
 
 // DisplayNames 渠道**显示名**的 Go 侧真源（面板文案、`/v1/models` 之外的展示处同源）。
@@ -116,29 +124,31 @@ var builtinKindList = []Kind{
 // 两份必须逐项一致，`scripts/ui-static-check.mjs` 有跨语言一致性断言（Go 源它直接读）。
 // 顺序无关（展示序由 ChannelDisplayOrder 按值排序派生）。
 var DisplayNames = map[Kind]string{
-	WorkBuddy:   "WorkBuddyCN",
-	WorkBuddyAI: "WorkBuddyAI",
-	TraeWork:    "TraeWork",
-	TraeCode:    "TraeCode",
-	Qoder:       "Qoder",
-	QoderCN:     "QoderCN",
-	QoderCOM:    "QoderCOM",
-	QwenWork:    "千问办公",
-	GLM:         "智谱清言",
-	MonkeyCode:  "MonkeyCode",
-	Raccoon:     "小浣熊",
-	Loomy:       "Loomy",
-	Oczen:       "OpenCodeZen",
-	Kilo:        "Kilo",
-	Minimax:     "MiniMax",
-	LobsterAI:   "LobsterAI",
-	ZCode:       "ZCode",
-	Gemini:      "Gemini",
-	CodeArts:    "CodeArts",
-	Cline:       "Cline",
-	OfficeAce:   "OfficeAce",
-	Comate:      "WPS Comate",
-	Lingxi:      "WPS 灵犀",
+	WorkBuddy:    "WorkBuddyCN",
+	WorkBuddyAI:  "WorkBuddyAI",
+	TraeWork:     "TraeWork",
+	TraeCode:     "TraeCode",
+	Qoder:        "Qoder",
+	QoderCN:      "QoderCN",
+	QoderCOM:     "QoderCOM",
+	QwenWork:     "千问办公",
+	GLM:          "智谱清言",
+	MonkeyCode:   "MonkeyCode",
+	Raccoon:      "小浣熊",
+	Loomy:        "Loomy",
+	Oczen:        "OpenCodeZen",
+	Kilo:         "Kilo",
+	Minimax:      "MiniMax",
+	LobsterAI:    "LobsterAI",
+	ZCode:        "ZCode",
+	Gemini:       "Gemini",
+	CodeArts:     "CodeArts",
+	Cline:        "Cline",
+	OfficeAce:    "OfficeAce",
+	Comate:       "WPS Comate",
+	Lingxi:       "WPS 灵犀",
+	ModelScope:   "ModelScope",
+	ModelScopeAI: "ModelScopeAI",
 }
 
 // DisplayName 渠道显示名；未登记时退回渠道 kind 本身（自定义渠道就走这条）。
