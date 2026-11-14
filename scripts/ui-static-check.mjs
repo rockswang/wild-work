@@ -512,7 +512,7 @@ check("非 officeace 账号不带「缺续期凭据」（渠道限定，避免�
 }
 
 // ---- 场景 1.95：卡片⇄列表视图模式 + 功能按钮条（工单 02）----
-// 断言 1–9（断言 10「积分列两行制」属工单 03，不在此）；断言 11「既有账号页断言零回归」
+// 断言 1–10（断言 10「积分列两行制」= 票 03）；断言 11「既有账号页断言零回归」
 // 由本文件其余全部场景共同承担 —— 本文件只要有一条红就整体失败，没有单独一行可写。
 //
 // 为什么必须有这个场景：视图模式是**结构性**新增（同一容器两种互斥渲染），
@@ -689,6 +689,34 @@ check("非 officeace 账号不带「缺续期凭据」（渠道限定，避免�
     /\$\("acctViewSeg"\)\.addEventListener\("click"/.test(raw) && raw.includes("setAcctView(b.dataset.view)"));
   check("render() 里回显视图高亮（刷新页面后按钮态与本地偏好一致）",
     /function render\(\) \{\n  renderTopbar\(\);\n  syncAcctViewSeg\(\);/.test(raw));
+
+  // ---- 断言 10：积分列两行制（第一行数字 + 单位，第二行角标；单位不占数字对齐容器）----
+  // 结构用一个「有数字 + 有临期角标」的正常行与一个 token 计量行来锁：
+  //   · 数字在 .cr-num-box（右对齐 + 等宽数字）内，单位 .cr-unit 在其**外**；
+  //   · 角标（临期 / 不可用）独占第二行 .cr-sub，不与数字同行；
+  //   · 反向护栏：把单位并回 .cr-num-box（变异）必须变红。
+  const crRow = rowOf("4298452267967801"); // traework 健康号：2686 + 临期100
+  check("列表积分格第一行 = 数字 + 单位（数字在 cr-num-box 内、单位在其外）",
+    /<div class="cr-main has-unit"><span class="cr-num-box"><span class="credit-num">2686<\/span><\/span><span class="cr-unit">可用积分<\/span><\/div>/.test(crRow),
+    crRow);
+  check("列表积分格第二行 = 角标（临期独占 cr-sub，不与数字同行）",
+    /<div class="cr-sub"><span class="credit-expiring"> \(临期100\)<\/span><\/div>/.test(crRow), crRow);
+  const tokRow = rowOf("z-token-1");
+  check("token 计量渠道同样两行制（第一行数字 + tokens，第二行临期）",
+    /<span class="cr-num-box"><span class="credit-num">800万<\/span><\/span><span class="cr-unit"[^>]*>tokens<\/span>/.test(tokRow)
+      && /<div class="cr-sub"><span class="credit-expiring"> \(临期50万\)<\/span><\/div>/.test(tokRow),
+    tokRow);
+  const crNumBoxInner = (crRow.match(/<span class="cr-num-box">([\s\S]*?)<\/span><\/span>/) || [])[1] || "";
+  check("反向护栏：单位小字不在数字对齐容器（cr-num-box）内",
+    crNumBoxInner.includes('class="credit-num"') && !crNumBoxInner.includes("cr-unit")
+      && !crNumBoxInner.includes("可用积分") && !crNumBoxInner.includes("tokens"), crNumBoxInner);
+  check("单位小字不占列宽（cr-unit 绝对定位）+ 数字右对齐 + 等宽数字",
+    /\.acct-table \.cell-credits \.cr-main \{[^}]*text-align: right; \}/.test(css)
+      && /\.acct-table \.cell-credits \.cr-num-box \{[^}]*font-variant-numeric: tabular-nums; \}/.test(css)
+      && /\.acct-table \.cell-credits \.cr-unit \{[^}]*position: absolute;/.test(css), "");
+  check("「不适用」占第一行且无单位（非数字主文案分支）",
+    /<div class="cr-main"><span class="credit-na"[^>]*>不适用<\/span><\/div>/.test(rowOf("oczen-anon"))
+      && !/cr-num-box/.test(rowOf("oczen-anon")), rowOf("oczen-anon"));
 
   // ---- 补充：列表行的四列 / 操作 / 状态徽标 / 窄屏（工单验收项）----
   T.__setAccount("1606848467182378", { cooling: true, until: "10-03 09:12", until_ts: Math.floor(Date.now() / 1000) + 12 * 3600, reason: "3004" });
