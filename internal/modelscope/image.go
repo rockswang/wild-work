@@ -319,6 +319,16 @@ func (c *Client) fetchImageTask(ctx context.Context, a *auth.Auth, taskID string
 	return out, nil
 }
 
+// SetPollLimitForTest 覆盖生图轮询总时限（**测试专用**：让 504 超时契约不必真等 120s）。
+// 生产调用它等于静默绕开 D8 的「只放宽不压低」——只许 _test.go 使用。
+func (c *Client) SetPollLimitForTest(d time.Duration) { c.pollLimit = d }
+
+// SetPollSleepForTest 覆盖轮询间隔实现（**测试专用**：断言退避序列/超时而不真的睡 2s+）。
+// nil 恢复真实计时器。生产调用它会改变生图节奏，只许 _test.go 使用。
+func (c *Client) SetPollSleepForTest(fn func(ctx context.Context, d time.Duration) error) {
+	c.pollSleep = fn
+}
+
 // imagePollLimit 轮询总时限 = max(120s, upstream.timeout_seconds)（只放宽、不压低）。
 func (c *Client) imagePollLimit() time.Duration {
 	if c.pollLimit > 0 { // 测试注入点
