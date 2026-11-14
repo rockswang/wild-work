@@ -635,7 +635,7 @@
       <div class="cfg-section" id="secFallback">
         <div class="cfg-heading"><span>模型降级链</span><button class="icon-btn cfg-search-btn" data-model-search title="查找模型（按关键字快速定位全渠道模型，点击结果复制完整 ID）">🔍 查询模型</button><span class="help-mark">?<span class="help-pop">
             原模型在该渠道已无账号可承载（请求模型的全部账号限流冷却，或整渠道账号全部不可用 / 已禁用）时，按顺序找第一个可用的备胎模型顶上，响应头 <code>X-Model-Fallback</code> 标注实际备胎；原模型恢复后自动切回，不粘滞。<br><br>
-            主力模型ID 与备胎模型ID 均用 <code>channel/model</code> 全路径（如 workbuddyai/deepseek-v4.1-flash），备胎可跨渠道。备胎链内可拖动 chip 调整顺序。<br><br>
+            主力模型ID 与备胎模型ID 均用 <code>channel/model</code> 全路径（如 workbuddyai/deepseek-v4.1-flash），备胎可跨渠道。同一模型可既是某规则主力、又作为其他规则的备胎；同规则自环除外（备胎不能等于本规则自己的主力）。备胎链内可拖动 chip 调整顺序。<br><br>
             <b>别名</b>是主力模型的另一个名字：客户端请求别名等同于请求主力模型（粘性路由 / 容量判定 / 降级链 / 冷却全部照旧），别名不参与备胎链，也不能当主力模型填。别名大小写敏感（<code>Fast</code> ≠ <code>fast</code>），不能含 <code>/</code>、空白、逗号、<code>*</code>；与真实模型裸名重合时按别名走（别名优先于 <code>compat.model_map</code> 与 <code>default_channel</code>），用量与统计仍记主力模型。
           </span></span></div>
         <div id="fbList" class="proxy-list"></div>
