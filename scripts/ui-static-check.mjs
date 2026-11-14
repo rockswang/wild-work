@@ -763,6 +763,28 @@ check("非 officeace 账号不带「缺续期凭据」（渠道限定，避免�
   check("卡片网格既有规则零改动（升级前形态不变）",
     /\.acct-grid \{ display: grid; grid-template-columns: 1fr 1fr; gap: 12px; \}/.test(css));
 
+  // ---- 闸 2（票 04）真实页实测落到 CSS 的四条结论 ----
+  // 实测（Chromium 156 / 真实 21 账号 + 126 行密集快照）：.tbl-scroll 的 overflow-x:auto 使它成为
+  // 最近的 scrollport，而它纵向不滚动 ⇒ thead 的 position:sticky 恒失效（文档滚 300px 后 top=-300）。
+  // 故**不得**出现「写了 sticky 就当生效」：这条锁住「不粘性」结论，理由写在 style.css 的注释里。
+  check("闸 2 粘性表头：thead 不得写 position: sticky（实测在当前滚动上下文恒失效）",
+    !/\.acct-table thead th \{[^}]*position: sticky/.test(css));
+  // 积分列的「单位带」必须单一来源（--acct-cred-unit）：数据格的预留带与表头对齐都从它派生，
+  // 两处各写死一个 px 值必然漂移（实测改前表头与数字右缘差 46px）。
+  check("闸 2 积分列单位带单一来源 + 表头与数字右缘对齐",
+    /\.acct-table \{[^}]*--acct-cred-unit: \d+px/.test(css)
+      && /\.acct-table \.cell-credits \.cr-main \{[^}]*padding-right: var\(--acct-cred-unit\)/.test(css)
+      && /\.acct-table thead th\.num \{[^}]*padding-right: calc\(var\(--acct-cred-unit\) \+ \d+px\)/.test(css));
+  // 状态徽标封顶：实测 126 行快照里长停用原因徽标 305px，把整表撑到 904px > 890px 容器
+  // ⇒ 1440px 视口也出横滚条；封顶后列宽不再被最长理由单点决定（hover 仍有 title 全文）。
+  check("闸 2 状态徽标封顶（max-width + 省略号）",
+    /\.acct-table \.cell-tags \.tag \{[^}]*max-width: \d+px[^}]*text-overflow: ellipsis/.test(css));
+  // 窄屏断点卡在既有 679（实测真实数据内容需求 599px，而 679 视口内容区 ≈594px ⇒ 恰在此起出横滚）：
+  // 压紧内边距/字号/徽标上限、状态列允许折行，不新增第四档断点，也不动 min-width: 560px。
+  check("闸 2 窄屏断点：列表在既有 679 断点内压紧（不新增第四档）",
+    /\.acct-table \{ font-size: 12px; --acct-cred-unit: 44px; \}/.test(css)
+      && /\.acct-table \.cell-tags \{ white-space: normal; \}/.test(css));
+
   // 复原：临时账号 / 筛选 / 视图 / 收起态全部回到共享 fixture 的基线，避免污染后续场景。
   T.__popAccount(); // custom-demo
   T.__popAccount(); // zcode token
