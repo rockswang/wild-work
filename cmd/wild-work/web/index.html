@@ -48,9 +48,8 @@
     <div class="mtab-body" id="mtabAccounts">
     <div class="panel-head">
       <div class="panel-actions-wrap">
-        <!-- 中间弹性空白由 flex:1 撑开 -->
-        <div class="pa-spacer"></div>
-        <!-- 右组：渠道添加六列 grid，整体靠右；行数由渠道数决定（6 列 × 3 行 + 尾部 2 格）。
+        <!-- 渠道添加六列 grid，**占满整行宽度**（六列等宽、按钮在格内拉伸）；
+             行数由渠道数决定（6 列 × 3 行 + 尾部 2 格）。
              摆位由 DOM 顺序决定（行主序自然流），勿再写内联 grid-column/grid-row：
              那会让窄屏无法重排，也会破坏顺序一致性（scripts/ui-static-check.mjs 有顺序断言）。
 

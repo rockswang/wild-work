@@ -91,14 +91,17 @@ body {
 .panel-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; flex-wrap: wrap; gap: 8px; }
 .panel-head h2 { font-size: 16px; font-weight: 600; }
 
-/* 账号管理按钮区：外层 wrap 分两段 —— 弹性空白 + 右组(渠道添加 grid)。
-   渠道添加按钮整体靠右、中间空白自动伸缩，窄时 wrap 换行不溢出。
-   「刷新积分 / 全部签到 / 视图切换」已移到汇总条上方的功能按钮条（.fn-bar）。 */
+/* 账号管理按钮区：渠道添加网格**占满整行宽度**（六列等宽，按钮在格内拉伸）。
+   早期写法是「弹性空白（.pa-spacer）+ 右组 grid」把按钮推到最右，移走同排的
+   「刷新积分 / 全部签到 / 视图切换」后左侧留下一条死的空白（owner 报障），已删除空档元素；
+   现在 wrap 只承载这一个网格，由网格自身的 flex:1 吃掉行宽，不再依赖「靠右」定位。
+   窄屏见下方 @media (max-width: 779px)：空档已不存在，只需换成 auto-fit 列。 */
 .panel-actions-wrap { display: flex; align-items: center; flex: 1; min-width: 0; }
-.pa-spacer { flex: 1; }
 .pa-right {
   display: grid;
-  grid-template-columns: repeat(6, auto);
+  flex: 1;          /* 占满 wrap 行宽（唯一子项） */
+  min-width: 0;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
   gap: 8px 10px;
 }
 .pa-right .btn { justify-self: stretch; white-space: nowrap; }
@@ -109,6 +112,14 @@ body {
 /* 紧凑档：比标准按钮小两号（14px/8px14px → 12px/6px10px），
    PC 默认宽度下一行能放下 6 个渠道按钮（实测阈值见下方媒体查询注释）。 */
 .panel-actions-wrap .btn { font-size: 12px; padding: 6px 10px; }
+/* 过渡区（780–840px）：六列等宽把每格压到 ≤120px，最长的渠道标签（实测 ＋ WorkBuddyCN = 94px）
+   在 10px 内边距下会顶出格宽（780px 时可用宽仅 88px < 94px）而溢出。这里把内边距收紧到 6px
+   （省 8px ⇒ 780px 下可用 96px），实测 780–840 全档不换行、不溢出、不裁切。
+   断点取 840 而非实测阈值 814：给不同机器字体回退的字符宽度留 ~25px 余量；
+   840px 以上格宽 ≥120px，10px 内边距已安全，不再收紧。≤779px 走 auto-fit，不受此档影响。 */
+@media (min-width: 780px) and (max-width: 840px) {
+  .pa-right .btn { padding: 6px 6px; }
+}
 
 /* 按钮 */
 .btn { border: 1px solid var(--border); background: var(--card); color: var(--text); padding: 8px 14px; border-radius: 8px; cursor: pointer; font-size: 14px; transition: all .15s; }
@@ -1581,7 +1592,6 @@ select.input::-ms-expand, .select::-ms-expand { display: none; }
   .top-icons { order: 2; margin-left: auto; }
   .top-info { order: 3; flex: none; width: 100%; }
   .panel-actions-wrap { flex-direction: column; align-items: stretch; gap: 8px; }
-  .pa-spacer { display: none; }
   .pa-right { grid-template-columns: repeat(auto-fit, minmax(118px, 1fr)); width: 100%; }
   .pa-right .btn { justify-self: stretch; padding: 8px 10px; }
 }
