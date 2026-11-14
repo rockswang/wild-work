@@ -62,7 +62,7 @@ var staticCatalog = []staticEntry{
 func StaticModels() []provider.ModelInfo {
 	out := make([]provider.ModelInfo, 0, len(staticCatalog))
 	for _, e := range staticCatalog {
-		out = append(out, provider.ModelInfo{ID: e.ID, Name: e.ID})
+		out = append(out, provider.ModelInfo{ID: e.ID, Name: e.ID, SupportsImageGeneration: e.Image})
 	}
 	return out
 }
@@ -279,6 +279,9 @@ func modelInfoFromRemote(e map[string]any) (provider.ModelInfo, bool) {
 	if caps, ok := objStrings(e, "capabilities"); ok && hasAnyFold(caps, "tools", "function_calling", "tool-calls") {
 		mi.SupportsTools = true
 	}
+	// 「能出图」= 静态表 image:true ∪ 命名启发式（D12）：上游目录**不带**该字段，
+	// 所以这条是路由分类结果而不是上游声明（不得写成「上游说有」）。
+	mi.SupportsImageGeneration = IsImageModel(id)
 	return mi, true
 }
 
@@ -345,6 +348,7 @@ func fillFrom(dst, src provider.ModelInfo) provider.ModelInfo {
 	}
 	dst.SupportsTools = dst.SupportsTools || src.SupportsTools
 	dst.SupportsImages = dst.SupportsImages || src.SupportsImages
+	dst.SupportsImageGeneration = dst.SupportsImageGeneration || src.SupportsImageGeneration
 	dst.SupportsReasoning = dst.SupportsReasoning || src.SupportsReasoning
 	if len(dst.ReasoningEfforts) == 0 {
 		dst.ReasoningEfforts = src.ReasoningEfforts

@@ -478,6 +478,11 @@ type ModelInfo struct {
 	SupportsImages    bool // 支持图像输入（多模态视觉）
 	SupportsReasoning bool // 支持思考/推理模式
 	SupportsTools     bool // 支持函数/工具调用
+	// SupportsImageGeneration 标记「能出图」（文生图 / 图生图）：与 SupportsImages（能看图）
+	// 是**两个维度**，不得互相推导——Qwen2.5-VL 能看图但不出图，Qwen-Image 出图画不了图。
+	// 消费方：/v1/models 的 supports_image_generation 标记 + 面板模型行的 🎨，
+	// 让客户端能区分「画图模型」与「对话模型」。数据缺失时保持 false（不编造，R49）。
+	SupportsImageGeneration bool
 	// 思考档位（issue #96）：上游目录显式声明的可选档位表。nil = 上游未声明，
 	// 消费方不得自行编造（对齐 ContextFromAPI 哲学；参考 Buddy2api v2.1.11 的
 	// 「never invent effort lists」原则）。典型值 low/medium/high/xhigh/max。

@@ -173,6 +173,10 @@ var staticModelNames = []string{
 	"glm/search",
 	"glm/ppt",
 	"glm/video",
+	// 生图模型（/v1/images/* 的直连名）：进目录让客户端知道本渠道能画图（D6），
+	// 并带 supports_image_generation 标记。它**不是**对话模型——ChatStream 本地 400
+	// （与 modelscope 的 image_model_not_chat 同口径），不会拿到一段普通聊天文本。
+	"glm/image",
 }
 
 // StaticModels 上游不可达时的静态模型清单。
@@ -193,6 +197,10 @@ func StaticModels() []provider.ModelInfo {
 		switch {
 		case strings.HasPrefix(bare, "chatglm-think"), strings.HasPrefix(bare, "chatglm-deepresearch"):
 			info.SupportsReasoning = true
+		}
+		// 生图模型：标记「能出图」（与 SupportsImages 能看图是两个维度）。
+		if bare == "image" {
+			info.SupportsImageGeneration = true
 		}
 		out = append(out, info)
 	}

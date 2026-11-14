@@ -613,6 +613,11 @@ func buildModelEntry(k provider.Kind, mi provider.ModelInfo) map[string]any {
 	if mi.SupportsTools {
 		entry["supports_tools"] = true
 	}
+	// 能出图（文生图/图生图）单独一个标记：与 architecture.input_modalities（能看图）
+	// 是两个维度，客户端靠它区分「画图模型」与「对话模型」（D12）。
+	if mi.SupportsImageGeneration {
+		entry["supports_image_generation"] = true
+	}
 	entry["architecture"] = map[string]any{
 		"input_modalities": mi.InputModalities(),
 		"modality":         mi.Modality(),
