@@ -71,6 +71,8 @@
           <button class="btn primary alt lobsterai" id="btnAddLobsterAI" title="LobsterAI（有道龙虾）：本机回调授权登录，支持多账号">＋ LobsterAI</button>
           <button class="btn primary alt loomy" id="btnAddLoomy">＋ Loomy</button>
           <button class="btn primary alt minimax" id="btnAddMiniMax" title="MiniMax Code（中国版）：设备码授权登录，支持多账号">＋ MiniMax</button>
+          <button class="btn primary alt modelscope" id="btnAddModelScope" title="ModelScope（魔搭国内站 api-inference.modelscope.cn）：粘贴 ms- Access Token，须已绑定阿里云账号并完成实名认证，token 区域须为国内站">＋ ModelScope</button>
+          <button class="btn primary alt modelscopeai" id="btnAddModelScopeAI" title="ModelScopeAI（魔搭国际站 api-inference.modelscope.ai）：粘贴 ms- Access Token，须已绑定阿里云账号并完成实名认证；两区 token 不通用">＋ ModelScopeAI</button>
           <button class="btn primary alt monkeycode" id="btnAddMonkeyCode">＋ MonkeyCode</button>
           <button class="btn primary alt officeace" id="btnAddOfficeAce" title="华为云果办：从本机 OfficeAce 客户端导入或自助 OAuth 登录">＋ OfficeAce</button>
           <button class="btn primary alt qodercn" id="btnAddQoderCN">＋ QoderCN</button>
@@ -492,6 +494,54 @@
     <div class="modal-actions">
       <button class="btn" id="btnLingxiCancel">取消</button>
       <button class="btn primary" id="btnLingxiSubmit">添加</button>
+    </div>
+  </div>
+</div>
+
+<!-- ModelScope（魔搭）两区：粘贴 ms- Access Token。
+     ⚠️ 刻意**没有**「浏览器自动登录 / 扫码」入口：本渠道没有 CDP 捕获、也没有 cookie 换 token
+     的路（D4）；token 只能由用户在 modelscope.cn 自助生成后粘进来。
+     两区 token **不通用** ⇒ 弹层按渠道切换区域文案与提交端点，绝不共用一个池。 -->
+<div class="overlay hidden" id="msOverlay">
+  <div class="modal modal-wide">
+    <div class="modal-title" id="msTitle">添加 ModelScope 账号</div>
+    <div class="modal-body settings-body">
+
+      <div class="cfg-section">
+        <div class="cfg-heading">获取 Access Token</div>
+        <ol class="glm-steps">
+          <li>用浏览器打开 <a href="https://modelscope.cn/my/myaccesstoken" target="_blank" rel="noopener noreferrer">modelscope.cn/my/myaccesstoken</a>（国际站账号请用 <code>modelscope.ai</code> 的账号登录）。</li>
+          <li>确认该魔搭账号<b>已绑定阿里云账号并完成实名认证</b> —— 未绑定 / 未实名时上游会直接拒绝调用。</li>
+          <li>新建并复制一枚 <code>ms-</code> 开头的 Access Token，粘贴到下面。</li>
+        </ol>
+        <input id="msTokenInput" class="input grow" spellcheck="false" autocomplete="off"
+               placeholder="粘贴 ms- 开头的 Access Token" style="width:100%;font-family:ui-monospace,monospace">
+        <div class="hint" style="margin-top:6px">
+          <button class="btn small primary" id="btnMsSubmit">验证并添加</button>
+        </div>
+      </div>
+
+      <!-- 关键约束：区域与 token 必须一致，且一枚 token = 一个账号（多账号要粘多枚）。 -->
+      <div class="glm-warn">
+        <div class="glm-warn-title">⚠️ 两个区域，token 不通用</div>
+        <ol>
+          <li><b>ModelScope</b> = 国内站 <code>api-inference.modelscope.cn</code>；<b>ModelScopeAI</b> = 国际站 <code>api-inference.modelscope.ai</code>。</li>
+          <li>token 的区域必须与所选渠道<b>一致</b>：国内站 token 贴到 ModelScopeAI（或反之）会被上游判 401。</li>
+          <li><b>一枚 token 就是一个账号</b>：同一枚重复粘贴不会增加额度，多账号请分别粘贴各自的一枚。</li>
+        </ol>
+      </div>
+
+      <div class="hint" id="msRegion"></div>
+      <div class="hint">
+        上游只有 token 用量、<b>没有余额/积分查询接口</b>，故本渠道积分列显示「不适用」（不是额度用光）；
+        token 与请求数照常进「用量与流水」与平台概览表。token 失效（401）时账号卡片会出现 ⟳ 入口，
+        重新生成一枚后贴进来即可覆盖。
+      </div>
+
+      <div class="hint" id="msErr" style="color:var(--danger)"></div>
+    </div>
+    <div class="modal-actions">
+      <button class="btn" id="btnMsCancel">关闭</button>
     </div>
   </div>
 </div>

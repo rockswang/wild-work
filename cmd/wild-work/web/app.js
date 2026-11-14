@@ -751,7 +751,7 @@ function renderTopbar() {
 
 // 渠道显示名与 CSS 短类名（后端 group / 费率 channel 均为 provider.Kind）。
 const CH_LABEL = { workbuddy: "WorkBuddyCN", workbuddyai: "WorkBuddyAI", traework: "TraeWork", traecode: "TraeCode", qoder: "Qoder", qodercn: "QoderCN", qodercom: "QoderCOM", qwenwork: "千问办公", glm: "智谱清言", monkeycode: "MonkeyCode", raccoon: "小浣熊", loomy: "Loomy", oczen: "OpenCodeZen", kilo: "Kilo", minimax: "MiniMax", lobsterai: "LobsterAI", zcode: "ZCode", gemini: "Gemini", codearts: "CodeArts", cline: "Cline", officeace: "OfficeAce", comate: "WPS Comate", lingxi: "WPS 灵犀", modelscope: "ModelScope", modelscopeai: "ModelScopeAI" };
-const CH_CLASS = { workbuddy: "wb", workbuddyai: "wbai", traework: "trae", traecode: "traecode", qoder: "qoder", qodercn: "qodercn", qodercom: "qodercom", qwenwork: "qwenwork", glm: "glm", monkeycode: "monkeycode", raccoon: "raccoon", loomy: "loomy", oczen: "oczen", kilo: "kilo", minimax: "minimax", lobsterai: "lobsterai", zcode: "zcode", gemini: "gemini", codearts: "codearts", cline: "cline", officeace: "officeace", comate: "comate", lingxi: "lingxi" };
+const CH_CLASS = { workbuddy: "wb", workbuddyai: "wbai", traework: "trae", traecode: "traecode", qoder: "qoder", qodercn: "qodercn", qodercom: "qodercom", qwenwork: "qwenwork", glm: "glm", monkeycode: "monkeycode", raccoon: "raccoon", loomy: "loomy", oczen: "oczen", kilo: "kilo", minimax: "minimax", lobsterai: "lobsterai", zcode: "zcode", gemini: "gemini", codearts: "codearts", cline: "cline", officeace: "officeace", comate: "comate", lingxi: "lingxi", modelscope: "modelscope", modelscopeai: "modelscopeai" };
 const chLabel = (k) => CH_LABEL[k] || k;
 const chClass = (k) => CH_CLASS[k] || "custom";
 // ---------- 图表配色：与徽章同源，但保证同图任意两条线颜色可辨 ----------
@@ -850,7 +850,7 @@ function varyColor(hex, i) {
 // Loomy 同样已实现签到（宠物每日打工奖励，见 internal/loomy/checkin.go），故也在名单外。
 // 注意：Loomy 的奖励判据是「当日有效对话轮次」（上游算），未在官方客户端用过该账号时
 // 领取结果会是「未达档位」——那是如实状态，不是按钮坏了。
-const NO_EXPLICIT_CHECKIN = new Set(["workbuddyai", "qwenwork", "oczen", "kilo", "zcode", "gemini", "cline", "comate"]);
+const NO_EXPLICIT_CHECKIN = new Set(["workbuddyai", "qwenwork", "oczen", "kilo", "zcode", "gemini", "cline", "comate", "modelscope", "modelscopeai"]);
 const noExplicitCheckin = (g) => NO_EXPLICIT_CHECKIN.has(g) || isCustomGroup(g); // 自定义渠道无签到活动（R66）
 // isCustomGroup 该分组是否为用户自定义 OpenAI 兼容渠道（R66）。
 // 以 state.custom_channels（后端 /api/state 下发，保存即热更新）为准，勿在前端另维护一份。
@@ -887,12 +887,17 @@ const NO_CHECKIN_TAG = {
   gemini: "不支持",
   cline: "无签到",
   comate: "无签到",
+  // ModelScope 两区：上游无签到活动，调度器连签到任务都没有（D14）。
+  modelscope: "无签到",
+  modelscopeai: "无签到",
 };
 const noCheckinText = (g) => NO_CHECKIN_TAG[g] || "无签到";
 // 无积分概念的渠道（匿名通道）：积分区域显示「不适用」，并隐藏刷新积分/明细入口。
-// 内建名单只有 oczen/kilo/cline/comate；自定义渠道（R66）同样无积分，但渠道名是用户配置的、
+// 内建名单只有 oczen/kilo/cline；自定义渠道（R66）同样无积分，但渠道名是用户配置的、
 // 运行期可增删，故运行时以后端下发的 custom_channels 动态判定（isCustomGroup）。
-const NO_CREDITS_BUILTIN = new Set(["oczen", "kilo", "cline"]);
+// ModelScope 两区（D5）：上游只有 token 用量、没有余额/积分端点 ⇒ 同属「不适用」，
+// 但它们是**真多 token 池**（可删可停可改名），故只进本集合、**不进** VIRTUAL_ACCOUNTS。
+const NO_CREDITS_BUILTIN = new Set(["oczen", "kilo", "cline", "modelscope", "modelscopeai"]);
 // 虚拟账号渠道：没有账号概念（oczen 匿名通道 / kilo 免费池），卡片只留 🔒 静态指示，
 // 不可停用/删除/改名（后端 RemoveAccount/DisableAccount 也硬拒）。
 // 与 NO_CREDITS_BUILTIN 是**两个维度**：cline 属「无积分但可删可停」，
@@ -910,7 +915,11 @@ const isVirtualCh = (g) => VIRTUAL_ACCOUNTS.has(String(g || "workbuddy"));
 // 这种**不能自愈**的形态（客户端导入只拿得到不过期的网关 Basic），此时同样只能重新登录
 // 才能恢复积分/签到 —— 徽标与 ⟳ 入口由同一处逻辑驱动（见 renderAccounts 的 needRelogin）。
 // Lingxi 纳入（灵犀登录态失效可 ⟳ 重登：CDP 自动登录流 login_lingxi）。
-const RELOGIN_CHANNELS = new Set(["workbuddy", "workbuddyai", "traework", "qoder", "qodercn", "qodercom", "qwenwork", "raccoon", "officeace", "lingxi"]);
+const RELOGIN_CHANNELS = new Set(["workbuddy", "workbuddyai", "traework", "qoder", "qodercn", "qodercom", "qwenwork", "raccoon", "officeace", "lingxi", "modelscope", "modelscopeai"]);
+// ModelScope 两区：粘贴型渠道（"ms-" Access Token），登录入口 = 同一个 token 粘贴层。
+// 两区是**独立服务**、token 不通用 ⇒ 弹层按渠道切换区域文案与提交端点，绝不用一个池兼容两区。
+const MODEL_SCOPE_CHANNELS = new Set(["modelscope", "modelscopeai"]);
+const isModelScopeCh = (ch) => MODEL_SCOPE_CHANNELS.has(String(ch || "workbuddy"));
 
 // creditsText 账号卡片的积分文案。
 // 拆成「可用 / 不可用 / 临期」三个数字：渠道（如 TraeWork）会下发官方客户端专用的
@@ -1349,7 +1358,9 @@ function acctParts(a) {
     const needRelogin = Boolean(a.session_dead) || missingRT;
     // lingxi 特例文案：重登弹的是双路径弹层（浏览器登录 / 粘贴 wps_sid 任选），
     // 且 wps_sid 不回传身份字段——重登会落成新条目，旧失效卡需手动删。
-    const reloginTitle = a.group === "lingxi"
+    const reloginTitle = isModelScopeCh(a.group)
+      ? "重新粘贴 Access Token（两区 token 不通用；同一枚 token 重贴不会新增账号，可直接覆盖失效凭据）"
+      : a.group === "lingxi"
       ? "重新登录（浏览器登录或重新粘贴 wps_sid 均可；重登会落成新条目，旧失效卡片请手动删除）"
       : missingRT
       ? "重新登录（本账号缺 refresh_token，积分/签到不可用；登录成功后自动补签）"
@@ -2063,6 +2074,14 @@ function promptLogin(channel) {
   altBtn.classList.add("hidden");
   altBtn.onclick = null;
 
+  // ModelScope 两区（D4）：授权 = 面板粘贴 `ms-` Access Token，没有 CDP、没有扫码、
+  // 也没有 cookie 换 token 的路 —— 这里直接弹 token 层（与 comate/lingxi 的粘贴入口同构）。
+  // 区域文案必须按渠道切换：两区 token 不通用，贴错只会在首次对话才暴露成 401。
+  if (isModelScopeCh(channel)) {
+    openMsDialog(channel);
+    return;
+  }
+
   // OfficeAce（华为云果办）：主按钮走自助 OAuth（打开华为云授权页），
   // 次按钮回退到「从本机 OfficeAce 客户端导入」。
   if (channel === "officeace") {
@@ -2238,6 +2257,9 @@ async function importLocal(channel) {
 }
 
 async function startLogin(channel, accountLabel) {
+  // 粘贴型渠道（ModelScope 两区）没有后端登录编排：直接用同一个 token 粘贴层，
+  // 否则 ⟳ 会打 /api/login/start 并报 unknown login provider（死按钮）。
+  if (isModelScopeCh(channel)) return promptLogin(channel);
   // 渠道分派：OfficeAce 是**两步**流程（华为云授权码 + 云端轮询捕获），专属入口是
   // startOfficeAceWebLogin（→ POST /api/login/officeace_auto）。它与下面
   // `POST /api/login/start` 的形态不同——后者一次调用就返回 auth_url，且后端
@@ -2712,6 +2734,55 @@ async function submitLingxiSID() {
     refreshFees();
   } catch (e) {
     $("lingxiErr").textContent = e.message || "验证失败";
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+// ---------- ModelScope 两区：粘贴 ms- Access Token（无 CDP / 无扫码） ----------
+// 为什么两区共用一个弹层：凭据形态完全相同（`ms-` token）、只有区域与提交端点不同；
+// 复制两份弹层只会多一处漏改点。渠道存储在模块变量 msPendingKind 里，不往 DOM 里塞 hidden input
+// （弹层里只该有一个输入框：token）。
+let msPendingKind = "modelscope";
+function openMsDialog(channel) {
+  msPendingKind = channel === "modelscopeai" ? "modelscopeai" : "modelscope";
+  const label = chLabel(msPendingKind);
+  $("msTitle").textContent = "添加 " + label + " 账号";
+  $("msRegion").innerHTML = msPendingKind === "modelscopeai"
+    ? "当前渠道：ModelScopeAI（国际站 api-inference.modelscope.ai）—— 请粘贴<b>国际站</b>账号生成的 token。"
+    : "当前渠道：ModelScope（国内站 api-inference.modelscope.cn）—— 请粘贴<b>国内站</b>账号生成的 token。";
+  $("msTokenInput").value = "";
+  $("msErr").textContent = "";
+  $("msOverlay").classList.remove("hidden");
+  setTimeout(() => $("msTokenInput").focus(), 30);
+}
+// closeMsDialog 关闭即清空输入：token 是凭据，不得留在 DOM 里。
+function closeMsDialog() {
+  $("msTokenInput").value = "";
+  $("msErr").textContent = "";
+  $("msOverlay").classList.add("hidden");
+}
+// submitMsToken 提交粘贴的 Access Token。
+// 后端只做「GET /v1/models 验证 + 落盘」（零 token 消耗）；错误原文透传，
+// 内嵌「区域不通用 / 绑阿里云实名 / 重新生成」三条自查项（见 modelscope.ValidateToken）。
+async function submitMsToken() {
+  const token = ($("msTokenInput").value || "").trim();
+  if (!token) { $("msErr").textContent = "请粘贴 ms- 开头的 Access Token"; return; }
+  const kind = msPendingKind;
+  const path = kind === "modelscopeai" ? "/api/login/modelscopeai_token" : "/api/login/modelscope_token";
+  const btn = $("btnMsSubmit");
+  btn.disabled = true;
+  $("msErr").textContent = "验证中…";
+  try {
+    const r = await api(path, { token });
+    closeMsDialog();
+    if (r && r.warning) toast(r.warning);
+    toast(chLabel(kind) + " 账号已添加");
+    await loadState();
+    refreshFees();
+  } catch (e) {
+    // 错误位留在弹层里（不要 close）：整段文案就是「下一步该做什么」
+    $("msErr").textContent = e.message || "验证失败";
   } finally {
     btn.disabled = false;
   }
@@ -4013,6 +4084,10 @@ function bind() {
   $("btnAddLingxi").onclick = () => promptLogin("lingxi");
   $("btnLingxiSubmit").onclick = submitLingxiSID;
   $("btnLingxiCancel").onclick = () => $("lingxiOverlay").classList.add("hidden");
+  $("btnAddModelScope").onclick = () => promptLogin("modelscope");
+  $("btnAddModelScopeAI").onclick = () => promptLogin("modelscopeai");
+  $("btnMsSubmit").onclick = submitMsToken;
+  $("btnMsCancel").onclick = closeMsDialog;
   $("btnAddOfficeAce").onclick = () => promptLogin("officeace");
   $("btnAddMiniMax").onclick = () => promptLogin("minimax");
   $("btnAddLobsterAI").onclick = () => promptLogin("lobsterai");

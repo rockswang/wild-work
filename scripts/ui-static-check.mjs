@@ -1234,6 +1234,134 @@ const regexOk = (re) => re.test(raw);
   check("手工兜底仍在（整段 Cookie 也能粘）", html.includes('id="comateSidInput"') && html.includes('id="btnComateToggleManual"'));
 }
 
+// ---- 场景 1.96：ModelScope 两区接入面板（票 04）----
+// 两个新内建渠道同时落在面板**六处真源**上，每处漏改都是静默降级：
+//   - CH_LABEL 少一键 → 汇总条/按钮显示裸渠道名，且与后端 ChannelDisplayOrder 排出两个顺序；
+//   - CH_CLASS 少一键 → chColor() 回退 --ch-custom，图上两区同色且与徽章对不上；
+//   - 按钮 DOM 序错 → R142「显示名字节序」规则被破坏（面板/汇总条/费率 tab 互相打脸）；
+//   - NO_CREDITS_BUILTIN 漏 → 积分列显示 0，被读成「额度用光」（实际是「没有积分概念」）；
+//   - VIRTUAL_ACCOUNTS 多 → 真账号被当匿名通道默认收起并丢失删除/停用入口（R130/R131）；
+//   - 弹层出现「浏览器自动登录」按钮 → 该渠道根本没有 CDP/扫码/cookie 换 token 的路（D4）。
+{
+  const html96 = readFileSync(new URL("../cmd/wild-work/web/index.html", import.meta.url), "utf8");
+  const css96 = readFileSync(new URL("../cmd/wild-work/web/style.css", import.meta.url), "utf8");
+  const label96 = new Function("return (" + (raw.match(/const CH_LABEL = (\{[^}]*\});/) || [])[1] + ")")();
+  const class96 = new Function("return (" + (raw.match(/const CH_CLASS = (\{[^}]*\});/) || [])[1] + ")")();
+
+  // ① 显示名两键（Go 侧 DisplayNames 逐字一致由配色组的跨语言断言兜底）
+  check("ModelScope / ModelScopeAI 显示名逐字正确（排序键就是它，改字会改顺序）",
+    label96.modelscope === "ModelScope" && label96.modelscopeai === "ModelScopeAI",
+    `modelscope=${label96.modelscope} modelscopeai=${label96.modelscopeai}`);
+
+  // ② 短类名两键（缺 → chColor 回退 #6366f1，折线图与徽章撞色）
+  check("两区短类名进 CH_CLASS（缺则图色回退 --ch-custom）",
+    class96.modelscope === "modelscope" && class96.modelscopeai === "modelscopeai",
+    `modelscope=${class96.modelscope} modelscopeai=${class96.modelscopeai}`);
+
+  // ③ 按钮 DOM 序 = 显示名字节序（ModelScope 在 MiniMax 之后、MonkeyCode 之前；AI 紧随其后）
+  {
+    const btns96 = [...html96.matchAll(/<button class="btn primary alt (\S+)" id="(btnAdd\w+)"/g)].map((m) => m[2]);
+    const idx = (id) => btns96.indexOf(id);
+    check("两区按钮存在（＋ ModelScope / ＋ ModelScopeAI）",
+      idx("btnAddModelScope") >= 0 && idx("btnAddModelScopeAI") >= 0, btns96.join(","));
+    check("按钮 DOM 序符合字节序：MiniMax < ModelScope < ModelScopeAI < MonkeyCode（R142）",
+      idx("btnAddMiniMax") < idx("btnAddModelScope")
+      && idx("btnAddModelScope") + 1 === idx("btnAddModelScopeAI")
+      && idx("btnAddModelScopeAI") < idx("btnAddMonkeyCode"),
+      `MiniMax=${idx("btnAddMiniMax")} ModelScope=${idx("btnAddModelScope")} ModelScopeAI=${idx("btnAddModelScopeAI")} MonkeyCode=${idx("btnAddMonkeyCode")}`);
+  }
+
+  // ④⑤ 配色三处同补：:root 变量 + .badge 规则 + .btn 规则，且一律 var(--ch-*)
+  check("两套 --ch-* 存在于 :root（6 位 hex）",
+    /--ch-modelscope:\s*#[0-9a-fA-F]{6}/.test(css96) && /--ch-modelscopeai:\s*#[0-9a-fA-F]{6}/.test(css96));
+  {
+    const rules = ["badge", "btn"]; // .badge.x 与 .btn.primary.alt.x
+    const missing = [];
+    for (const c of ["modelscope", "modelscopeai"]) {
+      for (const r of rules) {
+        const sel = r === "badge" ? `\\.badge\\.${c}` : `\\.btn\\.primary\\.alt\\.${c}`;
+        const prop = r === "badge" ? "background" : "background";
+        if (!new RegExp(`${sel}\\s*\\{[^}]*${prop}:\\s*var\\(--ch-${c}\\)`).test(css96)) missing.push(`${r}.${c}`);
+      }
+    }
+    check("两区徽章与按钮规则都在、都走 var(--ch-*)（不写死 hex）", missing.length === 0, missing.join(", "));
+  }
+  check("两区相关规则体内没有写死 hex（白字除外）",
+    !/\.(?:badge|btn\.primary\.alt)\.(?:modelscope|modelscopeai)\b[^{]*\{[^}]*#(?!fff)[0-9a-fA-F]{3,6}/.test(css96));
+
+  // ⑥⑦ 无积分 ≠ 虚拟账号（R130/R131 的两个维度必须分开）
+  check("NO_CREDITS_BUILTIN 含两区（积分列「不适用」而不是 0）",
+    /const NO_CREDITS_BUILTIN = new Set\(\[[^\]]*"modelscope"[^\]]*"modelscopeai"/.test(raw));
+  check("VIRTUAL_ACCOUNTS 不含两区（真多 token 池：可删/可停/可改名，默认可见）",
+    !/const VIRTUAL_ACCOUNTS = new Set\(\[[^\]]*"modelscope/.test(raw));
+
+  // ⑧⑨ 真实渲染：无积分账号显示「不适用」且默认不收起
+  T.__pushAccount({
+    uid: "mst-0000000000000001", group: "modelscope", nickname: "ModelScope 0001",
+    credits: 0, expiring_credits: 0, unusable_credits: 0, credits_na: true,
+    cooling: false, until: "", reason: "", disabled: false, last_checkin_at: "", last_checkin_ok: false,
+  });
+  T.renderAccounts();
+  {
+    const seg = document.getElementById("acctList").innerHTML
+      .split('<div class="acct-card').find((s) => s.includes("ModelScope 0001")) || "";
+    const head = seg.slice(0, seg.indexOf(">"));
+    check("ModelScope 账号积分列显示「不适用」而不是 0",
+      seg !== "" && seg.includes("不适用") && !/credit-num">0</.test(seg), seg.slice(0, 240));
+    check("ModelScope 账号默认不收起（data-na=0 且无 hidden）",
+      seg !== "" && !head.includes("hidden") && head.includes('data-na="0"'), head.slice(0, 160));
+    check("ModelScope 账号可删可停（不是固定账号）",
+      /onclick="removeAcct\('mst-/.test(seg) && /onclick="toggleDisable\('mst-/.test(seg));
+    check("ModelScope 账号不给「刷新积分」入口（没有余额端点，点了只会报错）",
+      !seg.includes("refreshOne('mst-"));
+  }
+  T.__popAccount();
+  T.renderAccounts();
+
+  // ⑩⑪ 弹层：只有 token 一个输入；没有任何自动登录/扫码动作
+  {
+    const start96 = html96.indexOf('<div class="overlay hidden" id="msOverlay">');
+    const end96 = html96.indexOf("<!-- 确认弹层 -->");
+    const modal96 = start96 >= 0 && end96 > start96 ? html96.slice(start96, end96) : "";
+    check("存在 ModelScope 粘贴弹层（id=msOverlay）", modal96 !== "");
+    const inputs96 = [...modal96.matchAll(/<input\b/g)].length;
+    check("弹层只含一个输入框且是 token（type 非 hidden，id=msTokenInput）",
+      inputs96 === 1 && /<input id="msTokenInput"[^>]*class="input grow"/.test(modal96)
+      && !/id="msTokenInput"[^>]*type="hidden"/.test(modal96), `输入框数=${inputs96}`);
+    const btnIds96 = [...modal96.matchAll(/<button[^>]*id="(btn\w+)"/g)].map((m) => m[1]);
+    check("弹层按钮只有「验证并添加」与「关闭」（无自动登录/扫码入口）",
+      btnIds96.length === 2 && btnIds96.includes("btnMsSubmit") && btnIds96.includes("btnMsCancel"),
+      btnIds96.join(","));
+    check("弹层不出现自动登录/扫码按钮或文案（D4：本渠道无 CDP、无扫码、无 cookie 换 token）",
+      !/浏览器登录|扫码|自动登录/.test(modal96), "弹层里只应有粘贴说明");
+    // 前置条件三连必须在文案里（用户「不翻文档就知道为什么调不通」）
+    check("弹层文案含「阿里云」「实名」「区域」自查项",
+      modal96.includes("阿里云") && /实名/.test(modal96) && /区域/.test(modal96), "缺前置条件说明");
+    check("弹层点明两区 token 不通用 + 区域必须一致",
+      /不通用/.test(modal96) && /一致/.test(modal96), "缺区域一致性提示");
+  }
+
+  // ⑫ 提交端点按 kind 分派；关闭即清空（凭据不得留在 DOM）
+  check("提交按渠道分派两个端点（modelscope_token / modelscopeai_token）",
+    raw.includes('"/api/login/modelscopeai_token"') && raw.includes('"/api/login/modelscope_token"'));
+  check("关闭即清空 token 输入（closeMsDialog 里 value = \"\"）",
+    /function closeMsDialog\(\)[\s\S]{0,200}\$\("msTokenInput"\)\.value = ""/.test(raw));
+  check("粘贴型渠道纳入重登入口（⟳ 不落到 unknown login provider）",
+    /const RELOGIN_CHANNELS = new Set\(\[[^\]]*"modelscope"[^\]]*"modelscopeai"/.test(raw)
+    && /if \(isModelScopeCh\(channel\)\) return promptLogin\(channel\);/.test(raw));
+
+  // ⑬ 无签到文案齐备（R150：漏写会落兜底「无签到」，把「上游无活动」说错）
+  check("两区在无签到名单内且有专属状态文案",
+    /const NO_EXPLICIT_CHECKIN = new Set\(\[[^\]]*"modelscope"[^\]]*"modelscopeai"/.test(raw)
+    && /modelscope: "无签到"/.test(raw) && /modelscopeai: "无签到"/.test(raw));
+
+  // ⑭ 不给「没有积分概念」的渠道发明「次数」单位（D5：不编造剩余次数）
+  check("未给两区发明「次数」计量单位（creditsUnit 未改、前端无次数单位函数）",
+    !/creditsUnit/.test(raw) && !/modelscope/i.test(
+      (readFileSync(new URL("../internal/app/app.go", import.meta.url), "utf8")
+        .match(/func \(a \*App\) creditsUnit\(group string\) string \{[\s\S]{0,200}?\n\}/) || [""])[0]));
+}
+
 // ---- 输出 ----
 let failed = 0;
 for (const [name, pass, extra] of results) {
