@@ -60,6 +60,20 @@ const editPromptConstraint = "根据参考图中的人或物，按照下面提�
 // 回落它——改造前 model 是**忽略**的，不能让老客户端因此变红（既有用例零改动）。
 const legacyImageModel = "glm/image"
 
+// normalizeImageModel 把客户端 model 归一成「可用于路由的全串」：
+// 空串与无 `<kind>/` 前缀的裸名都回落 legacyImageModel（改造前 model 被忽略）。
+// 路由 key、冷却 key 与下发给渠道的 ImageRequest.Model 用**同一个**归一后的值，
+// 避免「按 A 选号、告诉渠道 B」的错位。幂等，可重复调用。
+func normalizeImageModel(model string) string {
+	if strings.TrimSpace(model) == "" {
+		return legacyImageModel
+	}
+	if _, _, ok := provider.SplitModelID(model); !ok {
+		return legacyImageModel
+	}
+	return model
+}
+
 // glmRuntime 取 glm 渠道 Runtime；未接入返回 nil。
 // 路由已改走 imageRuntimeFor；本访问器保留给「glm 特判」与既有测试使用。
 func (h *Handler) glmRuntime() *Runtime {
@@ -126,11 +140,12 @@ func (h *Handler) imagesGenerations(w http.ResponseWriter, r *http.Request) {
 	}
 	wantB64 := req.ResponseFormat != "url" // gpt-image-1 语义：默认 b64_json
 
-	imgs, err := h.runImage(w, r, req.Model, func(gen provider.ImageGenerator, acct *auth.Auth) ([]provider.ImageResult, error) {
+	imgModel := normalizeImageModel(req.Model)
+	imgs, err := h.runImage(w, r, imgModel, func(gen provider.ImageGenerator, acct *auth.Auth) ([]provider.ImageResult, error) {
 		// Size 传**像素串原值**（不是本层换算出的比例）：各渠道自行取用，
 		// glm 在自己的包里换算，T2 的魔搭直通上游。
 		return gen.GenerateImage(acct, provider.ImageRequest{
-			Model: req.Model, Prompt: req.Prompt, Size: req.Size, N: n,
+			Model: imgModel, Prompt: req.Prompt, Size: req.Size, N: n,
 		})
 	})
 	if err != nil {
@@ -246,9 +261,10 @@ func (h *Handler) imagesEdits(w http.ResponseWriter, r *http.Request) {
 		outPrompt = fmt.Sprintf("参考图中共有 %d 个以 reference1..%d 从左到右标注的单元，按序号对应下面提示词中的对象。", len(raws), len(raws)) + outPrompt
 	}
 
-	results, err := h.runImage(w, r, model, func(gen provider.ImageGenerator, acct *auth.Auth) ([]provider.ImageResult, error) {
+	imgModel := normalizeImageModel(model)
+	results, err := h.runImage(w, r, imgModel, func(gen provider.ImageGenerator, acct *auth.Auth) ([]provider.ImageResult, error) {
 		return gen.EditImage(acct, provider.ImageRequest{
-			Model: model, Prompt: outPrompt, Size: sizeStr, N: 1, References: []string{refURL},
+			Model: imgModel, Prompt: outPrompt, Size: sizeStr, N: 1, References: []string{refURL},
 		})
 	})
 	if err != nil {
@@ -333,13 +349,7 @@ func resolveReferenceURL(raws [][]byte) (string, error) {
 // `glm/image` 因此与改造前逐字一致，T2 的 `modelscope/Qwen/Qwen-Image` 各自独立冷却。
 func (h *Handler) runImage(w http.ResponseWriter, r *http.Request, model string,
 	call func(provider.ImageGenerator, *auth.Auth) ([]provider.ImageResult, error)) ([]provider.ImageResult, error) {
-	if strings.TrimSpace(model) == "" {
-		model = legacyImageModel
-	} else if _, _, split := provider.SplitModelID(model); !split {
-		// 无 `<kind>/` 前缀（如 OpenAI 的 `gpt-image-1`/`gpt-image-2`）：改造前 model 是
-		// **忽略**的，老客户端不能因为带了个装饰性模型名就变红 ⇒ 回落改造前的语义。
-		model = legacyImageModel
-	}
+	model = normalizeImageModel(model)
 	rt, gen, kind, ok := h.imageRuntimeFor(model)
 	if !ok {
 		if kind == provider.GLM && rt == nil {
@@ -349,7 +359,7 @@ func (h *Handler) runImage(w http.ResponseWriter, r *http.Request, model string,
 		}
 		reason := fmt.Sprintf("渠道 %s 不支持生图", provider.DisplayName(kind))
 		if rt == nil {
-			reason = fmt.Sprintf("渠道 %s 未接入（未知渠道或未装配）", model[:strings.IndexByte(model, '/')])
+			reason = fmt.Sprintf("渠道 %s 未接入（未知渠道或未装配）", kind)
 		}
 		// 必须 400，不得 404：404 归 ErrNotFound（Rotatable）⇒ handler 换号 + NoteError，
 		// 换到的号照样被本地拒，几次之后整条渠道进冷却（R139 同款事故）。
