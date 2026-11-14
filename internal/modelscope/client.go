@@ -28,6 +28,12 @@ type Client struct {
 	Base string
 	// idle 流中空闲上限（拿到响应头之后才计时）；0 = 默认 90s。
 	idle time.Duration
+	// pollLimit 生图轮询总时限覆盖（**测试注入点**）；0 = imagePollLimit() 现算，
+	// 即 max(120s, HTTP.Timeout)。生产不得设置它（否则配置的 600s 会被静默绕开）。
+	pollLimit time.Duration
+	// pollSleep 生图轮询间隔的实现（**测试注入点**，便于断言退避序列而真的等 2s+）；
+	// nil = 真实计时器。生产不得设置它。
+	pollSleep func(ctx context.Context, d time.Duration) error
 }
 
 // New 构造客户端。kind 只接受 provider.ModelScope / provider.ModelScopeAI。

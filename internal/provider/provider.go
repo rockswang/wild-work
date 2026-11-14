@@ -277,6 +277,7 @@ const (
 	ErrModelBlocked                  // 11102 该后端无此模型 → (账号,模型) 负缓存避让
 	ErrPassthrough                   // 请求级拒绝（形态/地域/身体不被接受）→ 原文透传，不罚账号不轮转
 	ErrQueued                        // 上游「模型排队中」提示（qodercn 10605 isQueued）→ 换号可能命中不同队列
+	ErrUpstream                      // 上游任务级失败（如异步生图任务 FAILED/CANCELED）→ 不换号、不罚账号
 )
 
 func (k ErrKind) String() string {
@@ -311,6 +312,8 @@ func (k ErrKind) String() string {
 		return "passthrough"
 	case ErrQueued:
 		return "queued"
+	case ErrUpstream:
+		return "upstream"
 	default:
 		return "none"
 	}
@@ -387,6 +390,34 @@ type Error struct {
 
 func (e *Error) Error() string {
 	return fmt.Sprintf("upstream %s (http %d): %s", e.Kind, e.Status, e.Msg)
+}
+
+// TaskTimeout 上游**异步任务**（submit 拿 task_id + 轮询型，当前 modelscope 生图）
+// 在时限内未完成。
+//
+// 为什么必须与普通上游失败分开：这类请求上游**已经受理**（任务可能仍在执行并消耗额度），
+// 对外应回 504 并把 task id 交给客户端，而不是 502「生图失败」；同时它**不换号**
+// （换了号也拿不回已提交的任务），故内嵌 Err 固定 ErrUpstream。
+// Unwrap 让 handler 既能 errors.As 到 *Error 走通用处置，也能单独识别超时。
+type TaskTimeout struct {
+	// TaskID 上游任务 id（**不是凭据**，可以写进错误体与日志）。
+	TaskID  string
+	Elapsed time.Duration
+	// Err 固定 Kind=ErrUpstream（Rotatable()==false）。
+	Err *Error
+}
+
+func (e *TaskTimeout) Error() string {
+	return fmt.Sprintf("上游任务 %s 在等待 %s 后仍未完成（上游任务可能仍在执行，本工具不重试已提交任务）",
+		e.TaskID, e.Elapsed.Round(time.Second))
+}
+
+// Unwrap 让 errors.As(err, &*Error) 仍能取到 Kind（不换号、不罚账号）。
+func (e *TaskTimeout) Unwrap() error {
+	if e.Err != nil {
+		return e.Err
+	}
+	return &Error{Kind: ErrUpstream, Msg: "async task timeout"}
 }
 
 // Classified 把 *Error 包装成实现了 StreamErrorClassifier 的错误，供**流式路径**使用。
@@ -549,6 +580,9 @@ type ImageRequest struct {
 	Size string
 	// N 期望张数；<=0 表示按上游默认（上游常固定回多张，由渠道自行截断）。
 	N int
+	// NegativePrompt 反向提示词（可选）：**只有客户端真的给了才非空**，渠道不得编造默认值。
+	// 不提供该字段的渠道直接忽略。
+	NegativePrompt string
 	// References 是参考图引用（改图用）：http(s) 公网直链，或 `data:image/...;base64,...`
 	// / 裸 base64。拼版与图床托管是调用方的事，渠道只负责把引用交给上游。
 	References []string
@@ -573,6 +607,21 @@ type ImageResult struct {
 type ImageGenerator interface {
 	GenerateImage(a *auth.Auth, req ImageRequest) ([]ImageResult, error)
 	EditImage(a *auth.Auth, req ImageRequest) ([]ImageResult, error)
+}
+
+// InlineImageRefProvider 由「参考图可直传」的渠道实现（当前 modelscope）。
+//
+// 不实现本接口的渠道走默认（glm）语义：多参考图由调用方先拼版 + 图床托管成
+// 一个公网 URL（上游单图硬约束），`ImageRequest.References` 恒为 1 个 http(s) 直链。
+// 实现本接口的渠道自己吃得下多张内联参考图 ⇒ 调用方**不得**拼版、**不得**上图床
+// （拼版排版会改变语义，图床托管只对单图上游有意义）。
+//
+// 这是渠道能力声明而不是渠道类型断言：handler 只问「你能不能吃内联引用」，
+// 不需要 import 具体渠道包。
+type InlineImageRefProvider interface {
+	// InlineImageRefs 报告 EditImage 的 References 可以是多张
+	// `data:image/...;base64,...` 或 http(s) 直链（不拼版、不托管）。
+	InlineImageRefs() bool
 }
 
 // StreamErrorClassifier 由「流内业务错误可分类」的渠道实现（当前 traework 的
