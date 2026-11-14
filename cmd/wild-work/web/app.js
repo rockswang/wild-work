@@ -528,7 +528,9 @@ function syncCreditsFromDetail(uid, d) {
   a.expiring_credits = d.expiring_remain || 0;
   a.credits_stale = false;
   const cell = document.querySelector(`.acct-credits[data-uid="${uid}"]`);
-  if (cell) cell.innerHTML = creditsText(a);
+  // 列表模式积分格是两行制（票 03）：回写必须与当前视图同构，否则一次「刷新积分」
+  // 就会把列表行打回卡片式单行（单位/角标挤回数字旁）。
+  if (cell) cell.innerHTML = acctView === "list" ? creditsTextRow(a) : creditsText(a);
   renderSummary();
 }
 
@@ -927,32 +929,66 @@ function fmtTokens(n) {
   return n.toLocaleString("zh-CN");
 }
 
+// creditParts 积分文案的**语义分解**（卡片 / 列表共用的唯一判据来源）：
+// 五条触发条件（不适用 / 待刷新 / token / 数字 / 临期 / 不可用）只在这里判一次，
+// 两种视图各自拼装自己的 DOM 结构（卡片单行、列表两行，票 03），避免各写一份判据漂移。
+// 返回 {kind:"na"|"stale"} 或 {kind:"num", isToken, num, expiring, unusable}；
+// expiring/unusable 为 0 表示「无该角标」（与既有「>0 才显示」的口径一致）。
+function creditParts(a) {
+  if (a.credits_na) return { kind: "na" };
+  if (a.credits_stale) return { kind: "stale" };
+  const isToken = a.credits_unit === "token";
+  return {
+    kind: "num",
+    isToken,
+    num: isToken ? fmtTokens(a.credits) : a.credits,
+    expiring: (a.expiring_credits || 0) > 0
+      ? (isToken ? fmtTokens(a.expiring_credits) : a.expiring_credits) : 0,
+    unusable: (!isToken && (a.unusable_credits || 0) > 0) ? a.unusable_credits : 0,
+  };
+}
+
+// creditsText 卡片模式的积分文案（单行）。输出与升级前**逐字一致**（D3：卡片形态零变化），
+// 故这里只把原本内联的判据换成 creditParts 的数据。
 function creditsText(a) {
-  if (a.credits_na) {
-    return `<span class="credit-na" title="该渠道无积分概念">不适用</span>`;
-  }
-  if (a.credits_stale) {
-    return `<span class="credit-stale" title="余额口径已过期（旧版本状态文件），正在自动刷新…">待刷新</span>`;
-  }
+  const p = creditParts(a);
+  if (p.kind === "na") return `<span class="credit-na" title="该渠道无积分概念">不适用</span>`;
+  if (p.kind === "stale") return `<span class="credit-stale" title="余额口径已过期（旧版本状态文件），正在自动刷新…">待刷新</span>`;
   // Token 计量渠道（credits_unit="token"，如 ZCode）：同一位置改显示 **Token 计数**。
   // 与积分分开统计——它**不进**积分汇总合计（见 renderSummary），
   // 但保留临期角标（token 桶同样有到期时间，来自内部 ResourceItem.ExpireAt）。
-  if (a.credits_unit === "token") {
-    let html = `<span class="credit-num">${fmtTokens(a.credits)}</span>`
+  if (p.isToken) {
+    let html = `<span class="credit-num">${p.num}</span>`
       + `<span title="本渠道额度以 token 计量，与积分分开统计">tokens</span>`;
-    if ((a.expiring_credits || 0) > 0) {
-      html += `<span class="credit-expiring"> (临期${fmtTokens(a.expiring_credits)})</span>`;
-    }
+    if (p.expiring) html += `<span class="credit-expiring"> (临期${p.expiring})</span>`;
     return html;
   }
-  let html = `<span class="credit-num">${a.credits}</span><span>可用积分</span>`;
-  if ((a.expiring_credits || 0) > 0) {
-    html += `<span class="credit-expiring"> (临期${a.expiring_credits})</span>`;
-  }
-  if ((a.unusable_credits || 0) > 0) {
-    html += `<span class="credit-unusable"> (不可用${a.unusable_credits})</span>`;
-  }
+  let html = `<span class="credit-num">${p.num}</span><span>可用积分</span>`;
+  if (p.expiring) html += `<span class="credit-expiring"> (临期${p.expiring})</span>`;
+  if (p.unusable) html += `<span class="credit-unusable"> (不可用${p.unusable})</span>`;
   return html;
+}
+
+// creditsTextRow 列表模式的积分文案（两行制，票 03）：第一行 = 数字 + 单位
+// （或 待刷新 / 不适用 这类替代主文案），第二行 = 角标（临期 / 不可用）。
+// 数字放进 .cr-num-box（右对齐 + 等宽数字），单位小字在其**外**且绝对定位（不占列宽、
+// 不推移数字右缘）——与卡片共用 creditParts 判据，但结构**分开**（卡片保持单行现状）。
+function creditsTextRow(a) {
+  const p = creditParts(a);
+  if (p.kind === "na") {
+    return `<div class="cr-main"><span class="credit-na" title="该渠道无积分概念">不适用</span></div>`;
+  }
+  if (p.kind === "stale") {
+    return `<div class="cr-main"><span class="credit-stale" title="余额口径已过期（旧版本状态文件），正在自动刷新…">待刷新</span></div>`;
+  }
+  const unit = p.isToken
+    ? `<span class="cr-unit" title="本渠道额度以 token 计量，与积分分开统计">tokens</span>`
+    : `<span class="cr-unit">可用积分</span>`;
+  const main = `<div class="cr-main has-unit"><span class="cr-num-box"><span class="credit-num">${p.num}</span></span>${unit}</div>`;
+  let badges = "";
+  if (p.expiring) badges += `<span class="credit-expiring"> (临期${p.expiring})</span>`;
+  if (p.unusable) badges += `<span class="credit-unusable"> (不可用${p.unusable})</span>`;
+  return badges ? `${main}<div class="cr-sub">${badges}</div>` : main;
 }
 
 // 渠道汇总顺序（R142）：**直接由 CH_LABEL 派生** —— 内建渠道按显示名的 UTF-8 字节序升序，
@@ -1404,7 +1440,7 @@ function acctRowHtml(a) {
   return `
       <tr class="${cls}" data-group="${esc(a.group || "workbuddy")}" data-na="${isVirtualAcct(a) ? 1 : 0}">
         <td class="cell-acct">${chBadge(a.group)}${p.nameHtml}<div class="cell-uid">UID: ${esc(shortUid(a.uid))}</div></td>
-        <td class="num cell-credits acct-credits${p.noCredits ? "" : " clickable"}" data-uid="${a.uid}"${p.noCredits ? "" : ` onclick="showCreditDetail(event,'${a.uid}')" title="点击查看积分明细（含分页）" role="button" tabindex="0" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();showCreditDetail(event,'${a.uid}')}"`}>${creditsText(a)}</td>
+        <td class="num cell-credits acct-credits${p.noCredits ? "" : " clickable"}" data-uid="${a.uid}"${p.noCredits ? "" : ` onclick="showCreditDetail(event,'${a.uid}')" title="点击查看积分明细（含分页）" role="button" tabindex="0" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();showCreditDetail(event,'${a.uid}')}"`}>${creditsTextRow(a)}</td>
         <td class="cell-tags">${p.tags}</td>
         <td class="cell-ops">${p.ops}</td>
       </tr>`;

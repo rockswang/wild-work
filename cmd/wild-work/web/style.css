@@ -246,6 +246,15 @@ body {
 .acct-table .cell-credits .credit-unusable { font-size: 12px; font-weight: 600; color: var(--muted); }
 .acct-table .cell-credits .credit-expiring { font-size: 12px; font-weight: 600; color: var(--danger); }
 .acct-table .cell-credits .credit-stale { font-size: 12px; font-weight: 600; color: var(--muted); animation: stale-pulse 1.6s ease-in-out infinite; }
+/* 积分列两行制（票 03）：第一行 .cr-main = 数字 + 单位，第二行 .cr-sub = 角标（临期/不可用）。
+   数字右缘严格对齐：数字放进 .cr-num-box（右对齐 + 等宽数字），单位小字在其**外**、
+   绝对定位进右侧预留带 ⇒ 不占列宽、不推移数字右缘（改卡片不走这套，两视图各自作用域）。 */
+.acct-table .cell-credits .cr-main { position: relative; padding-right: 46px; text-align: right; }
+/* 主文案被 待刷新 / 不适用 占据时无单位，不需要预留带，否则会白白左移。 */
+.acct-table .cell-credits .cr-main:not(.has-unit) { padding-right: 0; }
+.acct-table .cell-credits .cr-num-box { font-variant-numeric: tabular-nums; }
+.acct-table .cell-credits .cr-unit { position: absolute; right: 0; bottom: 0; font-size: 11px; color: var(--muted); font-weight: 400; }
+.acct-table .cell-credits .cr-sub { font-size: 11px; color: var(--muted); font-weight: 400; white-space: nowrap; }
 .acct-table .cell-credits.clickable { cursor: pointer; }
 .acct-table .cell-credits.clickable:hover { text-decoration: underline dotted; text-underline-offset: 3px; }
 .acct-table .cell-credits.clickable:focus-visible { outline: 2px solid var(--primary); outline-offset: -2px; }
