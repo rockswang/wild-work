@@ -2798,21 +2798,33 @@ async function toggleAutostart() {
 // fbRules 编辑态副本（openSettings 时从 state.model_fallback 深拷贝；保存成功后由 loadState 刷新）
 let fbRules = [];
 
-// fbFromSet 汇总当前全部主力模型ID（跨规则）：备胎候选/追加/清洗统一从这里排除——
-// 同一 ID 不允许既是某规则主力又出现在任何备胎链。每次下拉 render 实时取，主力列表变更即同步可选范围。
+// fbFromSet 汇总当前全部主力模型ID（跨规则）：**只喂「主力唯一」的候选隐藏**
+// （新增规则的主力框 / 行内主力框），不再用于备胎排除——备胎允许是其他规则的主力。
+// 每次下拉 render 实时取，主力列表变更即同步可选范围。
 function fbFromSet() {
   const s = {};
   for (const r of fbRules) if (r.from) s[r.from] = true;
   return s;
 }
-// fbSanitize 就地清洗 fbRules：从每条备胎链剔除任意规则的主力ID（含历史脏数据），返回剔除条数。
-// renderFbList 每轮渲染前先过一遍（所有编辑路径都经 renderFbList 重渲染，chip 索引始终与清洗后
-// 数组一致），保存前再兜底一次——渲染/比对/落盘共用同一份互斥干净数据。
+// fbSelfExclude 返回「一条规则必须排除的模型集合」= **仅它自己的主力**（自环）。
+// 备胎侧全部 6 处排除（行内候选集 / 行内点选守卫 / 底栏候选集 / 新增规则预过滤 /
+// ＋ 追加 / 回车追加）与 2 处清洗（渲染前 / 保存前）统一走这个 helper，避免各写一份而漂移。
+// 语义边界：同一模型可以既是某规则的主力、又作为**其他规则**的备胎（重叠合法）；
+// 只有「备胎 = 本规则自己的主力」这种自环被禁止。
+function fbSelfExclude(from) {
+  const s = {};
+  const t = String(from || "").trim();
+  if (t) s[t] = true;
+  return s;
+}
+// fbSanitize 就地清洗 fbRules：只剔除「本规则自环」（备胎 = 该条规则自己的主力），返回剔除条数。
+// **其他规则的主力不是脏数据**：历史版本按「全部主力集合」清洗，打开面板时会把合法的重叠
+// 条目静默删掉（还顺带亮「未保存」）；现收窄为只剔自环。renderFbList 每轮渲染前先过一遍
+// （所有编辑路径都经 renderFbList 重渲染，chip 索引始终与清洗后数组一致），保存前再兜底一次。
 function fbSanitize() {
-  const fs = fbFromSet();
   let dropped = 0;
   for (const r of fbRules) {
-    const keep = r.to.filter((t) => !fs[t]);
+    const keep = r.to.filter((t) => t !== r.from);
     dropped += r.to.length - keep.length;
     r.to = keep;
   }
@@ -2846,8 +2858,8 @@ function updateEffDirty() {
 // 交互全部事件委托在 #fbList 上（data-del-rule / data-del-to / data-add-to / data-edit-idx /
 // dragstart / dragover / drop / dragend），每轮 innerHTML 重建后委托仍然有效。
 function renderFbList() {
-  const dropped = fbSanitize(); // 互斥校验：主力ID不出现在任何备胎链（chip 索引与数据一致）
-  if (dropped > 0) toast(`已自动剔除 ${dropped} 个与主力模型互斥的备胎`); // 唯一剔除时机：打开面板首轮（历史脏数据）/ 改主力波及他链
+  const dropped = fbSanitize(); // 自环校验：备胎不得等于本规则自己的主力（chip 索引与数据一致）
+  if (dropped > 0) toast(`已自动剔除 ${dropped} 个自环备胎（备胎不能等于本规则的主力）`); // 唯一剔除时机：打开面板首轮（历史脏数据）/ 改主力波及本行
   const rows = fbRules.map((r, i) => {
     const tos = r.to.map((t, j) =>
       `<span class="fb-to-chip" draggable="true" data-chip="${i}:${j}" data-model="${esc(t)}" title="${esc(t)}（拖动调整顺序，序号 = 降级优先级）">`
@@ -2903,11 +2915,12 @@ function attachFbPickers() {
     const i = +inp.dataset.addIdx;
     attachModelPicker(inp, {
       stayOpen: true,
-      excludeSet: () => { const s = { ...fbFromSet() }; for (const t of (fbRules[i] && fbRules[i].to) || []) s[t] = true; return s; },
+      // 只排本规则自己的主力 + 已上链项：其他规则的主力必须留在候选里（重叠合法）
+      excludeSet: () => { const s = fbSelfExclude(fbRules[i] && fbRules[i].from); for (const t of (fbRules[i] && fbRules[i].to) || []) s[t] = true; return s; },
       onPick: (id) => {
         const r = fbRules[i];
         if (!r) return;
-        if (fbFromSet()[id] || r.to.includes(id)) return; // 主力ID或已上链 → 不追加（候选已隐藏，双保险）
+        if (id === r.from || r.to.includes(id)) return; // 自环或已上链 → 不追加（候选已隐藏，双保险）
         r.to.push(id);
         renderFbList();
         toast(`已加入备胎链第 ${r.to.length} 位（点保存生效）`);
@@ -2951,7 +2964,7 @@ function updateFbAliasWarn() {
 
 async function saveModelFallback() {
   try {
-    fbSanitize(); // 落盘前互斥兜底（正常路径 renderFbList 已清洗过，防御未来路径）
+    fbSanitize(); // 落盘前自环兜底（正常路径 renderFbList 已清洗过，防御未来路径）
     const [hardErr] = fbAliasValidate();
     if (hardErr) { $("fbErr").textContent = hardErr; return; } // 前端即时反馈（后端仍独立判定）
     const resp = await api("/api/config/model_fallback", { rules: fbRules });
@@ -4083,14 +4096,15 @@ function bind() {
     const [tos, err] = parseModelList($("fbToInput").value);
     if (err) { $("fbErr").textContent = err; return; }
     if (tos.length === 0) { $("fbErr").textContent = "至少填一个备胎模型ID"; return; }
-    // 互斥预过滤：剔除已有规则主力 + 新 from 自身（renderFbList 兜底同规则，此处前置给即时反馈）
-    const fsx = fbFromSet(); fsx[from] = true;
-    const kept = tos.filter((t) => !fsx[t]);
-    if (kept.length === 0) { $("fbErr").textContent = "备胎均与主力模型互斥（含新主力自身），请更换备胎"; return; }
-    if (kept.length < tos.length) toast(`已剔除 ${tos.length - kept.length} 个与主力模型互斥的备胎`);
+    // 自环预过滤：只剔除「新 from 自身」（其他规则的主力合法，必须保留）；
+    // renderFbList 兜底同规则，此处前置只为给即时反馈。
+    const selfExcl = fbSelfExclude(from);
+    const kept = tos.filter((t) => !selfExcl[t]);
+    if (kept.length === 0) { $("fbErr").textContent = "备胎只有自环项（备胎不能等于本规则的主力），请更换备胎"; return; }
+    if (kept.length < tos.length) toast(`已剔除 ${tos.length - kept.length} 个自环备胎`);
     fbRules.push({ from, to: kept, name: "" });
     $("fbFromInput").value = ""; $("fbToInput").value = "";
-    renderFbList(); // 内部先 fbSanitize：互斥兜底（预过滤后此处不再剔除）
+    renderFbList(); // 内部先 fbSanitize：自环兜底（预过滤后此处不再剔除）
   };
   $("btnFbSave").onclick = saveModelFallback;
   $("fbList").addEventListener("click", async (e) => {
@@ -4107,7 +4121,7 @@ function bind() {
       const [tos, err] = parseModelList(inp && inp.value);
       if (err) { $("fbErr").textContent = err; return; }
       if (tos.length === 0) { $("fbErr").textContent = "先在输入框填备胎模型ID 再点 ＋"; return; }
-      fbRules[i].to.push(...tos.filter((t) => !fbFromSet()[t] && !fbRules[i].to.includes(t))); // 主力ID全局排除
+      fbRules[i].to.push(...tos.filter((t) => t !== fbRules[i].from && !fbRules[i].to.includes(t))); // 只排本规则自环
       renderFbList();
       return;
     }
@@ -4134,7 +4148,7 @@ function bind() {
     const [tos, err] = parseModelList(e.target.value);
     if (err) { $("fbErr").textContent = err; return; }
     if (tos.length === 0) return;
-    fbRules[i].to.push(...tos.filter((t) => !fbFromSet()[t] && !fbRules[i].to.includes(t))); // 主力ID全局排除
+    fbRules[i].to.push(...tos.filter((t) => t !== fbRules[i].from && !fbRules[i].to.includes(t))); // 只排本规则自环
     renderFbList();
   });
   // 行内主模型 ID 编辑：change（失焦/回车后 blur）提交——形态校验 + 主模型唯一性校验，
@@ -4239,12 +4253,14 @@ function bind() {
   // 配置区模糊搜索下拉接线（静态输入框一次性挂；行内输入框由 attachFbPickers 每轮重挂）。
   // 回车链：底部主力框 → 跳备胎框；备胎框 → 添加规则；映射模型框 → 跳档位框；档位框 → 添加映射。
   attachModelPicker($("fbFromInput"), {
-    excludeSet: () => fbFromSet(), // 已配置的主力从候选隐藏（重复由下方添加校验兜底），与备胎框行为对齐
+    excludeSet: () => fbFromSet(), // 主力唯一：已配置的主力从主力候选隐藏（重复由下方添加校验兜底）
     enterAction: () => $("fbToInput").focus(),
   });
   attachModelPicker($("fbToInput"), {
     stayOpen: true, multiAccum: true, // 累积多选：点选逐个逗号追加，末段继续搜
-    excludeSet: () => fbFromSet(), // 已配置的主力模型ID从备胎候选隐藏（实时取，主力变更即同步）
+    // 底栏备胎框属于「尚未创建的规则」，其自环候选 = 待提交的 from（实时取，主力框改动即同步）；
+    // 已配置的其他规则主力必须留在候选中（重叠合法）。
+    excludeSet: () => fbSelfExclude($("fbFromInput").value),
     enterAction: () => $("btnFbAdd").onclick(),
   });
   attachModelPicker($("effModelInput"), { enterAction: () => $("effEffortInput").focus() });
