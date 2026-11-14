@@ -234,7 +234,10 @@ const patched =
   + ", fbAliasValidate, __setFbRules: (rs) => { fbRules = rs; }"
   + ", renderCreditDetail, showCreditDetail, __setCreditDetailState: (st, resp) => { detailState = st; detailCache = { [st.uid]: resp }; }"
   // 「不适用」默认收起（R103）：showNoCredit / acctFilter 都是 `let`，toggle 也要直接调
-  + ", applyAcctFilter, toggleNoCredit, __setShowNoCredit: (v) => { showNoCredit = v; }, __setAcctFilter: (v) => { acctFilter = v; }"
+  + ", applyAcctFilter, toggleNoCredit, setAcctFilter, setAcctView, __getAcctView: () => acctView, __setShowNoCredit: (v) => { showNoCredit = v; }, __setAcctFilter: (v) => { acctFilter = v; }"
+  // 视图模式（工单 02）：acctView 是 `let`，需要渲染前注入；__pushAccount/__popAccount
+  // 让场景能临时补一个「自定义渠道 / token 计量」账号，而不污染共享 fixture 的合计口径。
+  + ", __pushAccount: (a) => { state.accounts.push(a); }, __popAccount: () => { state.accounts.pop(); }"
   // 停用原因徽标（R135）：需要临时把一条 fixture 账号改成「已停用 + 指定原因」再重渲染。
   + ", __setAccount: (uid, patch) => { const a = (state.accounts || []).find((x) => x.uid === uid); if (a) Object.assign(a, patch); }"
   + " };";
@@ -505,6 +508,239 @@ check("非 officeace 账号不带「缺续期凭据」（渠道限定，避免�
   T.__setShowNoCredit(false);
   T.__setAcctFilter(null);
   T.renderAccounts();
+  T.renderSummary();
+}
+
+// ---- 场景 1.95：卡片⇄列表视图模式 + 功能按钮条（工单 02）----
+// 断言 1–9（断言 10「积分列两行制」属工单 03，不在此）；断言 11「既有账号页断言零回归」
+// 由本文件其余全部场景共同承担 —— 本文件只要有一条红就整体失败，没有单独一行可写。
+//
+// 为什么必须有这个场景：视图模式是**结构性**新增（同一容器两种互斥渲染），
+// 最容易出的错不是「列表不好看」，而是「列表里少了一份数据/多了一份求和」：
+//   ① 分组行自己求一次和 → 与汇总条 chip 静默漂移（断言 4/5）；
+//   ② 可见性只认卡片、不认列表行与空分组 → 筛选/收起在列表里失效（断言 6/7/8）；
+//   ③ 控件又搬回顶部工具栏 → 与 owner 拍板的按钮条位置不一致（断言 9）。
+{
+  const html = readFileSync(new URL("../cmd/wild-work/web/index.html", import.meta.url), "utf8");
+  const css = readFileSync(new URL("../cmd/wild-work/web/style.css", import.meta.url), "utf8");
+  const listOf = () => document.getElementById("acctList").innerHTML;
+  const sumOf = () => document.getElementById("creditSummary").innerHTML;
+  const segOf = (split, uid) => listOf().split(split).find((s) => s.includes(uid)) || "";
+  const rowOf = (uid) => segOf('<tr class="acct-row', `"${uid}"`);
+  const groupOf = (k) => listOf().split('<tbody class="acct-group"').find((s) => s.includes(`data-group="${k}"`)) || "";
+  // 源码切片：结构不变量断言要局限于函数体内，不能拿整份文件当判据。
+  const slice = (src, from, to) => {
+    const i = src.indexOf(from), j = i < 0 ? -1 : src.indexOf(to, i + from.length);
+    return i < 0 ? "" : src.slice(i, j > i ? j : undefined);
+  };
+  const acctBody = slice(raw, "function acctParts(a) {", "function renderTimes()");
+  const csBody95 = slice(raw, "function channelSummaries(accounts) {", "// renderSummary");
+  const grBody = slice(raw, "function acctGroupsHtml() {", "// renderAccounts 账号区渲染");
+  const afBody = slice(raw, "function applyAcctFilter() {", "// setAcctFilter");
+  // 注释先剔掉再判"不得出现"：本仓大量注释会引用被禁写法（如 :has()）作反例说明，
+  // 不剔就会把「注释里的反例」当成真使用，反而逗着人把注释写糊。
+  const noComments = (s) => s.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
+
+  // ---- 断言 1：默认卡片模式；本地偏好值异常时回退卡片且不报错 ----
+  check("视图偏好默认卡片（acctView 初值 card）", /let acctView = "card";/.test(raw));
+  check("本地偏好只有 \"list\" 才生效，其余一律回退卡片",
+    /localStorage\.getItem\(ACCT_VIEW_KEY\) === "list"\) acctView = "list"/.test(raw)
+      && /acctView = v === "list" \? "list" : "card";/.test(raw));
+  check("偏好读写沿用既有「直读写 + 失败静默」写法（存储不可用不抛错）",
+    /try \{ if \(localStorage\.getItem\(ACCT_VIEW_KEY\) === "list"\) acctView = "list"; \} catch \(e\) \{/.test(raw)
+      && /function persistAcctView\(\)/.test(raw) && raw.includes("localStorage.setItem(ACCT_VIEW_KEY, acctView)"));
+  T.setAcctView("card");
+  const card95 = listOf();
+  check("默认即卡片模式：渲染出账号卡片且无表格", /class="acct-card/.test(card95) && !/<table/.test(card95));
+  check("偏好回显高亮覆盖两种模式（卡片/列表）",
+    /syncAcctViewSeg\(\);/.test(raw) && /b\.classList\.toggle\("active", b\.dataset\.view === acctView\)/.test(raw));
+
+  // ---- 断言 2：两模式互斥渲染；列表模式只有一张表（反向护栏）----
+  T.setAcctView("list");
+  const list95 = listOf();
+  check("列表模式渲染单表（<table> 只出现一次，不退化成每渠道一张表）",
+    (list95.match(/<table\b/g) || []).length === 1 && !/class="acct-card/.test(list95),
+    `表 ${(list95.match(/<table\b/g) || []).length} 张`);
+  check("列表模式只有一处列名表头（thead 唯一）", (list95.match(/<thead>/g) || []).length === 1);
+  check("表头四列（账号 / 积分 / 状态 / 操作）",
+    /<thead><tr><th class="col-acct">账号<\/th><th class="num">积分<\/th><th>状态<\/th><th class="col-ops">操作<\/th><\/tr><\/thead>/.test(list95));
+  check("两个模式互斥（卡片模式无表格也无列表行）",
+    (T.setAcctView("card"), /class="acct-card/.test(listOf()) && !/<table/.test(listOf()) && !/acct-row/.test(listOf())));
+
+  // ---- 断言 3：分组行顺序 = 渠道顺序唯一规则（含自定义垫底）----
+  T.__pushAccount({ uid: "z-token-1", group: "zcode", nickname: "token号", credits: 8000000, credits_unit: "token",
+    expiring_credits: 500000, unusable_credits: 0, credits_na: false, cooling: false, until: "", reason: "",
+    disabled: false, last_checkin_at: "", last_checkin_ok: false });
+  T.__pushAccount({ uid: "custom-1", group: "custom-demo", nickname: "自定义号", credits: 300,
+    expiring_credits: 0, unusable_credits: 0, credits_na: false, cooling: false, until: "", reason: "",
+    disabled: false, last_checkin_at: "", last_checkin_ok: false });
+  T.setAcctView("list");
+  T.renderSummary();
+  const labels95 = (() => {
+    const m = raw.match(/const CH_LABEL = (\{[^}]*\});/);
+    return m ? new Function("return (" + m[1] + ")")() : {};
+  })();
+  const groups95 = [...listOf().matchAll(/<tbody class="acct-group" data-group="([^"]+)"/g)].map((m) => m[1]);
+  const builtin95 = groups95.filter((g) => !g.startsWith("custom-"));
+  const sorted95 = builtin95.slice().sort((a, b) => (labels95[a] < labels95[b] ? -1 : labels95[a] > labels95[b] ? 1 : 0));
+  check("分组行顺序 = 内建渠道按显示名字节序（R142，与汇总条/费率页同序）",
+    builtin95.length >= 3 && builtin95.join("|") === sorted95.join("|"), groups95.join("|"));
+  check("自定义渠道分组钉在最末（不被字母序混排进内建）",
+    groups95.length > 0 && groups95[groups95.length - 1] === "custom-demo", groups95.join("|"));
+  check("分组行含徽章 + 显示名 +「N 号」+ 小计",
+    /class="badge trae"[\s\S]*?<span class="g-name">TraeWork<\/span><span class="cs-n">2号<\/span><span class="g-sub"><span class="g-lbl">小计<\/span>/.test(groupOf("traework")),
+    groupOf("traework").slice(0, 320));
+  check("空分组不渲染（每个分组容器里至少有一行账号）",
+    groups95.length > 0 && listOf().split('<tbody class="acct-group"').slice(1).every((s) => s.includes('class="acct-row')));
+  check("分组内保持后端下发原序", /state\.accounts\s*\n\s*\.filter\(\(a\) => \(a\.group \|\| "workbuddy"\) === k\)/.test(grBody));
+
+  // ---- 断言 4：分组行小计与汇总条 chip 调同一个聚合 / 摘要函数 ----
+  const tok = (s) => [...s.matchAll(/<span class="(cs-num|cs-exp|cs-tok|cs-unu|cs-stale|credit-na)"[^>]*>[^<]*<\/span>/g)].map((m) => m[0]);
+  const chipTokens = (k) => tok(sumOf().split('<span class="cs-chip').find((s) => s.includes(`data-wg="${k}"`)) || "");
+  const groupTokens = (k) => tok(groupOf(k));
+  check("分组行小计与汇总条 chip 逐字同源（同一个 c.body 产物）",
+    chipTokens("traework").length > 0 && chipTokens("traework").join("|") === groupTokens("traework").join("|"),
+    `chip=${chipTokens("traework").join("|")} group=${groupTokens("traework").join("|")}`);
+  check("token 计量渠道在分组行同样标注 tokens 单位且不与积分相加",
+    chipTokens("zcode").join("|") === groupTokens("zcode").join("|")
+      && groupOf("zcode").includes("cs-tok") && groupOf("zcode").includes("tokens") && groupOf("zcode").includes("cs-exp"));
+  check("「不适用」渠道的分组行同样显示「不适用」",
+    groupOf("oczen").includes('credit-na">不适用'), groupOf("oczen").slice(0, 200));
+  check("分组行只消费 channelSummaries（除 ${c.body} 外不出现 credits/tokens/reduce）",
+    grBody.includes("channelSummaries(state.accounts)") && grBody.includes("${c.body}")
+      && !/credits|tokens|reduce\(/.test(grBody.replace(/\$\{c\.body\}/g, "")));
+
+  // ---- 断言 5：反向护栏 —— 账号渲染函数内不得出现第二份按渠道求和 ----
+  check("账号渲染函数内没有第二份按渠道求和",
+    !/c\.credits \+= a\.credits/.test(acctBody) && !/c\.tokens \+= a\.credits/.test(acctBody)
+      && !/for \(const a of accounts\)/.test(acctBody));
+  check("全文件的按渠道求和仍只有一份（工单 01 的唯一来源未退化）",
+    (raw.match(/c\.credits \+= a\.credits/g) || []).length === 1
+      && (raw.match(/for \(const a of accounts\)/g) || []).length === 1 && csBody95.length > 0);
+  check("卡片模板未变（仍由 acctParts → acctCardHtml 产出，逐字保持升级前形态）",
+    /function acctCardHtml\(a\) \{[\s\S]*?const p = acctParts\(a\);[\s\S]*?<div class="acct-card\$\{disabledClass\}/.test(raw)
+      && /function acctRowHtml\(a\) \{[\s\S]*?const p = acctParts\(a\);/.test(raw));
+
+  // ---- 断言 6：分组行可点 = 该渠道 chip 筛选（chip 高亮同步，再点取消）----
+  check("分组行带渠道 key（data-wg）且点击走 setAcctFilter 同一入口",
+    /data-wg="\$\{esc\(k\)\}"/.test(grBody)
+      && /const head = target\.closest\("\.acct-group-head"\)/.test(raw)
+      && /setAcctFilter\(head\.dataset\.wg \|\| null\)/.test(raw));
+  check("汇总条 chip 与分组行走的是同一个 setAcctFilter（不各写一套筛选）",
+    raw.includes("setAcctFilter(chip.dataset.wg || null);") && raw.includes("setAcctFilter(head.dataset.wg || null);"));
+  T.__setAcctFilter(null);
+  T.renderAccounts();
+  T.renderSummary();
+  T.setAcctFilter("traework");
+  check("筛选后汇总条 chip 高亮同步（.on 由 acctFilter 派生）",
+    /cs-chip clickable on" data-wg="traework"/.test(sumOf()), sumOf().slice(0, 240));
+  check("分组行高亮由 applyAcctFilter 从同一 acctFilter 派生（两处不同步即此处红）",
+    afBody.includes('.acct-group-head') && /toggle\("on", Boolean\(acctFilter\) && h\.dataset\.wg === acctFilter\)/.test(afBody));
+  check("再点同一条即取消（幂等切换，未新增取消动作）",
+    /acctFilter = \(acctFilter === kind\) \? null : kind;/.test(raw));
+  T.setAcctFilter("traework");
+
+  // ---- 断言 7：统一可见性函数同时处理账号行与空分组容器；不使用 :has() ----
+  check("可见性函数用统一选择器（卡片 + 列表行同一处判据）",
+    /const ACCT_UNIT_SEL = "\.acct-card, \.acct-row";/.test(raw) && afBody.includes("ACCT_UNIT_SEL"));
+  check("可见性函数同时处理空分组容器（一行不留即整体隐藏）",
+    afBody.includes('querySelectorAll(".acct-group")') && /classList\.toggle\("hidden", !anyVisible\)/.test(afBody));
+  check("空分组隐藏判据派生自账号单元可见性（不重算筛选条件）",
+    afBody.includes("grp.querySelectorAll(ACCT_UNIT_SEL)") && afBody.includes('u.classList.contains("hidden")'));
+  check("源码与样式表都不用 :has( 做隐藏（静态检查器覆盖不到隐式选择器）",
+    !noComments(raw).includes(":has(") && !noComments(css).includes(":has("));
+  check("「全部被收起」提示也按统一选择器计数（列表模式不漏号）",
+    afBody.includes("grid.querySelectorAll(ACCT_UNIT_SEL).length") && afBody.includes('.acct-row[data-na="1"]'));
+
+  // ---- 断言 8：虚拟账号默认收起在列表模式下同样生效且可逆 ----
+  T.__setShowNoCredit(false);
+  T.setAcctView("list");
+  check("列表模式下虚拟账号（oczen）默认带 hidden",
+    /\bhidden" data-group="oczen" data-na="1"/.test(rowOf("oczen-anon")), rowOf("oczen-anon").slice(0, 160));
+  check("列表模式下用户添加的无积分账号（cline）默认不收起（R131 不回归）",
+    rowOf("cline-abcdef123456") !== "" && !/\bhidden" data-group="cline"/.test(rowOf("cline-abcdef123456")));
+  check("列表模式下 comate 账号默认不收起",
+    rowOf("sid-0123456789abcdef") !== "" && !/\bhidden" data-group="comate"/.test(rowOf("sid-0123456789abcdef")));
+  T.__setShowNoCredit(true);
+  T.renderAccounts();
+  check("展开后列表里的虚拟账号行回来（可逆）",
+    rowOf("oczen-anon") !== "" && !/\bhidden" data-group="oczen"/.test(rowOf("oczen-anon")));
+  check("收起判据仍是虚拟账号名单（两种视图同一处判据，不用 credits_na）",
+    /naHidden: !showNoCredit && isVirtualAcct\(a\),/.test(raw)
+      && /const isVirtualAcct = \(a\) => VIRTUAL_ACCOUNTS\.has/.test(raw));
+  T.__setShowNoCredit(false);
+  T.renderAccounts();
+
+  // ---- 断言 9：按钮条双向锁（三控件在按钮条内，不得回到顶部工具栏）----
+  const headSeg = html.slice(html.indexOf('<div class="panel-head">'), html.indexOf('id="acctFnBar"'));
+  const fnSeg = html.slice(html.indexOf('id="acctFnBar"'), html.indexOf('id="creditSummary"'));
+  check("功能按钮条含刷新积分 / 全部签到 / 视图切换三控件",
+    fnSeg.includes('id="btnRefreshAll"') && fnSeg.includes('id="btnCheckinAll"')
+      && fnSeg.includes('id="acctViewSeg"') && fnSeg.includes('data-view="card"') && fnSeg.includes('data-view="list"'));
+  check("按钮条位于汇总条上方（DOM 顺序：按钮条 → 汇总条 → 账号区）",
+    html.indexOf('id="acctFnBar"') < html.indexOf('id="creditSummary"')
+      && html.indexOf('id="creditSummary"') < html.indexOf('id="acctList"'));
+  check("顶部工具栏内不得再出现这三个控件（反向护栏）",
+    headSeg !== "" && !headSeg.includes("btnRefreshAll") && !headSeg.includes("btnCheckinAll")
+      && !headSeg.includes("acctViewSeg"));
+  check("刷新 / 签到沿用原标识与既有绑定（绑定未动）",
+    raw.includes('$("btnCheckinAll").onclick = checkinAll;') && raw.includes('$("btnRefreshAll").onclick = refreshAll;'));
+  check("视图切换绑定在功能按钮条内（不新增接口、不动渠道按钮阵列）",
+    /\$\("acctViewSeg"\)\.addEventListener\("click"/.test(raw) && raw.includes("setAcctView(b.dataset.view)"));
+  check("render() 里回显视图高亮（刷新页面后按钮态与本地偏好一致）",
+    /function render\(\) \{\n  renderTopbar\(\);\n  syncAcctViewSeg\(\);/.test(raw));
+
+  // ---- 补充：列表行的四列 / 操作 / 状态徽标 / 窄屏（工单验收项）----
+  T.__setAccount("1606848467182378", { cooling: true, until: "10-03 09:12", until_ts: Math.floor(Date.now() / 1000) + 12 * 3600, reason: "3004" });
+  T.setAcctView("list");
+  const trBody = rowOf("1606848467182378");
+  check("列表行含四列（账号 / 积分 / 状态 / 操作）",
+    /<td class="cell-acct">/.test(trBody) && /<td class="num cell-credits/.test(trBody)
+      && /<td class="cell-tags">/.test(trBody) && /<td class="cell-ops">/.test(trBody), trBody.slice(0, 240));
+  check("整行不可点（tr 标签无 onclick），只有积分单元格与昵称可点",
+    !/onclick/.test(trBody.slice(0, trBody.indexOf("<td")))
+      && trBody.includes("showCreditDetail(event,") && /class="acct-name editable"[^>]*onclick="openRename\(/.test(trBody));
+  check("列表积分格沿用卡片语义类 acct-credits（明细浮窗切换/就地回写两链路都认它）",
+    /<td class="num cell-credits acct-credits/.test(trBody)
+      && /const cell = document\.querySelector\(`\.acct-credits\[data-uid="\$\{uid\}"\]`\)/.test(raw)
+      && /n\.classList\.contains\("acct-credits"\)/.test(raw));
+  check("列表积分格有列表作用域样式（单位小字 / 临期红 / 不可用灰，不靠卡片规则凑）",
+    /\.acct-table \.cell-credits \.credit-expiring \{ font-size: 12px; font-weight: 600; color: var\(--danger\); \}/.test(css)
+      && /\.acct-table \.cell-credits span \{/.test(css));
+  check("列表行内联全部操作（签到 / 刷新积分 / 停用·启用 / 删除）",
+    trBody.includes("onclick=\"checkin(") && trBody.includes("onclick=\"refreshOne(")
+      && trBody.includes("onclick=\"toggleDisable(") && trBody.includes("onclick=\"removeAcct("), trBody.slice(-420));
+  check("状态徽标全部内联（冷却至 + 相对时长）",
+    /tag warn[^>]*>冷却至 /.test(trBody) && /（剩 \d+ 时 \d+ 分）/.test(trBody));
+  T.__setAccount("1606848467182378", { cooling: false, until: "", until_ts: 0, reason: "自动停用（测试）", disabled: true });
+  T.renderAccounts();
+  check("停用·原因在列表行内联（不只卡片有）",
+    /tag neutral"[^>]*>已停用 · /.test(rowOf("1606848467182378")), rowOf("1606848467182378").slice(0, 260));
+  T.__setAccount("1606848467182378", { disabled: false });
+  T.renderAccounts();
+  check("需重新登录 / 缺续期凭据在列表行内联",
+    rowOf("qwenwork-session-dead-1").includes("需重新登录")
+      && rowOf("01a149d8913679e5ba6de6275047897f:01a149d8913672db88d7a95fb3382d4d").includes("缺续期凭据"));
+  check("无签到渠道在列表行是中性灰标（不误报红）",
+    /tag neutral"[^>]*>无签到</.test(rowOf("cline-abcdef123456")));
+  check("虚拟账号列表行仍只读（🔒 + 无停用/删除入口）",
+    rowOf("oczen-anon").includes("固定账号，不可停用/删除")
+      && !rowOf("oczen-anon").includes("removeAcct('oczen")
+      && !rowOf("oczen-anon").includes("toggleDisable('oczen"));
+  check("列表行复用账号单元（徽章走 chBadge、名单走 acctParts，不另立一套）",
+    /<td class="cell-acct">\$\{chBadge\(a\.group\)\}/.test(raw));
+  check("窄屏：列表容器横向滚动、列不裁剪、不降级回卡片",
+    /\.tbl-scroll \{ overflow-x: auto; \}/.test(css) && /min-width: 560px/.test(css)
+      && /display: block/.test(slice(css, ".acct-grid.list-mode", "\n")));
+  check("卡片网格既有规则零改动（升级前形态不变）",
+    /\.acct-grid \{ display: grid; grid-template-columns: 1fr 1fr; gap: 12px; \}/.test(css));
+
+  // 复原：临时账号 / 筛选 / 视图 / 收起态全部回到共享 fixture 的基线，避免污染后续场景。
+  T.__popAccount(); // custom-demo
+  T.__popAccount(); // zcode token
+  T.__setAcctFilter(null);
+  T.__setShowNoCredit(false);
+  T.setAcctView("card");
   T.renderSummary();
 }
 
