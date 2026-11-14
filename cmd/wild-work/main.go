@@ -47,6 +47,7 @@ import (
 	"wild-work/internal/loomy"
 	"wild-work/internal/loopguard"
 	"wild-work/internal/minimax"
+	"wild-work/internal/modelscope"
 	"wild-work/internal/monkeycode"
 	"wild-work/internal/oczen"
 	"wild-work/internal/officeace"
@@ -213,6 +214,17 @@ func main() {
 	if err != nil {
 		fatal("读取 Lingxi 账号目录失败：%v", err)
 	}
+	// ModelScope / ModelScopeAI：粘贴型渠道，凭据是面板手工粘贴的 `ms-` Access Token
+	// （一枚 token = 一个账号）。两区是**独立服务、token 不通用** ⇒ 两个前缀两个池子，
+	// 绝不互相兜底（兜底只会换来一个误导性的 401）。
+	msAuths, err := auth.LoadModelscopeDir(cfg.AuthDir)
+	if err != nil {
+		fatal("读取 ModelScope 账号目录失败：%v", err)
+	}
+	msaiAuths, err := auth.LoadModelscopeAIDir(cfg.AuthDir)
+	if err != nil {
+		fatal("读取 ModelScopeAI 账号目录失败：%v", err)
+	}
 	// OfficeAce：导入型渠道，凭据由面板从本机 OfficeAce 客户端文件发现或自助 OAuth 登录写入 auths/。
 	oaAuths, err := auth.LoadOfficeAceDir(cfg.AuthDir)
 	if err != nil {
@@ -249,8 +261,8 @@ func main() {
 	if err != nil {
 		fatal("读取 CodeArts 账号目录失败：%v", err)
 	}
-	log.Printf("loaded accounts: workbuddy=%d %s, traework=%d, qoder=%d, qodercn=%d, qodercom=%d, workbuddyai=%d, qwenwork=%d, glm=%d, monkeycode=%d, raccoon=%d, loomy=%d, cline=%d, comate=%d, lingxi=%d, officeace=%d, oczen=%d(匿名), kilo=%d(匿名), minimax=%d, lobsterai=%d, zcode=%d, gemini=%d, codearts=%d from %s",
-		len(wbAuths), cfg.Region, len(trAuths), len(qdAuths), len(qcnAuths), len(qcmAuths), len(wbaAuths), len(qwAuths), len(glmAuths), len(mcAuths), len(rcAuths), len(lmAuths), len(clAuths), len(cmAuths), len(lxAuths), len(oaAuths), len(ocAuths), len(kiAuths), len(mimAuths), len(lobAuths), len(zcdAuths), len(gemAuths), len(caAuths), cfg.AuthDir)
+	log.Printf("loaded accounts: workbuddy=%d %s, traework=%d, qoder=%d, qodercn=%d, qodercom=%d, workbuddyai=%d, qwenwork=%d, glm=%d, monkeycode=%d, raccoon=%d, loomy=%d, cline=%d, comate=%d, lingxi=%d, modelscope=%d, modelscopeai=%d, officeace=%d, oczen=%d(匿名), kilo=%d(匿名), minimax=%d, lobsterai=%d, zcode=%d, gemini=%d, codearts=%d from %s",
+		len(wbAuths), cfg.Region, len(trAuths), len(qdAuths), len(qcnAuths), len(qcmAuths), len(wbaAuths), len(qwAuths), len(glmAuths), len(mcAuths), len(rcAuths), len(lmAuths), len(clAuths), len(cmAuths), len(lxAuths), len(msAuths), len(msaiAuths), len(oaAuths), len(ocAuths), len(kiAuths), len(mimAuths), len(lobAuths), len(zcdAuths), len(gemAuths), len(caAuths), cfg.AuthDir)
 
 	wbPool := pool.New(filepath.Join(stateDir, "state-workbuddy.json"))
 	for _, a := range wbAuths {
@@ -317,6 +329,16 @@ func main() {
 	lxPool := pool.New(filepath.Join(stateDir, "state-lingxi.json"))
 	for _, a := range lxAuths {
 		lxPool.Add(a)
+	}
+	// ModelScope：真多 token 池（一枚 `ms-` token = 一个账号）⇒ **不**置 SingleAccount，
+	// 账号级惩罚与同请求换号（R29）全量适用。两区各自独立池（token 不通用）。
+	msPool := pool.New(filepath.Join(stateDir, "state-modelscope.json"))
+	for _, a := range msAuths {
+		msPool.Add(a)
+	}
+	msaiPool := pool.New(filepath.Join(stateDir, "state-modelscopeai.json"))
+	for _, a := range msaiAuths {
+		msaiPool.Add(a)
 	}
 	// OfficeAce：真多账号池（每个华为账号一份凭据），不置 SingleAccount。
 	oaPool := pool.New(filepath.Join(stateDir, "state-officeace.json"))
@@ -403,6 +425,14 @@ func main() {
 	// Lingxi：与 comate 同款——非流式 client 保留总超时；StreamHTTP 不设 Timeout（R35）。
 	lxUp.HTTP.Timeout = time.Duration(cfg.Upstream.TimeoutSeconds) * time.Second
 	lxUp.StreamHTTP.Transport = lxUp.HTTP.Transport
+	// ModelScope：OpenAI 兼容对话面且常流式 ⇒ 非流式 client 留总超时兜底，
+	// StreamHTTP 不设 Timeout（R35），两者共用 Transport。两区各自一个客户端（基址不同）。
+	msUp := modelscope.New(provider.ModelScope)
+	msUp.HTTP.Timeout = time.Duration(cfg.Upstream.TimeoutSeconds) * time.Second
+	msUp.StreamHTTP.Transport = msUp.HTTP.Transport
+	msaiUp := modelscope.New(provider.ModelScopeAI)
+	msaiUp.HTTP.Timeout = time.Duration(cfg.Upstream.TimeoutSeconds) * time.Second
+	msaiUp.StreamHTTP.Transport = msaiUp.HTTP.Transport
 	oaUp := officeace.New()
 	// OfficeAce 上游为华为 AgentArts 网关：恒 stream=true，长回答（含思维链）常见，
 	// 非流式 client 保留总超时兜底；StreamHTTP 不设 Timeout（R35）。
@@ -472,29 +502,31 @@ func main() {
 	// 旧代理接线表就漏过 trCodeUp（两张表都漏）⇒ 同一个上游客户端变量多实例的渠道
 	// （TraeCode 与 TraeWork 各一份 Client）最容易漏，由 transport_test.go 静态锁死。
 	wrapDumps(map[string][]*http.Client{
-		provider.WorkBuddy.String():   {wbUp.HTTP, wbUp.BillingHTTP, wbUp.StreamHTTP},
-		provider.WorkBuddyAI.String(): {wbaUp.HTTP, wbaUp.StreamHTTP},
-		provider.TraeWork.String():    {trUp.HTTP, trUp.StreamHTTP},
-		provider.TraeCode.String():    {trCodeUp.HTTP, trCodeUp.StreamHTTP},
-		provider.Qoder.String():       {qdUp.HTTP, qdUp.StreamHTTP},
-		provider.QoderCN.String():     {qcnUp.HTTP, qcnUp.StreamHTTP},
-		provider.QoderCOM.String():    {qcmUp.HTTP, qcmUp.StreamHTTP},
-		provider.QwenWork.String():    {qwUp.HTTP, qwUp.StreamHTTP},
-		provider.MonkeyCode.String():  {mcUp.HTTP, mcUp.StreamHTTP},
-		provider.Raccoon.String():     {rcUp.HTTP, rcUp.StreamHTTP},
-		provider.Loomy.String():       {lmUp.HTTP, lmUp.StreamHTTP},
-		provider.Cline.String():       {clUp.HTTP, clUp.StreamHTTP},
-		provider.Comate.String():      {cmUp.HTTP, cmUp.StreamHTTP},
-		provider.Lingxi.String():      {lxUp.HTTP, lxUp.StreamHTTP},
-		provider.OfficeAce.String():   {oaUp.HTTP, oaUp.StreamHTTP},
-		provider.Oczen.String():       {ocUp.HTTP, ocUp.StreamHTTP},
-		provider.Kilo.String():        {kiUp.HTTP, kiUp.StreamHTTP},
-		provider.Minimax.String():     {mimUp.HTTP, mimUp.StreamHTTP},
-		provider.LobsterAI.String():   {lobUp.HTTP, lobUp.StreamHTTP},
-		provider.ZCode.String():       {zcdUp.HTTP, zcdUp.StreamHTTP},
-		provider.Gemini.String():      {gemUp.HTTP, gemUp.StreamHTTP},
-		provider.CodeArts.String():    {caUp.HTTP, caUp.StreamHTTP},
-		provider.GLM.String():         {glmUp.HTTP, glmUp.StreamHTTP},
+		provider.WorkBuddy.String():    {wbUp.HTTP, wbUp.BillingHTTP, wbUp.StreamHTTP},
+		provider.WorkBuddyAI.String():  {wbaUp.HTTP, wbaUp.StreamHTTP},
+		provider.TraeWork.String():     {trUp.HTTP, trUp.StreamHTTP},
+		provider.TraeCode.String():     {trCodeUp.HTTP, trCodeUp.StreamHTTP},
+		provider.Qoder.String():        {qdUp.HTTP, qdUp.StreamHTTP},
+		provider.QoderCN.String():      {qcnUp.HTTP, qcnUp.StreamHTTP},
+		provider.QoderCOM.String():     {qcmUp.HTTP, qcmUp.StreamHTTP},
+		provider.QwenWork.String():     {qwUp.HTTP, qwUp.StreamHTTP},
+		provider.MonkeyCode.String():   {mcUp.HTTP, mcUp.StreamHTTP},
+		provider.Raccoon.String():      {rcUp.HTTP, rcUp.StreamHTTP},
+		provider.Loomy.String():        {lmUp.HTTP, lmUp.StreamHTTP},
+		provider.Cline.String():        {clUp.HTTP, clUp.StreamHTTP},
+		provider.Comate.String():       {cmUp.HTTP, cmUp.StreamHTTP},
+		provider.Lingxi.String():       {lxUp.HTTP, lxUp.StreamHTTP},
+		provider.ModelScope.String():   {msUp.HTTP, msUp.StreamHTTP},
+		provider.ModelScopeAI.String(): {msaiUp.HTTP, msaiUp.StreamHTTP},
+		provider.OfficeAce.String():    {oaUp.HTTP, oaUp.StreamHTTP},
+		provider.Oczen.String():        {ocUp.HTTP, ocUp.StreamHTTP},
+		provider.Kilo.String():         {kiUp.HTTP, kiUp.StreamHTTP},
+		provider.Minimax.String():      {mimUp.HTTP, mimUp.StreamHTTP},
+		provider.LobsterAI.String():    {lobUp.HTTP, lobUp.StreamHTTP},
+		provider.ZCode.String():        {zcdUp.HTTP, zcdUp.StreamHTTP},
+		provider.Gemini.String():       {gemUp.HTTP, gemUp.StreamHTTP},
+		provider.CodeArts.String():     {caUp.HTTP, caUp.StreamHTTP},
+		provider.GLM.String():          {glmUp.HTTP, glmUp.StreamHTTP},
 	})
 	checkinMinutes, err := config.ParseClockTimes(cfg.Schedule.CheckinTimes)
 	if err != nil {
@@ -580,6 +612,15 @@ func main() {
 	// 签到时刻用全局配置（上游按天去重、无活动上线延迟，不设 CheckinRetryUntil）。
 	lxSch := scheduler.New(scheduler.Config{Pool: lxPool, Upstream: lxUp, Name: "lingxi", FollowGlobalCheckin: true,
 		CheckinMinutes: checkinMinutes, KeepaliveHours: []int{}, Ledger: lg})
+	// ModelScope 两区：**无签到、无保活**（`ms-` token 无 refresh 端点，上游也无签到活动）。
+	//
+	// 定时任务全关时**必须传显式空切片 []int{}**（R39）：传 nil 会被 scheduler.New 的零值
+	// 兜底补上默认 9:00/21:00 签到与 22:00 保活，每天空跑必然失败的调用并把面板染红（R150）。
+	// 也**不得**声明 FollowGlobalCheckin —— 那会让面板改签到时间时把任务塞回这两个渠道。
+	msSch := scheduler.New(scheduler.Config{Pool: msPool, Upstream: msUp, Name: "modelscope",
+		CheckinMinutes: []int{}, KeepaliveHours: []int{}, Ledger: lg})
+	msaiSch := scheduler.New(scheduler.Config{Pool: msaiPool, Upstream: msaiUp, Name: "modelscopeai",
+		CheckinMinutes: []int{}, KeepaliveHours: []int{}, Ledger: lg})
 	// OfficeAce：有每日签到（bonus/claim）但要先有临时凭据（V11 签名），保活用于续期。
 	// CheckinMinutes 用全局签到时间；KeepaliveHours 用配置保活时段（临时凭据约 2h 到期）。
 	oaSch := scheduler.New(scheduler.Config{Pool: oaPool, Upstream: oaUp, Name: "officeace", FollowGlobalCheckin: true,
@@ -673,31 +714,37 @@ func main() {
 		// CodeArts：真多账号渠道 ⇒ 不置 SingleAccount。
 		provider.CodeArts: {Kind: provider.CodeArts, Pool: caPool, Upstream: caUp, StaticModels: codearts.StaticModels(),
 			ModelFilter: caUp.FilterUnusable},
+		// ModelScope 两区：真多 token 池 ⇒ 不置 SingleAccount（错误分类 + 池内轮换都适用）。
+		// StaticModels 只是最小静态集（票 02 补「静态表 ∪ 上游 /v1/models」）。
+		provider.ModelScope:   {Kind: provider.ModelScope, Pool: msPool, Upstream: msUp, StaticModels: modelscope.StaticModels()},
+		provider.ModelScopeAI: {Kind: provider.ModelScopeAI, Pool: msaiPool, Upstream: msaiUp, StaticModels: modelscope.StaticModels()},
 	}
 	appRuntimes := map[provider.Kind]*app.Runtime{
-		provider.WorkBuddy:   {Kind: provider.WorkBuddy, Pool: wbPool, Upstream: wbUp, Scheduler: wbSch},
-		provider.WorkBuddyAI: {Kind: provider.WorkBuddyAI, Pool: wbaPool, Upstream: wbaUp, Scheduler: wbaSch},
-		provider.TraeWork:    {Kind: provider.TraeWork, Pool: trPool, Upstream: trUp, Scheduler: trSch},
-		provider.TraeCode:    {Kind: provider.TraeCode, Pool: trPool, Upstream: trCodeUp, Alias: true}, // 别名渠道：无独立 Scheduler，账号聚合/签到/刷新均由 TraeWork 负责
-		provider.Qoder:       {Kind: provider.Qoder, Pool: qdPool, Upstream: qdUp, Scheduler: qdSch},
-		provider.QoderCN:     {Kind: provider.QoderCN, Pool: qcnPool, Upstream: qcnUp, Scheduler: qcnSch},
-		provider.QoderCOM:    {Kind: provider.QoderCOM, Pool: qcmPool, Upstream: qcmUp, Scheduler: qcmSch},
-		provider.QwenWork:    {Kind: provider.QwenWork, Pool: qwPool, Upstream: qwUp, Scheduler: qwSch},
-		provider.MonkeyCode:  {Kind: provider.MonkeyCode, Pool: mcPool, Upstream: mcUp, Scheduler: mcSch},
-		provider.Raccoon:     {Kind: provider.Raccoon, Pool: rcPool, Upstream: rcUp, Scheduler: rcSch},
-		provider.Loomy:       {Kind: provider.Loomy, Pool: lmPool, Upstream: lmUp, Scheduler: lmSch},
-		provider.GLM:         {Kind: provider.GLM, Pool: glmPool, Upstream: glmUp, Scheduler: glmSch},
-		provider.Cline:       {Kind: provider.Cline, Pool: clPool, Upstream: clUp, Scheduler: clSch},
-		provider.Comate:      {Kind: provider.Comate, Pool: cmPool, Upstream: cmUp, Scheduler: cmSch},
-		provider.Lingxi:      {Kind: provider.Lingxi, Pool: lxPool, Upstream: lxUp, Scheduler: lxSch},
-		provider.OfficeAce:   {Kind: provider.OfficeAce, Pool: oaPool, Upstream: oaUp, Scheduler: oaSch},
-		provider.Oczen:       {Kind: provider.Oczen, Pool: ocPool, Upstream: ocUp, Scheduler: ocSch},
-		provider.Kilo:        {Kind: provider.Kilo, Pool: kiPool, Upstream: kiUp, Scheduler: kiSch},
-		provider.Minimax:     {Kind: provider.Minimax, Pool: mimPool, Upstream: mimUp, Scheduler: mimSch},
-		provider.LobsterAI:   {Kind: provider.LobsterAI, Pool: lobPool, Upstream: lobUp, Scheduler: lobSch},
-		provider.ZCode:       {Kind: provider.ZCode, Pool: zcdPool, Upstream: zcdUp, Scheduler: zcdSch},
-		provider.Gemini:      {Kind: provider.Gemini, Pool: gemPool, Upstream: gemUp, Scheduler: gemSch},
-		provider.CodeArts:    {Kind: provider.CodeArts, Pool: caPool, Upstream: caUp, Scheduler: caSch},
+		provider.WorkBuddy:    {Kind: provider.WorkBuddy, Pool: wbPool, Upstream: wbUp, Scheduler: wbSch},
+		provider.WorkBuddyAI:  {Kind: provider.WorkBuddyAI, Pool: wbaPool, Upstream: wbaUp, Scheduler: wbaSch},
+		provider.TraeWork:     {Kind: provider.TraeWork, Pool: trPool, Upstream: trUp, Scheduler: trSch},
+		provider.TraeCode:     {Kind: provider.TraeCode, Pool: trPool, Upstream: trCodeUp, Alias: true}, // 别名渠道：无独立 Scheduler，账号聚合/签到/刷新均由 TraeWork 负责
+		provider.Qoder:        {Kind: provider.Qoder, Pool: qdPool, Upstream: qdUp, Scheduler: qdSch},
+		provider.QoderCN:      {Kind: provider.QoderCN, Pool: qcnPool, Upstream: qcnUp, Scheduler: qcnSch},
+		provider.QoderCOM:     {Kind: provider.QoderCOM, Pool: qcmPool, Upstream: qcmUp, Scheduler: qcmSch},
+		provider.QwenWork:     {Kind: provider.QwenWork, Pool: qwPool, Upstream: qwUp, Scheduler: qwSch},
+		provider.MonkeyCode:   {Kind: provider.MonkeyCode, Pool: mcPool, Upstream: mcUp, Scheduler: mcSch},
+		provider.Raccoon:      {Kind: provider.Raccoon, Pool: rcPool, Upstream: rcUp, Scheduler: rcSch},
+		provider.Loomy:        {Kind: provider.Loomy, Pool: lmPool, Upstream: lmUp, Scheduler: lmSch},
+		provider.GLM:          {Kind: provider.GLM, Pool: glmPool, Upstream: glmUp, Scheduler: glmSch},
+		provider.Cline:        {Kind: provider.Cline, Pool: clPool, Upstream: clUp, Scheduler: clSch},
+		provider.Comate:       {Kind: provider.Comate, Pool: cmPool, Upstream: cmUp, Scheduler: cmSch},
+		provider.Lingxi:       {Kind: provider.Lingxi, Pool: lxPool, Upstream: lxUp, Scheduler: lxSch},
+		provider.OfficeAce:    {Kind: provider.OfficeAce, Pool: oaPool, Upstream: oaUp, Scheduler: oaSch},
+		provider.Oczen:        {Kind: provider.Oczen, Pool: ocPool, Upstream: ocUp, Scheduler: ocSch},
+		provider.Kilo:         {Kind: provider.Kilo, Pool: kiPool, Upstream: kiUp, Scheduler: kiSch},
+		provider.Minimax:      {Kind: provider.Minimax, Pool: mimPool, Upstream: mimUp, Scheduler: mimSch},
+		provider.LobsterAI:    {Kind: provider.LobsterAI, Pool: lobPool, Upstream: lobUp, Scheduler: lobSch},
+		provider.ZCode:        {Kind: provider.ZCode, Pool: zcdPool, Upstream: zcdUp, Scheduler: zcdSch},
+		provider.Gemini:       {Kind: provider.Gemini, Pool: gemPool, Upstream: gemUp, Scheduler: gemSch},
+		provider.CodeArts:     {Kind: provider.CodeArts, Pool: caPool, Upstream: caUp, Scheduler: caSch},
+		provider.ModelScope:   {Kind: provider.ModelScope, Pool: msPool, Upstream: msUp, Scheduler: msSch},
+		provider.ModelScopeAI: {Kind: provider.ModelScopeAI, Pool: msaiPool, Upstream: msaiUp, Scheduler: msaiSch},
 	}
 
 	initCustomServerRts, initCustomAppRts, customNames := buildCustomRuntimes(cfg.CustomChannels, stateDir, upstreamTimeout)
@@ -889,6 +936,10 @@ func main() {
 	go gemSch.Run(sctx)
 	// CodeArts 的 Run 不可漏（R34）：本渠道有签到与保活两条定时任务。
 	go caSch.Run(sctx)
+	// ModelScope 两区的 Run 同样不可漏（R34）：当前无任何定时任务，Run 只会阻塞等
+	// ctx/配置变更；但漏了它，将来给这两条渠道加任务就会静默不跑。
+	go msSch.Run(sctx)
+	go msaiSch.Run(sctx)
 
 	// 积分自动刷新覆盖全部渠道：
 	// - workbuddyai / qoder 无签到活动，不自动刷就会一直显示旧值或 0；
@@ -920,6 +971,8 @@ func main() {
 		// Lingxi 有 credits/balance 余额端点（智点）：不纳入就只在每日签到时刷一次，
 		// 对话消耗后面板数字最长滞后一个签到周期（2026-10-29 审查 W2 补登）。
 		provider.Lingxi,
+		// ModelScope 两区**不**纳入（D5/D14）：上游没有余额/积分端点，纳入只会每 10 分钟
+		// 刷出一个无意义的 0（面板已由 credits_na 显示「不适用」）。
 	}, app.CreditRefreshInterval)
 
 	// 启动即刷新「模型列表 + 费率」，之后每 30 分钟。
