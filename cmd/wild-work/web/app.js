@@ -919,7 +919,7 @@ const RELOGIN_CHANNELS = new Set(["workbuddy", "workbuddyai", "traework", "qoder
 // ModelScope 两区：粘贴型渠道（"ms-" Access Token），登录入口 = 同一个 token 粘贴层。
 // 两区是**独立服务**、token 不通用 ⇒ 弹层按渠道切换区域文案与提交端点，绝不用一个池兼容两区。
 const MODEL_SCOPE_CHANNELS = new Set(["modelscope", "modelscopeai"]);
-const isModelScopeCh = (ch) => MODEL_SCOPE_CHANNELS.has(String(ch || "workbuddy"));
+const isModelScopeCh = (ch) => MODEL_SCOPE_CHANNELS.has(String(ch || ""));
 
 // creditsText 账号卡片的积分文案。
 // 拆成「可用 / 不可用 / 临期」三个数字：渠道（如 TraeWork）会下发官方客户端专用的

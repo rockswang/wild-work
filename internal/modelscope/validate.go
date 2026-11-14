@@ -167,13 +167,16 @@ func authDeniedInBody(raw []byte) (string, bool) {
 }
 
 // truncateBody 截断上游原文（错误文案里带原文，但不得放进整段响应体）。
+//
+// 按 **rune** 截断而不是按字节：上游错误体常带中文，按字节切会把最后一个字符
+// 拦腰截断成乱码（错误文案是给用户看的，乱码比截断更糟）。
 func truncateBody(raw []byte, n int) string {
 	s := strings.TrimSpace(string(raw))
 	if s == "" {
 		return "(空)"
 	}
-	if len(s) > n {
-		return s[:n] + "…"
+	if rs := []rune(s); len(rs) > n {
+		return string(rs[:n]) + "…"
 	}
 	return s
 }
