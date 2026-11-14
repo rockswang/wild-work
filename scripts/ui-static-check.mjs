@@ -515,6 +515,15 @@ check("汇总条渲染了 traework", sum.includes("TraeWork"));
 check("汇总可用 = 2050+2686 = 4736", sum.includes("4,736"), sum.slice(0, 160));
 check("汇总临期 = 100", sum.includes("临期100"));
 check("汇总含合计", sum.includes("合计"));
+// 汇总条聚合 + 摘要文案分支共用一个共享函数（工单 01，零可见变化 prefactor）：
+// 后续「列表模式分组行小计」复用同一处，分组行与 chip 逐字同源在结构上不可能漂移。
+check("存在共享函数 channelSummaries（聚合 + 文案分支同处一处）",
+  /^function channelSummaries\s*\(/m.test(raw));
+check("汇总条 chip 由 channelSummaries 渲染",
+  /renderSummary\(\)[\s\S]*?channelSummaries\(state\.accounts\)/.test(raw));
+check("按渠道求和逻辑只有一份（无第二份 credits += 循环）",
+  (raw.match(/c\.credits \+= a\.credits/g) || []).length === 1,
+  `实际 ${(raw.match(/c\.credits \+= a\.credits/g) || []).length} 份`);
 
 // ---- 场景 2.1：临期口径可配（R112b）----
 // 背景：R112 把临期展示固定成 1 个自然日并删掉设置项，导致「明早 05:47 到期」
@@ -934,6 +943,7 @@ for (const [name, pass, extra] of results) {
 // 一旦有人"修好"死的那版，面板数字会静默变化。
 const uniq = [
   ["function renderSummary", /^\s*function renderSummary\s*\(/gm],
+  ["function channelSummaries", /^\s*function channelSummaries\s*\(/gm],
   ["const CH_ORDER", /^\s*const CH_ORDER\s*=/gm],
   ["const CH_SUMMARY_ORDER", /^\s*const CH_SUMMARY_ORDER\s*=/gm],
   ["function renderAccounts", /^\s*function renderAccounts\s*\(/gm],
