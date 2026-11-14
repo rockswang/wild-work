@@ -782,10 +782,11 @@ check("非 officeace 账号不带「缺续期凭据」（渠道限定，避免�
   // ⇒ 1440px 视口也出横滚条；封顶后列宽不再被最长理由单点决定（hover 仍有 title 全文）。
   check("闸 2 状态徽标封顶（max-width + 省略号）",
     /\.acct-table \.cell-tags \.tag \{[^}]*max-width: \d+px[^}]*text-overflow: ellipsis/.test(css));
-  // 窄屏断点卡在既有 679（实测真实数据内容需求 599px，而 679 视口内容区 ≈594px ⇒ 恰在此起出横滚）：
-  // 压紧内边距/字号/徽标上限、状态列允许折行，不新增第四档断点，也不动 min-width: 560px。
-  check("闸 2 窄屏断点：列表在既有 679 断点内压紧（不新增第四档）",
-    /\.acct-table \{ font-size: 12px; --acct-cred-unit: 44px; \}/.test(css)
+  // 窄屏断点卡在**实测阈值** 869（不是拍脑袋的档位）：不压紧的表内容需求 725px，而容器 = 视口 −85
+  //         ⇒ 810px 视口才不溢出；但 810~869 的行高因长昵称折行跳到 82.3px（紧凑档内 45.8~46.1，870 起 49.3）。
+  //         故紧凑规则挂在 869：压紧内边距/字号/徽标上限、状态列允许折行，不动 min-width: 560px。
+  check("闸 2 窄屏断点：列表紧凑档挂在实测阈值 869（不新增第四档）",
+    /@media \(max-width: 869px\) \{\s*\.acct-table \{ font-size: 12px; --acct-cred-unit: 44px; \}/.test(css)
       && /\.acct-table \.cell-tags \{ white-space: normal; \}/.test(css));
 
   // 复原：临时账号 / 筛选 / 视图 / 收起态全部回到共享 fixture 的基线，避免污染后续场景。
