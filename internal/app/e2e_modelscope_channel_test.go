@@ -100,11 +100,124 @@ func TestE2E_US1_TokenPutsChannelOnline(t *testing.T) {
 	})
 }
 
+// TestE2E_US1_PasteTokenThroughPanel 用户故事 1（后半）+ 用户故事 4：
+// 「面板粘贴合法 token 就接入」与「区域不匹配时提示可行动」必须能整机级离线复跑。
+//
+// 这里走的是**真的** POST /api/login/modelscope_token → App.SubmitModelScopeToken →
+// modelscope.Client.ValidateToken（Base 已指到假上游，见 harness 的 msValidate 注入点）。
+// 与 TestE2E_US1_TokenPutsChannelOnline 的区别：那条从已落盘凭据起测，这条从面板入口起测。
+func TestE2E_US1_PasteTokenThroughPanel(t *testing.T) {
+	const cnTok, aiTok = "ms-e2e-paste-cn-0001", "ms-e2e-paste-ai-0002"
+
+	t.Run("合法 token 粘贴即入池、上游真的收到一次校验、随后可对话", func(t *testing.T) {
+		cn := newMSFake(t, tinyPNG(t))
+		cn.acceptOnly(cnTok)
+		env := newE2EEnv(t, e2eOptions{CN: cn})
+
+		resp, raw := env.post("/api/login/modelscope_token", map[string]any{"token": "Bearer " + cnTok})
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("status = %d，want 200：%s", resp.StatusCode, truncateForLog(raw))
+		}
+		m := jsonMap(t, raw)
+		uid := asString(m["uid"])
+		if !strings.HasPrefix(uid, "mst-") {
+			t.Errorf("uid = %q，want mst- 前缀", uid)
+		}
+		if strings.Contains(string(raw), cnTok) {
+			t.Error("响应回显了 token 原文（零 token 落盘纪律）")
+		}
+
+		// 校验必须真的打到上游（证明不是本地假绿），且用的是规范化后的 token。
+		calls := cn.reqsByPath("/v1/models")
+		if len(calls) == 0 {
+			t.Fatal("粘贴校验从未打上游 /v1/models")
+		}
+		if calls[0].Token != cnTok {
+			t.Error("校验请求未携带该 token（Bearer 前缀应已被 NormalizeToken 剥离）")
+		}
+
+		// 账号进池 + 面板可见。
+		accts := env.accounts(providerGroupModelScope)
+		if len(accts) != 1 {
+			t.Fatalf("面板账号数 = %d，want 1：%v", len(accts), accts)
+		}
+		if got := asString(accts[0]["uid"]); got != uid {
+			t.Errorf("面板 uid = %q，want 返回的 %q", got, uid)
+		}
+		mustContain(t, env.modelsIDs(), "modelscope/Qwen/Qwen3.5-122B-A10B")
+
+		resp, raw = env.post("/v1/chat/completions", chatReq("modelscope/Qwen/Qwen3.5-122B-A10B", false))
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("粘贴后对话 status = %d，want 200：%s", resp.StatusCode, truncateForLog(raw))
+		}
+		choices, _ := jsonMap(t, raw)["choices"].([]any)
+		if len(choices) != 1 {
+			t.Fatalf("choices 长度 = %d，want 1：%s", len(choices), truncateForLog(raw))
+		}
+		if got := asString(dig(choices[0].(map[string]any), "message", "content")); got != "你好，我是魔搭。" {
+			t.Errorf("正文 = %q，want 上游原文", got)
+		}
+	})
+
+	t.Run("重复粘贴同一 token：账号不翻倍，但必须告警", func(t *testing.T) {
+		cn := newMSFake(t, tinyPNG(t))
+		cn.acceptOnly(cnTok)
+		env := newE2EEnv(t, e2eOptions{CN: cn})
+
+		if resp, raw := env.post("/api/login/modelscope_token", map[string]any{"token": cnTok}); resp.StatusCode != http.StatusOK {
+			t.Fatalf("首次粘贴 status = %d：%s", resp.StatusCode, truncateForLog(raw))
+		}
+		resp, raw := env.post("/api/login/modelscope_token", map[string]any{"token": cnTok})
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("重复粘贴 status = %d，want 200（幂等成功 + 告警）：%s", resp.StatusCode, truncateForLog(raw))
+		}
+		if warn := asString(jsonMap(t, raw)["warning"]); !strings.Contains(warn, "相同") {
+			t.Errorf("warning = %q，want 点明「与既有账号相同」（一枚 token 就是一个账号）", warn)
+		}
+		if got := len(env.accounts(providerGroupModelScope)); got != 1 {
+			t.Errorf("重复粘贴后账号数 = %d，want 1", got)
+		}
+	})
+
+	t.Run("区域不匹配：401 文案点明两区不通用 + 一个账号都不落盘", func(t *testing.T) {
+		cn := newMSFake(t, tinyPNG(t))
+		cn.acceptOnly(cnTok) // 国内站只认国内站 token
+		ai := newMSFake(t, tinyPNG(t))
+		ai.acceptOnly(aiTok) // 国际站只认国际站 token（两区不通用）
+		env := newE2EEnv(t, e2eOptions{CN: cn, AI: ai})
+
+		cases := []struct{ name, path, token, wantRegion string }{
+			{"国际站 token 打国内站", "/api/login/modelscope_token", aiTok, "国内站"},
+			{"国内站 token 打国际站", "/api/login/modelscopeai_token", cnTok, "国际站"},
+		}
+		for _, c := range cases {
+			t.Run(c.name, func(t *testing.T) {
+				resp, raw := env.post(c.path, map[string]any{"token": c.token})
+				if resp.StatusCode != http.StatusBadRequest {
+					t.Fatalf("status = %d，want 400：%s", resp.StatusCode, truncateForLog(raw))
+				}
+				msg := asString(jsonMap(t, raw)["error"])
+				for _, want := range []string{"不通用", c.wantRegion, "https://"} {
+					if !strings.Contains(msg, want) {
+						t.Errorf("错误文案 %q 未包含 %q（用户据此自查区域是否配错）", msg, want)
+					}
+				}
+				if strings.Contains(string(raw), c.token) {
+					t.Error("响应回显了 token 原文（零 token 落盘纪律）")
+				}
+				if got := len(env.accounts("")); got != 0 {
+					t.Errorf("校验失败后不应留下任何账号，实际 %d 个", got)
+				}
+			})
+		}
+	})
+}
+
 // TestE2E_US1_PasteRejectsOffline 用户故事 1 + 4 的「粘贴入口」侧：
 // 形状不对的 token 必须在**上游请求之前**被拒，并给出可行动文案。
 //
-// ⚠️ 这是本层唯一能覆盖粘贴入口的部分：合法形状的 token 会真的去打正式上游
-// （ValidateToken 没有注入点，见 e2e-findings.md）。因此这里只喂「本地就会拒」的输入。
+// ⚠️ 本层只覆盖「本地就会拒」的输入：合法形状的 token 会在网络之前被放行，
+// 随后的上游校验见 TestE2E_US1_PasteTokenThroughPanel（msValidate 注入点）。
 func TestE2E_US1_PasteRejectsOffline(t *testing.T) {
 	cn := newMSFake(t, tinyPNG(t))
 	ai := newMSFake(t, tinyPNG(t))
@@ -414,6 +527,26 @@ func TestE2E_US7_ModelsUnion(t *testing.T) {
 		if v, _ := entry["supports_tools"].(bool); !v {
 			t.Errorf("supports_tools = %v，want true（上游声明要透传）", entry["supports_tools"])
 		}
+	}
+
+	// 能出图标记（D12）：客户端靠它区分「画图模型」与「对话模型」。
+	// 静态表标 image:true 的条目（Qwen-Image-Edit）与命名启发式命中的条目（Qwen-Image）都要带；
+	// 对话模型不得带（能看图 ≠ 能出图）。
+	byID := make(map[string]map[string]any, len(list.Data))
+	for _, entry := range list.Data {
+		byID[asString(entry["id"])] = entry
+	}
+	for _, id := range []string{"modelscope/Qwen/Qwen-Image", "modelscope/Qwen/Qwen-Image-Edit"} {
+		e := byID[id]
+		if e == nil {
+			t.Fatalf("目录缺 %s", id)
+		}
+		if v, _ := e["supports_image_generation"].(bool); !v {
+			t.Errorf("%s 应带 supports_image_generation=true（客户端无法区分画图/对话模型）", id)
+		}
+	}
+	if _, has := byID["modelscope/Qwen/Qwen3.5-122B-A10B"]["supports_image_generation"]; has {
+		t.Error("对话模型带了 supports_image_generation（能看图/能出图与对话能力正交）")
 	}
 }
 

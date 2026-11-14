@@ -120,6 +120,37 @@ func TestE2E_US14_SingleSourceOfTruth(t *testing.T) {
 		}
 	})
 
+	t.Run("能出图标记四层同源（字段 / 渠道侧 / glm 静态表 / /v1/models 输出）", func(t *testing.T) {
+		prov := repoFile(t, "internal/provider/provider.go")
+		if !strings.Contains(prov, "SupportsImageGeneration bool") {
+			t.Error("provider.ModelInfo 缺 SupportsImageGeneration（能出图是独立维度，不得复用 SupportsImages）")
+		}
+		ms := repoFile(t, "internal/modelscope/models.go")
+		if !strings.Contains(ms, "mi.SupportsImageGeneration = IsImageModel(id)") {
+			t.Error("modelscope 目录未把命名启发式接到 SupportsImageGeneration（D12 的动态标记未落地）")
+		}
+		if !strings.Contains(ms, "SupportsImageGeneration: e.Image") {
+			t.Error("modelscope 静态表未把 image:true 接到 SupportsImageGeneration（D12 的静态标记未落地）")
+		}
+		glmSrc := repoFile(t, "internal/glm/constants.go")
+		if !strings.Contains(glmSrc, "info.SupportsImageGeneration = true") {
+			t.Error("glm 静态表未标记生图模型（glm/image 会以对话模型身份进目录）")
+		}
+		srv := repoFile(t, "internal/server/handler.go")
+		if !strings.Contains(srv, `entry["supports_image_generation"] = true`) {
+			t.Error("/v1/models 未输出 supports_image_generation（客户端仍无法区分生图与文本模型）")
+		}
+		// 面板与 /v1/models 同源：/api/fees 的能力字段要能带出同一标记。
+		appSrc := repoFile(t, "internal/app/app.go")
+		if !strings.Contains(appSrc, "SupportsImageGeneration: mi.SupportsImageGeneration") {
+			t.Error("/api/fees 的模型行未透传 SupportsImageGeneration（面板 🎨 会与 /v1/models 漂移）")
+		}
+		js := repoFile(t, "cmd/wild-work/web/app.js")
+		if !strings.Contains(js, "supports_image_generation") {
+			t.Error("前端未消费 supports_image_generation（面板区分不了画图/对话模型）")
+		}
+	})
+
 	t.Run("按钮存在且顺序与展示序一致", func(t *testing.T) {
 		html := repoFile(t, "cmd/wild-work/web/index.html")
 		cn := strings.Index(html, `id="btnAddModelScope"`)

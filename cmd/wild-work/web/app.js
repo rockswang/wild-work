@@ -189,7 +189,7 @@ function renderModelSearch(q) {
     box.innerHTML = `<div class="ms-empty">${all.length ? "无匹配模型" : "费率数据尚未加载，请点「刷新」后再试"}</div>`;
   } else {
     box.innerHTML = hit.map(({ ch, m, short, full }) => {
-      const caps = [m.supports_images ? "👁" : "", m.supports_reasoning ? "🧠" : ""].join("");
+      const caps = [m.supports_images ? "👁" : "", m.supports_image_generation ? "🎨" : "", m.supports_reasoning ? "🧠" : ""].join("");
       // 档位小字（issue #96）：上游声明才显示
       const eff = (m.reasoning_efforts && m.reasoning_efforts.length)
         ? `<span class="ms-eff" title="思考档位：${esc(m.reasoning_efforts.join("·"))}${m.default_reasoning_effort ? `（默认 ${m.default_reasoning_effort}）` : ""}">${esc(m.reasoning_efforts.join("·"))}</span>` : "";
@@ -241,7 +241,7 @@ function pkHl(text, kw) {
 // 行2 上下文窗口（实测带 *）/ 能力图标 / 思考档位（含默认）——与 renderModelSearch 逐字对齐。
 function pkItemHTML(x, kw) {
   const m = x.m;
-  const caps = (m.supports_images ? "👁" : "") + (m.supports_reasoning ? "🧠" : "");
+  const caps = (m.supports_images ? "👁" : "") + (m.supports_image_generation ? "🎨" : "") + (m.supports_reasoning ? "🧠" : "");
   const ctx = (m.has_context && m.context_window) ? `(${esc(fmtTokens(m.context_window))}${m.hand_measured ? "*" : ""})` : "";
   const eff = (m.reasoning_efforts && m.reasoning_efforts.length)
     ? esc(m.reasoning_efforts.join("·")) + (m.default_reasoning_effort ? `（默认 ${esc(m.default_reasoning_effort)}）` : "") : "";
@@ -1682,6 +1682,11 @@ function renderFees(fees) {
     if (m.supports_images) {
       caps.push(`<span class="cap-icon cap-img" title="支持图像输入（多模态视觉）：可直接发送图片给该模型">👁</span>`);
     }
+    // 能出图（文生图/图生图，与「能看图」正交）：数据来自 /v1/models 的
+    // supports_image_generation 标记（D12），不在前端另做模型名推断。
+    if (m.supports_image_generation) {
+      caps.push(`<span class="cap-icon cap-gen" title="能出图（文生图 / 图生图）：用 /v1/images/generations 或 /v1/images/edits 调用该模型">🎨</span>`);
+    }
     if (m.supports_reasoning) {
       caps.push(`<span class="cap-icon cap-reason" title="支持思考/推理模式：回复前会进行推理（可能含 reasoning_content）">🧠</span>`);
     }
@@ -1720,6 +1725,9 @@ function renderFees(fees) {
     const noText = { api: "上游未声明", measured: "实测不支持", user: "手填未勾选", unknown: "未探测" }[srcKey] || "上游未声明";
     const yes = [], no = [];
     (m.supports_images ? yes : no).push("图像输入");
+    // 「能出图」只是正值标记（渠道维度的路由分类，不是上游能力声明）：
+    // 未标记时不写进「未声明」列，免得给每个文本模型加一句无意义的否定。
+    if (m.supports_image_generation) yes.push("能出图");
     (m.supports_reasoning ? yes : no).push("思考模式");
     const parts = [];
     if (yes.length) parts.push(`支持：${yes.join("、")}`);

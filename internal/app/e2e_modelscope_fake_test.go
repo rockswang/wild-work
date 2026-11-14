@@ -181,6 +181,13 @@ func (f *msFake) handler() http.Handler {
 
 	mux.HandleFunc("/v1/models", func(w http.ResponseWriter, r *http.Request) {
 		f.record(r, nil)
+		// 鉴权与真上游同形：token 无效 / 区域不匹配 ⇒ 401（粘贴校验与目录拉取都靠这一道）。
+		// acceptOnly 未设时接受任意 token，故既有用例行为不变。
+		if !f.authorized(strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")) {
+			w.WriteHeader(http.StatusUnauthorized)
+			_, _ = w.Write([]byte(`{"error":{"code":401,"message":"invalid access token"}}`))
+			return
+		}
 		f.mu.Lock()
 		status, catalog := f.modelsStatus, f.catalog
 		f.mu.Unlock()

@@ -1,7 +1,10 @@
 package glm
 
 import (
+	"encoding/json"
 	"errors"
+	"net/http"
+	"strings"
 	"testing"
 
 	"wild-work/internal/auth"
@@ -46,5 +49,38 @@ func TestEditImageRequiresReference(t *testing.T) {
 	}
 	if pe.Kind != provider.ErrBadParams {
 		t.Errorf("Kind = %v, want ErrBadParams（请求级错误，不罚号）", pe.Kind)
+	}
+}
+
+// TestChatStreamRejectsImageModel `/v1/models` 会把 `glm/image` 透出（带
+// supports_image_generation 标记），客户端若拿它来聊天必须本地 400 并给出可行动文案——
+// 不得静默跑到上游拿回一段普通聊天文本（与 modelscope 的 image_model_not_chat 同口径）。
+func TestChatStreamRejectsImageModel(t *testing.T) {
+	c := New()
+	a := &auth.Auth{AccessToken: "fake-token-for-guard"} // 守卫在出站之前，不会用到它
+	for _, model := range []string{"glm/image", "image", "glm/image:moe_53f"} {
+		body := []byte(`{"model":"` + model + `","messages":[{"role":"user","content":"画一只猫"}]}`)
+		rc, status, respBody, err := c.ChatStream(a, body)
+		if err != nil || rc != nil {
+			t.Fatalf("model=%q 应在本地拒（不返回流/error），实际 rc=%v err=%v", model, rc, err)
+		}
+		if status != http.StatusBadRequest {
+			t.Errorf("model=%q status = %d，want 400", model, status)
+		}
+		var out map[string]any
+		if jsonErr := json.Unmarshal(respBody, &out); jsonErr != nil {
+			t.Fatalf("model=%q 的拒收体不是 JSON: %v", model, jsonErr)
+		}
+		e, _ := out["error"].(map[string]any)
+		if code, _ := e["code"].(string); code != "image_model_not_chat" {
+			t.Errorf("model=%q error.code = %q，want image_model_not_chat", model, code)
+		}
+		if msg, _ := e["message"].(string); !strings.Contains(msg, "/v1/images/generations") {
+			t.Errorf("model=%q 的文案应指向生图端点（用户要知道改走哪里）：%q", model, msg)
+		}
+	}
+	// 反向护栏：普通对话模型不受影响（不存在按名字滥杀）。
+	if isImageModelName("chatglm:moe_53f") || isImageModelName("video") {
+		t.Error("普通模型被误判为生图模型（会让对话路径静默 400）")
 	}
 }

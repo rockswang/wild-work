@@ -223,6 +223,12 @@ const patched =
     { channel: "cline", models: [
       { model: "cline-free/mimo-v2.6-flash", id: "cline-free/mimo-v2.6-flash", priced: true, rate: 0, free: true, has_context: true, context_window: 1000000 },
     ] },
+    // 能出图的模型（D12）：/api/fees 的 supports_image_generation 与 /v1/models 同源，
+    // 面板据此显示 🎨——不靠模型名在 JS 里再猜一遍。
+    { channel: "modelscope", models: [
+      { model: "Kwai-Kolors/Kolors", id: "modelscope/Kwai-Kolors/Kolors", priced: false, rate: 0, free: false, has_context: false,
+        supports_image_generation: true },
+    ] },
   ] }) + ";"
   + "\n; globalThis.__T = { renderAccounts, renderSummary, loadStats, renderStats, renderPlatformTable, renderRotation, renderExpiry, renderModels, renderLogs, renderAbnormal, renderFallbacks, renderEffList, renderAppLog, handleToasts, renderModelSearch, collectAllModels, cacheCell, renderUsageCacheCard, renderModelTable, renderUsage, renderFees"
   // 积分明细浮窗：函数 + 两个模块级 let 的注入器（detailState/detailCache 是 `let`，
@@ -872,8 +878,8 @@ check("不再有写死的「今日到期（次日 00:00 失效算今日）」硬
   !/今日到期（次日 00:00 失效算今日），选号时优先消耗/.test(raw));
 
 // ---- 场景 2.5：模型查找面板（纯前端过滤，全量渲染 + 列表滚动） ----
-// 假缓存共 17 个模型：qodercn 2 + workbuddy 2 + loomy 12 + cline 1（含 13 个 qwen* 用于滚动断言）
-check("collectAllModels 展平全渠道 17 个模型", T.collectAllModels().length === 17, `实际 ${T.collectAllModels().length}`);
+// 假缓存共 18 个模型：qodercn 2 + workbuddy 2 + loomy 12 + cline 1 + modelscope 1（含 13 个 qwen* 用于滚动断言）
+check("collectAllModels 展平全渠道 18 个模型", T.collectAllModels().length === 18, `实际 ${T.collectAllModels().length}`);
 check("collectAllModels 完整 ID = 渠道/裸名", T.collectAllModels()[0].full === "qodercn/qwen3.8-flash");
 // 上游 ID 自带命名空间（cline-free/*）时完整 ID = 上游 ID 原样（服务端 m.id 同源），
 // 不再拼 `cline/`（R59）；旧的 cline/cline-free/* 仍可路由（兼容断言在 Go 侧）
@@ -890,8 +896,8 @@ check("档位 title 含默认档", msHtml.includes("默认 high"));
 check("底部提示共 N 个匹配", /共 1 个匹配/.test(document.getElementById("modelSearchFoot").textContent));
 T.renderModelSearch("");
 msHtml = document.getElementById("modelSearchList").innerHTML;
-check("空关键字全量列出 17 条（不再截断）", (msHtml.match(/class="ms-row"/g) || []).length === 17, `实际 ${(msHtml.match(/class="ms-row"/g) || []).length}`);
-check("空关键字提示共 N 个匹配", /共 17 个匹配/.test(document.getElementById("modelSearchFoot").textContent), document.getElementById("modelSearchFoot").textContent);
+check("空关键字全量列出 18 条（不再截断）", (msHtml.match(/class="ms-row"/g) || []).length === 18, `实际 ${(msHtml.match(/class="ms-row"/g) || []).length}`);
+check("空关键字提示共 N 个匹配", /共 18 个匹配/.test(document.getElementById("modelSearchFoot").textContent), document.getElementById("modelSearchFoot").textContent);
 check("免费模型显示 Free", msHtml.includes("Free"));
 check("未定价模型显示 unknown", msHtml.includes("unknown"));
 T.renderModelSearch("zzz-none");
@@ -913,11 +919,20 @@ T.renderFees({ channels: [
   { channel: "cline", models: [
     { model: "cline-free/mimo-v2.6-flash", id: "cline-free/mimo-v2.6-flash", priced: true, rate: 0, free: true, has_context: true, context_window: 1000000 },
   ] },
+  // 能出图（D12）：supports_image_generation 与 /v1/models 同源 → 模型 ID 后给 🎨
+  { channel: "modelscope", models: [
+    { model: "Kwai-Kolors/Kolors", id: "modelscope/Kwai-Kolors/Kolors", priced: false, rate: 0, free: false, has_context: false,
+      supports_image_generation: true },
+  ] },
 ] });
 const feesHtml = document.getElementById("feesBox").innerHTML;
 check("费率表档位小字标出现（[low·high·max]）", feesHtml.includes("effort-tag") && feesHtml.includes("[low·high·max]"), feesHtml.slice(0, 200));
 check("档位 title 含默认档与调档提示", feesHtml.includes("默认 high") && feesHtml.includes("reasoning_effort"));
 check("无档位声明的模型不显示档位标", (feesHtml.match(/effort-tag/g) || []).length === 1);
+check("费率表能出图模型显示 🎨（cap-gen，与 /v1/models 同源）",
+  feesHtml.includes("cap-gen") && (feesHtml.match(/🎨/g) || []).length === 1, feesHtml.slice(0, 400));
+check("费率表对话模型不显示 🎨（标记只为真值出现，不按名字猜）",
+  !/cap-gen[^>]*>[^<]*🎨<\/span>[\s\S]{0,80}qodercn/.test(feesHtml));
 // 完整 ID（R59）：上游命名空间 ID 直接透传（服务端 m.id 同源），复制出去即可用
 // （旧的 cline/cline-free/* 仍被服务端路由兼容，但对外只广告新形态）
 check("费率表上游命名空间 ID 直通（cline-free/*）",
@@ -946,6 +961,17 @@ check("费率表上游命名空间 ID 直通（cline-free/*）",
 T.renderModelSearch("deepseek");
 msHtml = document.getElementById("modelSearchList").innerHTML;
 check("未声明档位的模型行无 ms-eff", !msHtml.includes("ms-eff"), msHtml.slice(0, 200));
+
+// ---- 场景 2.76：「能出图」标记（D12，与 /v1/models 的 supports_image_generation 同源）----
+// 客户端/面板靠这个标记区分「画图模型」与「对话模型」；它必须只来自服务端字段，
+// 前端不得按模型名再猜一遍（猜对了也迟早与渠道侧漂移）。
+T.renderModelSearch("Kwai-Kolors/Kolors");
+msHtml = document.getElementById("modelSearchList").innerHTML;
+check("生图模型行显示 🎨", (msHtml.match(/class="ms-row"/g) || []).length === 1 && msHtml.includes("🎨"), msHtml.slice(0, 200));
+check("生图模型不被标成识图（能出图 ≠ 能看图）", !msHtml.includes("👁"), msHtml.slice(0, 200));
+T.renderModelSearch("qwen3.8-flash");
+msHtml = document.getElementById("modelSearchList").innerHTML;
+check("对话模型行不显示 🎨", !msHtml.includes("🎨"), msHtml.slice(0, 200));
 
 // ---- 场景 3：运行统计（/api/stats 载荷 → 各区块渲染） ----
 // 载荷形状 = internal/stats 引擎 Snapshot 的 JSON（与 sidecar /capi/stats 对齐）

@@ -7,11 +7,11 @@
 package app
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"os"
 	"strings"
 	"testing"
 	"time"
@@ -245,17 +245,25 @@ func TestE2E_US10_ImageFailuresAreHonest(t *testing.T) {
 		}
 	})
 
-	// 504 超时需要等满轮询下限（max(120s, upstream.timeout_seconds)），默认套件不跑；
-	// 用 WW_E2E_SLOW=1 手动跑（口径已由 internal/modelscope 的 TestImagePollTimeout* 覆盖）。
+	// 504 超时：用**测试专用钩子**把轮询上限/间隔压低（D8 的生产口径仍是
+	// max(120s, timeout_seconds)，由 internal/modelscope 的单测锁死），
+	// 于是这条整机级契约在默认套件里恒常运行。
 	t.Run("任务超时：504 + task_id + 可能仍在执行", func(t *testing.T) {
-		if os.Getenv("WW_E2E_SLOW") == "" {
-			t.Skip("跳过：轮询下限 120s（只放宽不压低，D8）。置 WW_E2E_SLOW=1 可完整执行")
-		}
 		cn := newMSFake(t, tinyPNG(t))
 		cn.mu.Lock()
 		cn.pollScript = []string{"PROCESSING"} // 永远 PROCESSING → 直到轮询上限
 		cn.mu.Unlock()
 		env := newE2EEnv(t, e2eOptions{CN: cn, CNTokens: []string{"ms-e2e-img-slow"}})
+		up := env.msUP(provider.ModelScope)
+		up.SetPollLimitForTest(800 * time.Millisecond)
+		up.SetPollSleepForTest(func(ctx context.Context, d time.Duration) error {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(10 * time.Millisecond): // 不真的按退避序列等 2s+
+			}
+			return nil
+		})
 
 		start := time.Now()
 		resp, raw := env.post("/v1/images/generations", imageReq("modelscope/Qwen/Qwen-Image", nil))
@@ -270,8 +278,12 @@ func TestE2E_US10_ImageFailuresAreHonest(t *testing.T) {
 		if code := asString(errObj["code"]); code != "task_timeout" {
 			t.Errorf("error.code = %q，want task_timeout", code)
 		}
-		if time.Since(start) < 60*time.Second {
-			t.Errorf("轮询 %.1fs 就放弃了，want ≥120s（D8 只放宽不压低）", time.Since(start).Seconds())
+		if elapsed := time.Since(start); elapsed > 20*time.Second {
+			t.Errorf("轮询 %.1fs 才放弃，want 按注入的 800ms 上限收尾（钩子没接上？）", elapsed.Seconds())
+		}
+		// 超时不得伪造产物：data 字段必须缺席/为空。
+		if data, ok := jsonMap(t, raw)["data"]; ok && data != nil {
+			t.Errorf("超时响应带了 data（不得伪造结果，R36 口径）：%v", data)
 		}
 	})
 }
@@ -426,6 +438,39 @@ func TestE2E_US12_GlmImageUnchanged(t *testing.T) {
 	if !strings.Contains(edit.Prompt, "不要复刻参考图的排版样式") {
 		t.Errorf("glm 改图缺少拼版约束前缀（默认语义被直传路径串改？）prompt=%q", edit.Prompt)
 	}
+
+	// D6/D12：生图模型要进 `/v1/models` 且带「能出图」标记——客户端靠它区分画图与对话模型
+	// （旧行为：`glm/image` 只能从文档里知道，目录里根本没有它）。
+	t.Run("glm 生图模型进 /v1/models 且带能出图标记", func(t *testing.T) {
+		resp, raw := env.get("/v1/models")
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("/v1/models = %d：%s", resp.StatusCode, truncateForLog(raw))
+		}
+		var list struct {
+			Data []map[string]any `json:"data"`
+		}
+		if err := json.Unmarshal(raw, &list); err != nil {
+			t.Fatalf("目录响应不是合法 JSON: %v", err)
+		}
+		byID := make(map[string]map[string]any, len(list.Data))
+		for _, e := range list.Data {
+			byID[asString(e["id"])] = e
+		}
+		img := byID["glm/image"]
+		if img == nil {
+			t.Fatalf("目录缺 glm/image（客户端无法发现本渠道能画图）：%v", byID)
+		}
+		if v, _ := img["supports_image_generation"].(bool); !v {
+			t.Errorf("glm/image 的 supports_image_generation = %v，want true", img["supports_image_generation"])
+		}
+		chat := byID["glm/chatglm:moe_53f"]
+		if chat == nil {
+			t.Fatalf("目录缺 glm 对话模型（静态表投放有问题）：%v", byID)
+		}
+		if _, has := chat["supports_image_generation"]; has {
+			t.Error("对话模型带了 supports_image_generation（能看图/能出图与对话能力正交）")
+		}
+	})
 }
 
 // TestE2E_US13_ImageRotationWithinOneRequest 用户故事 13：

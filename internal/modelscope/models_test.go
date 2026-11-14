@@ -211,6 +211,49 @@ func TestImageFlagHeuristicAndFalsePositiveGuard(t *testing.T) {
 	}
 }
 
+// TestImageGenerationCapability 「能出图」标记的来源：静态表 image:true ∪ 命名启发式（D12），
+// 且与「能看图」（SupportsImages）正交。
+func TestImageGenerationCapability(t *testing.T) {
+	// 静态表：Image=true 的条目带标记，对话模型不带。
+	for _, m := range StaticModels() {
+		want := false
+		for _, e := range staticCatalog {
+			if e.ID == m.ID {
+				want = e.Image
+			}
+		}
+		if m.SupportsImageGeneration != want {
+			t.Errorf("静态条目 %q 的 SupportsImageGeneration = %v，want %v", m.ID, m.SupportsImageGeneration, want)
+		}
+	}
+
+	// 远程独有条目：命名启发式标记；视觉理解模型不得被标（能看图 ≠ 能出图）。
+	raw := `{"data":[{"id":"Qwen/Qwen-Image"},{"id":"vendor/FLUX.1-dev"},{"id":"Qwen/Qwen2.5-VL-72B-Instruct"}]}`
+	remote, err := parseModelList([]byte(raw))
+	if err != nil {
+		t.Fatalf("parseModelList: %v", err)
+	}
+	for _, m := range remote {
+		want := m.ID != "Qwen/Qwen2.5-VL-72B-Instruct"
+		if m.SupportsImageGeneration != want {
+			t.Errorf("%q 的 SupportsImageGeneration = %v，want %v", m.ID, m.SupportsImageGeneration, want)
+		}
+		if m.ID == "Qwen/Qwen2.5-VL-72B-Instruct" && m.SupportsImageGeneration {
+			t.Errorf("视觉理解模型被误标「能出图」（能看图 ≠ 能出图）：%+v", m)
+		}
+	}
+
+	// 静态 ∪ 远程同 ID 合并时标记不得丢（fillFrom 或运算）。
+	for _, m := range mergeModels(StaticModels(), remote) {
+		if (m.ID == "Qwen/Qwen-Image" || m.ID == "Qwen/Qwen-Image-Edit") && !m.SupportsImageGeneration {
+			t.Errorf("合并后 %q 丢了能出图标记：%+v", m.ID, m)
+		}
+		if m.ID == "Qwen/Qwen3.5-122B-A10B" && m.SupportsImageGeneration {
+			t.Errorf("对话模型 %q 被误标生图", m.ID)
+		}
+	}
+}
+
 // TestModelsDoNotInventCapabilities R49/R119：上游没写的字段一律不声明。
 // 这条是「探测不到就一律不声明」的反向护栏——若解析器开始按名字猜能力，它立刻变红。
 func TestModelsDoNotInventCapabilities(t *testing.T) {

@@ -17,11 +17,11 @@
 // 装配方式与 cmd/wild-work/main.go 同构：auth 文件 → pool → modelscope.Client（Base 指到
 // 假上游）→ server.Handler → App（同一份 runtimes + 同一份 ledger/stats）→ App.StartServer()。
 //
-// ⚠️ 已知的**不可端到端化**缝隙（见 .scratch/modelscope-channel/e2e-findings.md）：
-// 面板粘贴入口 POST /api/login/modelscope_token 的**校验**走 modelscope.ValidateToken →
-// New(kind) → 硬编码的正式基址，没有任何注入点，故"粘贴成功"这一段只能用**落盘后的
-// 凭据文件**起测；粘贴入口本身只测本地拒收分支（空 token / 前缀不对 / 含空白），
-// 它们在上游请求之前就返回。
+// 粘贴入口 POST /api/login/modelscope_token 的**校验**不可被 Client.Base 覆盖（它走包级
+// modelscope.ValidateToken → New(kind) → 正式基址），故 App 留了 msValidate 测试注入点：
+// 本层把它接到「同一份 Client（Base=假上游）」，于是「粘贴即接入」成功链路与区域 401
+// 文案都能离线跑通（产品路径不改，见 e2e-findings §5.1）。同理生图轮询的时限/间隔有
+// SetPollLimitForTest / SetPollSleepForTest 两个测试专用钩子（e2e-findings §5.2）。
 
 package app
 
@@ -29,6 +29,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"os"
@@ -39,6 +40,7 @@ import (
 
 	"wild-work/internal/auth"
 	"wild-work/internal/config"
+	"wild-work/internal/glm"
 	"wild-work/internal/modelscope"
 	"wild-work/internal/pool"
 	"wild-work/internal/provider"
@@ -62,6 +64,10 @@ type e2eEnv struct {
 	cnPool, aiPool *pool.Pool
 	authDir        string
 	stateDir       string
+
+	// msUPs 两区装配出来的渠道客户端（Base 已指到假上游）。测试直接对它们调用
+	// 测试专用钩子（如 SetPollLimitForTest）——不必再发明第二套注入参数。
+	msUPs map[provider.Kind]*modelscope.Client
 }
 
 type e2eOptions struct {
@@ -88,7 +94,8 @@ func newE2EEnv(t *testing.T, opt e2eOptions) *e2eEnv {
 	cfg.Listen = config.Listen{Host: "127.0.0.1", Port: freePort(t)}
 
 	env := &e2eEnv{t: t, cn: opt.CN, ai: opt.AI, glm: opt.GLM,
-		authDir: cfg.AuthDir, stateDir: filepath.Dir(cfg.StateFile)}
+		authDir: cfg.AuthDir, stateDir: filepath.Dir(cfg.StateFile),
+		msUPs: map[provider.Kind]*modelscope.Client{}}
 
 	seed := func(kind provider.Kind, tokens []string) {
 		if len(tokens) == 0 {
@@ -144,6 +151,7 @@ func newE2EEnv(t *testing.T, opt e2eOptions) *e2eEnv {
 		up.Base = fake.URL() // 唯一的上游注入点（Client.Base 是显式测试口）
 		up.HTTP.Timeout = 10 * time.Second
 		up.StreamHTTP.Transport = up.HTTP.Transport
+		env.msUPs[kind] = up
 		appRts[kind] = &Runtime{Kind: kind, Pool: p, Upstream: up}
 		srvRts[kind] = &server.Runtime{Kind: kind, Pool: p, Upstream: up, StaticModels: modelscope.StaticModels()}
 	}
@@ -154,7 +162,9 @@ func newE2EEnv(t *testing.T, opt e2eOptions) *e2eEnv {
 		gp.Add(&auth.Auth{Kind: provider.GLM.String(), UID: "glm-e2e-uid", AccessToken: "glm-token",
 			ExpiresAt: time.Now().Add(24 * time.Hour).Unix(), FilePath: filepath.Join(cfg.AuthDir, "glm-x.json")})
 		appRts[provider.GLM] = &Runtime{Kind: provider.GLM, Pool: gp, Upstream: opt.GLM}
-		srvRts[provider.GLM] = &server.Runtime{Kind: provider.GLM, Pool: gp, Upstream: opt.GLM}
+		// 静态目录喂给 server 层（与 main.go 同构）：glm 的 /v1/models 没有上游目录，
+		// StaticModels 就是权威清单——包括本轮新增的 `glm/image`（带能出图标记）。
+		srvRts[provider.GLM] = &server.Runtime{Kind: provider.GLM, Pool: gp, Upstream: opt.GLM, StaticModels: glm.StaticModels()}
 	}
 
 	a, err := New(Options{ConfigPath: filepath.Join(dir, "config.json"), Config: cfg, Runtimes: appRts})
@@ -162,6 +172,10 @@ func newE2EEnv(t *testing.T, opt e2eOptions) *e2eEnv {
 		t.Fatalf("App.New: %v", err)
 	}
 	env.app = a
+	// 粘贴入口的上游校验：把默认的 modelscope.ValidateToken（正式上游）换成「同一份
+	// Client 但 Base 指假上游」。这是 e2e-findings §5.1 开的那道缝——产品路径与断言
+	// 逐字不变，只是校验请求落到 httptest。
+	a.msValidate = env.validateToken
 	t.Cleanup(a.Stop)
 
 	stickyMax := opt.StickyMax
@@ -193,6 +207,18 @@ func newE2EEnv(t *testing.T, opt e2eOptions) *e2eEnv {
 	env.waitReady()
 	return env
 }
+
+// validateToken 用「同一份渠道 Client、Base 指假上游」跑粘贴校验（product 路径逐字不变）。
+func (e *e2eEnv) validateToken(kind provider.Kind, token string) (string, error) {
+	up := e.msUPs[kind]
+	if up == nil {
+		return "", fmt.Errorf("e2e: %s 没有装配假上游（e2eOptions 需带对应的 fake）", kind)
+	}
+	return up.ValidateToken(token)
+}
+
+// msUP 取某区已装配的渠道客户端（测试设测试专用钩子用）。
+func (e *e2eEnv) msUP(kind provider.Kind) *modelscope.Client { return e.msUPs[kind] }
 
 // waitReady 等首个请求成功（StartServer 是异步起 goroutine 的）。
 func (e *e2eEnv) waitReady() {
