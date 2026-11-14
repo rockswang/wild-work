@@ -770,7 +770,7 @@ var (
 		string(provider.Cline):     true, // R59：cline 的模型名是 cline-free/*，漏了它则该渠道 token 不进平台表
 		string(provider.OfficeAce): true,
 		string(provider.Comate):    true, // 漏了它 ⇒ comate 的 token 与请求都不进平台概览表
-		// modelscope 两区（D19/R158）：漏了任一项 ⇒ 该区的 token 与请求全不进平台表，
+		// modelscope 两区（D19/R159）：漏了任一项 ⇒ 该区的 token 与请求全不进平台表，
 		// 而工具本身不报任何错（R130 的教训）。
 		string(provider.ModelScope):   true,
 		string(provider.ModelScopeAI): true,

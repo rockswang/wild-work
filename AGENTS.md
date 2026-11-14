@@ -45,7 +45,7 @@
 
 ---
 
-## 1. 决议项索引（R1–R158）
+## 1. 决议项索引（R1–R159）
 
 **全文（含证据链、反例、已知限制）见 [`docs/决议项.md`](docs/决议项.md)** —— 改动相关代码前必读对应条目。
 
@@ -191,6 +191,7 @@
 | R156 | **脱敏表支持 `sanitize.toml` 追加自定义规则：TOML 单引号字面量让正则零转义；只 append、不覆盖、不隐式补预检**：JSON 承载正则有静默陷阱（`\b` 被解成退格符），故用 TOML 字面量字符串；段键=源文件路径、字段名=源变量名，解析器共享于 `internal/sanitizecfg`（两包各留约 30 行 append 接线）；段级 `enabled` 只管本段自定义规则是否加载（字段缺失或非布尔值按默认 `true`，显式 `false` 跳过本段追加、内置规则照常生效）；坏条目逐条跳过，文件缺失/语法错误保留内置规则；首次启动生成完整模板。已知限制：只增不删、无隐式预检、手改需重启。详见 [`docs/决议项.md`](docs/决议项.md) R156 |
 | R157 | **账号页新增「卡片⇄列表」两视图：列表 = 单表 + 每渠道一个分组容器（首行分组行，小计与汇总条 chip 逐字同源、分组行可点=该渠道 chip 筛选）；「刷新积分 / 全部签到 / 视图切换」集中到汇总条上方的功能按钮条，顶部工具栏只留渠道添加**（2026-11-14，owner 指派 task#4 + 三轮 grill） | **为什么**：几十个账号只有一种两列卡片网格时信息密度低（一屏可见账号少）、横向对比（谁积分多 / 谁在冷却）要来回滚、渠道之间没有视觉分隔。**结构**：① 两视图在**同一容器** `#acctList` 内互斥渲染（容器加 `.list-mode`；卡片分支输出**逐字未变**，既有断言零改动）；② 列表是**一张表**：只有一处列名 thead，表体按渠道分段 —— 每段一个 `tbody.acct-group`（= 分组容器），首行是跨四列的**分组行**（徽章 + 显示名 + 「N 号」+ 小计）；③ 分组行小计**只**消费 `channelSummaries()` 的 `c.body`（工单 01 抽出的共享函数），与汇总条 chip 物理上同源；分组行内**不得**出现第二份按渠道求和（不适用 / tokens / 待刷新 / 数字+临期+不可用+待刷新 四类分支与门槛全在共享函数里）；④ 分组序沿用 R142（`chSummariesOrder`：内建按显示名字节序、自定义垫底，与汇总条/费率页同序），分组内保持后端下发原序；⑤ 分组行 `data-wg` + 事件委托 → `setAcctFilter()`，与汇总条 chip **同一入口**（再点取消；高亮由 `acctFilter` 单一真相派生，两处不各自维护状态）；⑥ 账号单元抽成 `acctParts`（昵称/状态徽标/操作/停用·冷却事实/默认收起），卡片与列表行共用，避免「停用原因只挂在卡片上、列表里悄悄丢了」；⑦ 可见性收口到 `ACCT_UNIT_SEL`（`.acct-card, .acct-row`）+ 分组容器**整段隐藏**（判据派生自账号单元的最终可见性），**不用 `:has()`**（静态检查器覆盖不到隐式选择器）；⑧ 功能按钮条 `#acctFnBar` 位于汇总条上方，承载刷新积分/全部签到/视图切换，顶部工具栏只剩渠道添加按钮（刷新/签到沿用原 id 与绑定）；⑨ 视图偏好 `localStorage["acct-view"]`，默认卡片、值不是 `list` 一律回退且不报错（与 `usageDays` 同款直读写 + 失败静默），不做服务端持久化；⑩ 列表行**只有积分格与昵称可点**（整行不可点，行内有破坏性按钮），虚拟账号行仍只读（🔒 + 无停用/删除）；⑪ 列表积分格保留 `acct-credits` 语义类（明细浮窗的「切号不关」与就地回写两链路认它），列表作用域样式另写 `.acct-table .cell-credits`（**不动**卡片既有规则）。**回归**：`scripts/ui-static-check.mjs` 场景 1.95（46 条断言，覆盖票面断言 1–9；断言 10「积分列两行制」属票 03，断言 11 由其余场景共同承担）；**变异验证（逐条确认变红）**：分组行自带求和 → 4 条红；可见性函数不管空分组容器 → 2 条红；视图切换放回顶部工具栏 → 2 条红；列表退化成「每渠道一张表」→ 7 条红；另 naHidden 置假 / `ACCT_UNIT_SEL` 去掉 `.acct-row` 两处亦变红。**已知限制**：① 表头**未做粘性**（取决于页面滚动上下文，spec 明确「不做成前提」，留闸 2 实测决定）；② 列表行刻意复用卡片语义类名（spec 已知风险 ④，换取既有选择器与断言零改动）；③ token 计量渠道与积分仍分开统计且不进合计（R17，分组行同样只标注 tokens、不求和）；④ 卡片模式零改动；⑤ 后端 / 管理 API / 状态文件 / 粘性路由全家零改动（视图偏好只存本地）。 |
 | R158 | **modelscope/modelscopeai 生图 = 异步任务（submit → 请求内轮询），对客户端仍是同步 OpenAI 形状；生图路径补请求内换号（上限 = 池内账号数），glm 一并受益**（2026-11-14，票 05） | **协议**：`POST /v1/images/generations` + `X-ModelScope-Async-Mode: true` → `task_id`；`GET /v1/tasks/{id}` + `X-ModelScope-Task-Type: image_generation`，间隔 2s 起 +500ms 封顶 5s；`SUCCEED` → `output_images[]`（可能多张，按上游给几张返几张）、`FAILED`/`CANCELED` → 新增 `provider.ErrUpstream`（不可重试不换号）、未知状态继续轮询。**请求形状**：`model` 取 `SplitModelID` 第二返回值；`size` 用**像素串**五档（比例串由渠道换算，与 glm 相反，各写一份表）；`n` 夹到 1..4；`negative_prompt` 只在真给了才发。**超时**：总上限 `max(120s, upstream.timeout_seconds)`（只放宽不压低，R110 同口径）⇒ `provider.TaskTimeout` ⇒ 对外 **504 `task_timeout`** + `task_id` + 「任务可能仍在执行」，不伪造结果。**参考图分流用能力声明**：新增 `provider.InlineImageRefProvider`（modelscope true ⇒ 多张 data URI 直传、不拼版不上图床；其余渠道仍走 glm 拼版路径，一处不改），总字节 >20MB → 400 明确拒绝。**请求内换号**：`runImage` 拆 `penalizeImage`/`writeImageError`（状态码与文案逐字保留），可重试错误换号、上限 `len(Pool.List())`，`ErrSoftRate` 先模型级冷却再换，全池耗尽透传首因；换号成功 `stickyPin` 改钉新号。**已知限制**：task_id 外泄（客户端可续查）；无 cancel 调用（超时/换号后上游任务仍耗额度，换号会重放整个 submit）；`output_format=png` 不转换（OSS 直链，内容可能仍是 jpg）；**真机链路未实证**（无凭据环境，§0.1 禁拿生产账号试），画质/多图/LoRA 同样未实证。**回归**：`internal/modelscope/image_test.go`（submit 头/体 + 退避序列/封顶、超时 task id、FAILED/CANCELED、五档 size、n 夹取、negative_prompt、改图多 data URI、轮询上限 120s↔600s、401 归 SessionDead、日志零 token）、`internal/server/handler_images_rotate_test.go`（换号成功 + 粘性改钉、全池耗尽请求数=池大小、FAILED 不换号、504 task_timeout、JSON/multipart 两形态直传、超限 400、多产物保序）；glm 既有 images 用例零改动全绿。**变异验证 5 处全部实测变红**：轮询上限改常量 / 超时文案去 task id / FAILED 改可重试 Kind / 换号上限改 1 / size 误用比例串。 |
+| R159 | **新增内建渠道 ModelScope（`modelscope` 国内站 / `modelscopeai` 国际站）：粘贴式 `ms-` token 多池、额度「不适用」、两区 token 不通用；面板按钮/配色/粘贴层与 R99 配色偏差**（2026-11-14，task#6）：双 kind 独立服务与独立池（不注册 `ModelNamespaces`，模型 ID 带渠道前缀）；授权只靠面板粘贴（不做 CDP/扫码），`SubmitModelScopeToken` = 规整 → `GET /v1/models` 零费用校验（401/403 给「区域不通用 / 绑阿里云实名 / 重新生成」三条自查项）→ `modelscope-*`/`modelscopeai-*` 落盘（`ExpiresAt` 远期、uid = `mst-`/`msai-`+sha256 前 16、昵称尾 4 位可改、用户改名不被重贴冲掉）；额度口径 `credits_na` 且 `creditsUnit` 不改（不编造「次数」）、`stats.channelKind` 含两 kind、不进积分自动刷新；无签到无保活（`[]int{}` + 不进 `FollowGlobalCheckin`）；前端 `NO_CREDITS_BUILTIN` 含两 kind 而 `VIRTUAL_ACCOUNTS` **不含**（真多 token 池，可删可停、默认可见）；配色 `#0369a1` + `#854d0e`（票面原案 `#b45309` 与 loomy 完全同色 ΔE 0，违 R99，取同色相更暗一档并记入配色规范）。详见 [`docs/决议项.md`](docs/决议项.md) R159 |
 
 > ⚠️ **R71 附带的实测纪律**（也是 §0.1 的来源）：上游校验的是**头族齐全**而非单点
 > （只补 `X-Conversation-ID` 仍被拒）；且 `X-Conversation-ID` 的**取值形态不被校验**
@@ -373,7 +374,7 @@
 
 **面板区块与 API 全量清单**见 [`docs/接口参考.md`](docs/接口参考.md)。
 
-### 渠道清单（23 条内建，其中旧 Qoder 仅保留路由 + 自定义）
+### 渠道清单（25 条内建，其中旧 Qoder 仅保留路由 + 自定义）
 
 WorkBuddyCN（`workbuddy/*`）、WorkBuddyAI（`workbuddyai/*`）、TraeWork（`traework/*`）、
 TraeCode（`traecode/*`）、QoderCN（`qodercn/*`）、QoderCOM（`qodercom/*`）、
@@ -383,9 +384,11 @@ Kilo（`kilo/*`，免密免费池、无账号）、MiniMax Code（`minimax/*`，
 LobsterAI（`lobsterai/*`，本机回调授权）、ZCode（`zcode/*`，设备授权；积分领取依赖网页验证码，本工具不自动领取）、
 Gemini（`gemini/*`，本机回调授权）、CodeArts（`codearts/*`，PKCE 授权）、
 Cline（`cline-free/*`）、华为云果办 OfficeAce（`officeace/*`）、WPS Comate（`comate/*`，CDP 自动捕获 `wps_sid`、手工粘贴兜底）、
-WPS 灵犀（`lingxi/*`，扫码/`wps_sid` 粘贴 + CDP 捕获，与 comate 共用 Cookie 但 uid 前缀 `lxsid-`）；
+WPS 灵犀（`lingxi/*`，扫码/`wps_sid` 粘贴 + CDP 捕获，与 comate 共用 Cookie 但 uid 前缀 `lxsid-`）、
+ModelScope（`modelscope/*`，国内站；面板粘贴 `ms-` Access Token、一枚 token = 一个账号、额度「不适用」）、
+ModelScopeAI（`modelscopeai/*`，国际站；与国内站**token 不通用**、独立池、互不兜底）；
 另有用户自定义 OpenAI 兼容渠道（`custom_channels`，R66）。
-旧 Qoder（`qoder/*`）已从界面下线，路由保留（`provider.BuiltinKinds()` 仍计入 ⇒ 23 条内建、可添加 22 条）。
+旧 Qoder（`qoder/*`）已从界面下线，路由保留（`provider.BuiltinKinds()` 仍计入 ⇒ 25 条内建、可添加 24 条）。
 
 **新增渠道步骤**：① `internal/<channel>/` 实现 `provider.Upstream`；
 ② `internal/auth` 加 `Load<Channel>Dir()`（注意 glob 边界：`qoder*.json` 会吞 `qodercn-`/`qodercom-`）；
@@ -491,7 +494,7 @@ bash scripts/probe-dump.sh summarize                # 汇总各渠道 usage 字�
 | [README.md](README.md) | 用户文档 |
 | [DEVELOPMENT.md](DEVELOPMENT.md) | 开发者文档（面向 AI Agent） |
 | [AGENTS.md](AGENTS.md) | **本文件**：纪律 + 决议索引 + 关键不变量 + 构建发版 |
-| [docs/决议项.md](docs/决议项.md) | **R1–R158 决议全文**（证据链、反例、已知限制） |
+| [docs/决议项.md](docs/决议项.md) | **R1–R159 决议全文**（证据链、反例、已知限制） |
 | [docs/渠道接入备忘.md](docs/渠道接入备忘.md) | 各渠道协议要点、凭据模型、已知限制与踩坑 |
 | [docs/接口参考.md](docs/接口参考.md) | 面板区块规划 + 管理 API 全量清单 |
 | [docs/模型降级链定义.md](docs/模型降级链定义.md) | **模型降级链的唯一权威定义**：三维归因、错误类型全量归属、两条触发路径、三条硬规则、已知限制（R94） |
