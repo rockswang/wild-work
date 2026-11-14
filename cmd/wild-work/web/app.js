@@ -963,17 +963,18 @@ function creditsText(a) {
 const CH_SUMMARY_ORDER = Object.keys(CH_LABEL)
   .sort((a, b) => (chLabel(a) < chLabel(b) ? -1 : chLabel(a) > chLabel(b) ? 1 : 0));
 
-// renderSummary 渠道积分汇总条：每渠道一行「可用总积分 / 临期」，末尾合计。
-// 数据全部来自 state.accounts（pool 实时值），与账号卡片同源；
-// 口径与 R17 一致：不可用额度只作角标、不进合计；credits_na（匿名）不参与合计。
-function renderSummary() {
-  const el = $("creditSummary");
-  if (!el) return;
-  if (!state.accounts.length) { el.classList.add("hidden"); return; }
-  el.classList.remove("hidden");
-
+// channelSummaries 按渠道聚合账号 + 生成该渠道的摘要文案分支的**唯一**共享来源。
+// 汇总条 chip 是当前唯一消费者；后续「列表模式分组行小计」复用同一个函数，
+// 使「分组行与 chip 逐字同源」在结构上不可能漂移。
+// ⚠️ 聚合循环与文案分支必须同处一处：只抽聚合、把每种状态的渲染分支留给调用方，
+// 会留下「数字同源、角标各写一份」的半吊子状态（token 计量与「不适用」两条分支
+// 最容易在搬运时丢条件）。
+// 口径（R17）：不可用额度只作角标、不进合计；credits_na 渠道不参与合计；
+// Token 计量渠道单列 tokens、**不并入**积分合计（与积分分开统计），但保留临期角标。
+function channelSummaries(accounts) {
+  const fmt = (n) => n.toLocaleString("zh-CN");
   const byCh = {};
-  for (const a of state.accounts) {
+  for (const a of accounts) {
     const g = a.group || "workbuddy";
     let c = byCh[g];
     if (!c) { c = byCh[g] = { n: 0, credits: 0, expiring: 0, unusable: 0, stale: 0, na: false, isToken: false, tokens: 0 }; }
@@ -986,6 +987,37 @@ function renderSummary() {
     c.unusable += a.unusable_credits || 0;
     if (a.credits_stale) c.stale++;
   }
+  for (const c of Object.values(byCh)) {
+    c.allStale = c.stale === c.n;
+    if (c.na) {
+      c.body = `<span class="credit-na">不适用</span>`;
+    } else if (c.isToken) {
+      // Token 计数：以 tokens 为单位单列，明示它不是积分。
+      c.body = `<span class="cs-num">${fmtTokens(c.tokens)}</span>`
+        + `<span class="cs-tok" title="本渠道额度以 token 计量，不计入「合计」">tokens</span>`
+        + (c.expiring > 0 ? `<span class="cs-exp" title="${esc(expiringLabel(EXPIRING_DAYS))}，选号时优先消耗">临期${fmtTokens(c.expiring)}</span>` : "");
+    } else if (c.allStale) {
+      c.body = `<span class="credit-stale">待刷新</span>`;
+    } else {
+      c.body = `<span class="cs-num">${fmt(c.credits)}</span>`
+        + (c.expiring > 0 ? `<span class="cs-exp" title="${esc(expiringLabel(EXPIRING_DAYS))}，选号时优先消耗">临期${fmt(c.expiring)}</span>` : "")
+        + (c.unusable > 0 ? `<span class="cs-unu" title="账号名下、本工具不可消耗的额度（不计入合计）">不可用${fmt(c.unusable)}</span>` : "")
+        + (c.stale > 0 ? `<span class="cs-stale" title="部分账号余额待刷新">${c.stale} 待刷新</span>` : "");
+    }
+  }
+  return byCh;
+}
+
+// renderSummary 渠道积分汇总条：每渠道一行「可用总积分 / 临期」，末尾合计。
+// 数据全部来自 state.accounts（pool 实时值），与账号卡片同源；
+// 口径与 R17 一致：不可用额度只作角标、不进合计；credits_na（匿名）不参与合计。
+function renderSummary() {
+  const el = $("creditSummary");
+  if (!el) return;
+  if (!state.accounts.length) { el.classList.add("hidden"); return; }
+  el.classList.remove("hidden");
+
+  const byCh = channelSummaries(state.accounts);
 
   const fmt = (n) => n.toLocaleString("zh-CN");
   // 已知渠道按固定顺序，未知渠道（新增时）按字母序垫后，保证不丢行
@@ -1004,28 +1036,12 @@ function renderSummary() {
   let html = `<span class="cs-title">积分汇总</span>`;
   for (const k of chs) {
     const c = byCh[k];
-    const allStale = c.stale === c.n;
     // R17 口径：口径过期的数字不当真值——全渠道待刷新时不进合计
     // （否则"待刷新"的旧值会悄悄抬高合计，用户看到的数字无从解释）。
     // Token 计量渠道不进积分合计（这就是「和积分分开统计」的落点）。
-    if (!c.na && !c.isToken && !allStale) { total += c.credits; totalExp += c.expiring; }
-    if (!c.na && !c.isToken && allStale) staleChs++;
-    let body;
-    if (c.na) {
-      body = `<span class="credit-na">不适用</span>`;
-    } else if (c.isToken) {
-      // Token 计数：以 tokens 为单位单列，明示它不是积分。
-      body = `<span class="cs-num">${fmtTokens(c.tokens)}</span>`
-        + `<span class="cs-tok" title="本渠道额度以 token 计量，不计入「合计」">tokens</span>`
-        + (c.expiring > 0 ? `<span class="cs-exp" title="${esc(expiringLabel(EXPIRING_DAYS))}，选号时优先消耗">临期${fmtTokens(c.expiring)}</span>` : "");
-    } else if (allStale) {
-      body = `<span class="credit-stale">待刷新</span>`;
-    } else {
-      body = `<span class="cs-num">${fmt(c.credits)}</span>`
-        + (c.expiring > 0 ? `<span class="cs-exp" title="${esc(expiringLabel(EXPIRING_DAYS))}，选号时优先消耗">临期${fmt(c.expiring)}</span>` : "")
-        + (c.unusable > 0 ? `<span class="cs-unu" title="账号名下、本工具不可消耗的额度（不计入合计）">不可用${fmt(c.unusable)}</span>` : "")
-        + (c.stale > 0 ? `<span class="cs-stale" title="部分账号余额待刷新">${c.stale} 待刷新</span>` : "");
-    }
+    if (!c.na && !c.isToken && !c.allStale) { total += c.credits; totalExp += c.expiring; }
+    if (!c.na && !c.isToken && c.allStale) staleChs++;
+    const body = c.body;
     const on = acctFilter === k ? " on" : "";
     html += `<span class="cs-chip clickable${on}" data-wg="${esc(k)}" role="button" tabindex="0"`
       + ` title="点击筛选该渠道账号，再次点击取消">${chBadge(k)}`
