@@ -33,9 +33,9 @@ func hasModel(ms []provider.ModelInfo, id string) bool {
 // 且**上游斜杠原样保留**（对外前缀只由 provider.PublicModelID 拼一次，渠道内不得自己拼）。
 func TestModelsUnionStaticAndRemote(t *testing.T) {
 	remote := `{"object":"list","data":[` +
-		`{"id":"Qwen/Qwen3-235B-A22B-Instruct-2507","context_length":131072,"max_tokens":8192,"supports_tools":true},` +
+		`{"id":"Qwen/Qwen3.5-122B-A10B","context_length":131072,"max_tokens":8192,"supports_tools":true},` +
 		`{"id":"deepseek-ai/DeepSeek-V3.1","context_length":65536,"reasoning_efforts":["low","high"],"default_reasoning_effort":"high"},` +
-		`{"id":"Qwen/Qwen-Image-Edit"},` +
+		`{"id":"MiniMax/MiniMax-M3"},` +
 		`{"id":"black-forest-labs/FLUX.1-dev"},` +
 		`{"id":"Qwen/Qwen2.5-VL-72B-Instruct","input_modalities":["text","image"]}` +
 		`]}`
@@ -62,11 +62,12 @@ func TestModelsUnionStaticAndRemote(t *testing.T) {
 
 	// ① 并集：静态独有（生图模型）+ 远程独有都在。
 	for _, want := range []string{
-		"Qwen/Qwen3-235B-A22B-Instruct-2507", // 静态 ∩ 远程
-		"Qwen/Qwen-Image",                    // 静态独有（生图）
-		"deepseek-ai/DeepSeek-V3.1",          // 远程独有
-		"black-forest-labs/FLUX.1-dev",       // 远程独有（生图）
-		"Qwen/Qwen2.5-VL-72B-Instruct",       // 远程独有（视觉理解）
+		"Qwen/Qwen3.5-122B-A10B",       // 静态 ∩ 远程
+		"Qwen/Qwen-Image-Edit",         // 静态独有（生图模型）
+		"MiniMax/MiniMax-M3",           // 远程独有（对话）
+		"deepseek-ai/DeepSeek-V3.1",    // 远程独有
+		"black-forest-labs/FLUX.1-dev", // 远程独有（生图）
+		"Qwen/Qwen2.5-VL-72B-Instruct", // 远程独有（视觉理解）
 	} {
 		if !hasModel(models, want) {
 			t.Errorf("目录缺模型 %q，实际 = %v", want, modelIDs(models))
@@ -83,7 +84,7 @@ func TestModelsUnionStaticAndRemote(t *testing.T) {
 	// ③ 静态表不声明能力 ⇒ 远程声明必须被采纳（否则客户端看不到上下文与 tools）。
 	var staticEntryInfo *provider.ModelInfo
 	for i := range models {
-		if models[i].ID == "Qwen/Qwen3-235B-A22B-Instruct-2507" {
+		if models[i].ID == "Qwen/Qwen3.5-122B-A10B" {
 			staticEntryInfo = &models[i]
 		}
 	}

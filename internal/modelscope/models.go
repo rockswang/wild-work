@@ -43,11 +43,16 @@ type staticEntry struct {
 
 // staticCatalog 最小静态目录：至少一款对话模型 + 一款生图模型。
 //
+// 条目按 2026-11-14 的**实测**目录（`GET https://api-inference.modelscope.cn/v1/models`，
+// 无需鉴权即 200，返回 38 条 OpenAI 形状 `{id,object,owned_by,created}`）挑取 ——
+// 静态表只在「远程目录拉不到」时兜底，绝不能塞上游当前不提供的模型：那会让客户端
+// 选中一个必然 404 的模型，而 404 在本渠道归 ErrNotFound（会把**账号**软冷却）。
+// 待观察（未实证）：带 token 的目录是否比未鉴权目录更宽。
+//
 // 能力字段（tools / 思考档位 / 上下文）**一律不声明**：上游没说过的话不得替它说
 // （R49/R119）。真实能力由 /v1/models 的上游声明透传（见 modelInfoFromRemote）。
 var staticCatalog = []staticEntry{
-	{ID: "Qwen/Qwen3-235B-A22B-Instruct-2507"},
-	{ID: "Qwen/Qwen-Image", Image: true},
+	{ID: "Qwen/Qwen3.5-122B-A10B"},
 	{ID: "Qwen/Qwen-Image-Edit", Image: true},
 }
 
