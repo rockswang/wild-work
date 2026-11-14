@@ -9,6 +9,7 @@ import (
 	"image"
 	"image/color"
 	"image/jpeg"
+	"log"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
@@ -370,5 +371,237 @@ func TestImagesEditsMultipartBracketName(t *testing.T) {
 	prompt, _ := m.lastEditBody["prompt"].(string)
 	if !strings.Contains(prompt, "两个角色同框") || !strings.Contains(prompt, "reference1") {
 		t.Errorf("prompt 缺原文或 referenceN 说明: %q", prompt)
+	}
+}
+
+// fakeImageGen 假「会画图」的渠道上游：实现 provider.ImageGenerator + provider.Upstream
+// （嵌入 echoUpstream 复用聊天空实现），记录入参并可按需返回错误。
+type fakeImageGen struct {
+	echoUpstream
+	mu        sync.Mutex
+	genCalls  int
+	editCalls int
+	lastReq   provider.ImageRequest
+	err       error
+}
+
+func (f *fakeImageGen) GenerateImage(_ *auth.Auth, req provider.ImageRequest) ([]provider.ImageResult, error) {
+	f.mu.Lock()
+	f.genCalls++
+	f.lastReq = req
+	err := f.err
+	f.mu.Unlock()
+	if err != nil {
+		return nil, err
+	}
+	return []provider.ImageResult{{URL: "https://example.invalid/gen.png", RevisedPrompt: req.Prompt}}, nil
+}
+
+func (f *fakeImageGen) EditImage(_ *auth.Auth, req provider.ImageRequest) ([]provider.ImageResult, error) {
+	f.mu.Lock()
+	f.editCalls++
+	f.lastReq = req
+	err := f.err
+	f.mu.Unlock()
+	if err != nil {
+		return nil, err
+	}
+	return []provider.ImageResult{{URL: "https://example.invalid/edit.png"}}, nil
+}
+
+// addImageRuntime 给 runtime 表补一个「会画图」的渠道（账号池 + 假上游），返回账号池。
+func addImageRuntime(t *testing.T, h *Handler, kind provider.Kind, up provider.Upstream, uid string) *pool.Pool {
+	t.Helper()
+	p := pool.New(t.TempDir() + "/state-" + kind.String() + ".json")
+	p.Add(&auth.Auth{UID: uid, AccessToken: "AT-" + uid, ExpiresAt: time.Now().Add(time.Hour).Unix()})
+	h.cfg.Runtimes[kind] = &Runtime{Kind: kind, Pool: p, Upstream: up}
+	return p
+}
+
+// TestImagesRoutesByModelName 渠道**按客户端请求的模型名**选择：
+// `glm/image` 仍走 GLM 且打到上游的请求体与改造前逐字一致（画图 agent + 比例 + 提示词），
+// 带渠道前缀的全串模型名路由到对应渠道（这里用假的上游验证没有被硬编码成 glm）。
+func TestImagesRoutesByModelName(t *testing.T) {
+	h, m, _ := newImagesHandler(t)
+	decoy := &fakeImageGen{}
+	addImageRuntime(t, h, provider.ModelScope, decoy, "ms-uid")
+
+	// 生图帧（产物 URL 指向 mock 服务器）
+	m.genFrames = []string{
+		genImageFrame(1, "http://PLACE/1"),
+		`{"id":"m1","status":"finish","parts":[{"id":"m1","status":"finish","content":[{"type":"one_to_more_finish","image":[{}]}]}]}`,
+	}
+	srvURL := h.glmRuntime().Upstream.(*glm.Client).Base
+	for i, f := range m.genFrames {
+		m.genFrames[i] = strings.Replace(f, "http://PLACE", srvURL+"/img", 1)
+	}
+
+	// ① glm/image：仍走 GLM，别的渠道零调用
+	rec := postImages(h, "/v1/images/generations",
+		[]byte(`{"model":"glm/image","prompt":"一只猫","n":1,"size":"1024x1024","response_format":"url"}`), "application/json")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("glm/image status = %d: %s", rec.Code, rec.Body.String())
+	}
+	if decoy.genCalls != 0 {
+		t.Errorf("glm/image 被打到了别的渠道（genCalls=%d, want 0）", decoy.genCalls)
+	}
+	if m.lastGenBody["assistant_id"] != glm.DrawingAssistantID {
+		t.Errorf("assistant_id = %v, want DrawingAssistantID（改造前一致）", m.lastGenBody["assistant_id"])
+	}
+	meta, _ := m.lastGenBody["meta_data"].(map[string]any)
+	if cv, _ := meta["cogview"].(map[string]any); cv["aspect_ratio"] != "1:1" || cv["rm_label_watermark"] != true {
+		t.Errorf("cogview = %v, want aspect_ratio=1:1 + rm_label_watermark=true（改造前一致）", cv)
+	}
+	msgs, _ := m.lastGenBody["messages"].([]any)
+	if len(msgs) != 1 {
+		t.Fatalf("messages 数 = %d, want 1", len(msgs))
+	}
+	first, _ := msgs[0].(map[string]any)
+	content, _ := first["content"].([]any)
+	if len(content) != 1 {
+		t.Fatalf("content 数 = %d, want 1", len(content))
+	}
+	if item, _ := content[0].(map[string]any); item["text"] != "一只猫" {
+		t.Errorf("user 文本 = %v, want 原提示词", item["text"])
+	}
+
+	// ② 全串模型名：路由到该渠道，像素串原值下传
+	rec2 := postImages(h, "/v1/images/generations",
+		[]byte(`{"model":"modelscope/Qwen/Qwen-Image","prompt":"雪山","n":1,"size":"1280x720","response_format":"url"}`), "application/json")
+	if rec2.Code != http.StatusOK {
+		t.Fatalf("modelscope 全串 status = %d: %s", rec2.Code, rec2.Body.String())
+	}
+	if decoy.genCalls != 1 {
+		t.Errorf("genCalls = %d, want 1（按模型名路由）", decoy.genCalls)
+	}
+	if decoy.lastReq.Model != "modelscope/Qwen/Qwen-Image" {
+		t.Errorf("渠道收到的 Model = %q, want 客户端请求全串", decoy.lastReq.Model)
+	}
+	if decoy.lastReq.Size != "1280x720" {
+		t.Errorf("渠道收到的 Size = %q, want 像素串原值", decoy.lastReq.Size)
+	}
+	if m.streamCalls != 1 {
+		t.Errorf("GLM 上游被多打了一次（streamCalls=%d, want 1）", m.streamCalls)
+	}
+}
+
+// TestImagesUnknownChannelRejectedWithoutPenalty 未知渠道 / 渠道不支持生图 → **400**，
+// 且不得触达任何账号池（404 会被归成 ErrNotFound=Rotatable ⇒ 换号 + NoteError ⇒ 整条渠道冷却）。
+func TestImagesUnknownChannelRejectedWithoutPenalty(t *testing.T) {
+	t.Run("未知渠道前缀", func(t *testing.T) {
+		h, m, p := newImagesHandler(t)
+		rec := postImages(h, "/v1/images/generations",
+			[]byte(`{"model":"nope/image","prompt":"x"}`), "application/json")
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("status = %d, want 400（不得 404）: %s", rec.Code, rec.Body.String())
+		}
+		if !strings.Contains(rec.Body.String(), "invalid_model") {
+			t.Errorf("错误码 = %s, want invalid_model", rec.Body.String())
+		}
+		if m.streamCalls != 0 {
+			t.Errorf("上游被请求 %d 次, want 0", m.streamCalls)
+		}
+		if st, ok := p.Status("glm-uid"); ok && (st.ErrCount != 0 || st.Cooling) {
+			t.Errorf("账号被惩罚: %+v", st)
+		}
+	})
+
+	t.Run("渠道不支持生图", func(t *testing.T) {
+		h, _, _ := newImagesHandler(t)
+		// traework 的假上游只实现对话（provider.Upstream），不是 ImageGenerator
+		tp := pool.New(t.TempDir() + "/state-tw.json")
+		tp.Add(&auth.Auth{UID: "tw-uid", AccessToken: "AT-tw", ExpiresAt: time.Now().Add(time.Hour).Unix()})
+		h.cfg.Runtimes[provider.TraeWork] = &Runtime{Kind: provider.TraeWork, Pool: tp, Upstream: echoUpstream{}}
+
+		rec := postImages(h, "/v1/images/generations",
+			[]byte(`{"model":"traework/solo","prompt":"x"}`), "application/json")
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("status = %d, want 400: %s", rec.Code, rec.Body.String())
+		}
+		if !strings.Contains(rec.Body.String(), "invalid_model") {
+			t.Errorf("错误码 = %s, want invalid_model", rec.Body.String())
+		}
+		st, ok := tp.Status("tw-uid")
+		if !ok {
+			t.Fatal("账号缺失")
+		}
+		if st.ErrCount != 0 || st.Cooling {
+			t.Errorf("账号被惩罚（errCount=%d cooling=%v）, want 全零", st.ErrCount, st.Cooling)
+		}
+	})
+}
+
+// TestImageRuntimeErrorLogsOwnPlatform 日志与错误文案必须报**实际渠道**的显示名，
+// 不得沿用改造前写死的 glm（否则第二个画图渠道出错会被误报成 glm）。
+func TestImageRuntimeErrorLogsOwnPlatform(t *testing.T) {
+	h, _, _ := newImagesHandler(t)
+	fake := &fakeImageGen{err: &provider.Error{Kind: provider.ErrServer, Msg: "boom"}}
+	addImageRuntime(t, h, provider.ModelScope, fake, "ms-uid")
+
+	var buf bytes.Buffer
+	oldOut := log.Writer()
+	log.SetOutput(&buf)
+	defer log.SetOutput(oldOut)
+
+	rec := postImages(h, "/v1/images/generations",
+		[]byte(`{"model":"modelscope/Qwen/Qwen-Image","prompt":"x"}`), "application/json")
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, want 502: %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), provider.DisplayName(provider.ModelScope)+" 生图失败") {
+		t.Errorf("错误文案缺渠道显示名: %s", rec.Body.String())
+	}
+	logs := buf.String()
+	if !strings.Contains(logs, "platform="+provider.DisplayName(provider.ModelScope)) {
+		t.Errorf("日志缺渠道显示名: %q", logs)
+	}
+	if strings.Contains(logs, "glm") {
+		t.Errorf("日志把渠道错写成 glm: %q", logs)
+	}
+}
+
+// TestImagesBareModelFallsBackToLegacyGLM 无 `<kind>/` 前缀的裸模型名（OpenAI 的
+// gpt-image-1/2）视同未指定：改造前 model 是忽略的，老客户端不得因此变红。
+func TestImagesBareModelFallsBackToLegacyGLM(t *testing.T) {
+	h, m, _ := newImagesHandler(t)
+	m.genFrames = []string{
+		`{"id":"m1","status":"finish","parts":[{"id":"m1","status":"finish","content":[{"type":"one_to_more_finish","image":[{}]}]}]}`,
+	}
+	rec := postImages(h, "/v1/images/generations",
+		[]byte(`{"model":"gpt-image-2","prompt":"x","response_format":"url"}`), "application/json")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200（裸模型名回落 glm/image）: %s", rec.Code, rec.Body.String())
+	}
+	if m.streamCalls != 1 {
+		t.Errorf("GLM streamCalls = %d, want 1", m.streamCalls)
+	}
+}
+
+// TestImagesModelCooldownKeyedByRequestedModel 软限流的模型级冷却 key 必须是**客户端
+// 请求的 model 全串**（不得退回写死的 glm/image）：否则第二个画图渠道限流会冻错 key，
+// 既救不了自己、又把 glm/image 无辜冻住。
+func TestImagesModelCooldownKeyedByRequestedModel(t *testing.T) {
+	h, _, _ := newImagesHandler(t)
+	fake := &fakeImageGen{err: &provider.Error{Kind: provider.ErrSoftRate, Msg: "429"}}
+	mp := addImageRuntime(t, h, provider.ModelScope, fake, "ms-uid")
+
+	const model = "modelscope/Qwen/Qwen-Image"
+	rec := postImages(h, "/v1/images/generations",
+		[]byte(`{"model":"`+model+`","prompt":"x"}`), "application/json")
+	if rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("status = %d, want 429: %s", rec.Code, rec.Body.String())
+	}
+	st, ok := mp.Status("ms-uid")
+	if !ok {
+		t.Fatal("账号缺失")
+	}
+	if !st.ModelCooling[model].After(time.Now()) {
+		t.Errorf("冷却 key 应为请求全串 %q: %+v", model, st.ModelCooling)
+	}
+	if _, poisoned := st.ModelCooling[legacyImageModel]; poisoned {
+		t.Errorf("不得把冷却挂在写死的 %q 上: %+v", legacyImageModel, st.ModelCooling)
+	}
+	if st.Cooling {
+		t.Error("账号不应整冷（模型级冷却才对）")
 	}
 }
