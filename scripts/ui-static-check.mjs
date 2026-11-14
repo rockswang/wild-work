@@ -232,6 +232,9 @@ const patched =
   // 降级链别名（R129）前端即时校验：fbRules / fbAliasValidate 是 `let` 与模块内函数，
   // 由改写注入 setter + 校验入口，供「硬拒分支 + 软警告不阻止保存」的断言直接调用。
   + ", fbAliasValidate, __setFbRules: (rs) => { fbRules = rs; }"
+  // 备胎重叠合法（工单 01）：「主力汇总」（fbFromSet）与「清洗」（fbSanitize）都是模块内函数，
+  // 且 fbRules 是 `let`，必须显式接入沙箱才能断言「其他规则主力被保留 / 同规则自环被剔除」。
+  + ", fbFromSet, fbSanitize, __getFbRules: () => fbRules"
   + ", renderCreditDetail, showCreditDetail, __setCreditDetailState: (st, resp) => { detailState = st; detailCache = { [st.uid]: resp }; }"
   // 「不适用」默认收起（R103）：showNoCredit / acctFilter 都是 `let`，toggle 也要直接调
   + ", applyAcctFilter, toggleNoCredit, setAcctFilter, setAcctView, __getAcctView: () => acctView, __setShowNoCredit: (v) => { showNoCredit = v; }, __setAcctFilter: (v) => { acctFilter = v; }"
@@ -1557,6 +1560,41 @@ for (const [label, re] of uniq) {
     console.log(`  ${pass ? "✅" : "❌"} ${label}`);
     if (!pass) failed++;
   }
+}
+
+// ---- 备胎重叠合法（工单 01）：同一模型可既是某规则主力、又作其他规则的备胎 ----
+// 为什么必须是**行为**断言：旧实现把「全部主力集合」用于清洗与候选排除，于是「重叠」
+// 既选不出来也留不住，而这类静默剔除只表现为「配了又被删掉」——不报错、不崩溃。
+// 只有把「主力汇总」（fbFromSet）与「清洗」（fbSanitize）直接喂进沙箱才能锁死。
+// 边界：只禁「备胎 = 本规则自己的主力」（自环）。
+{
+  const need = [
+    ["其他规则的主力在清洗后被保留（重叠合法）", (() => {
+      T.__setFbRules([
+        { from: "workbuddyai/deepseek-v4.1-flash", to: ["workbuddy/glm-5.2"] },
+        { from: "workbuddy/glm-5.2", to: ["oczen/big-pickle"] },
+      ]);
+      const dropped = T.fbSanitize();
+      const rs = T.__getFbRules();
+      // 主力汇总仍如实包含两条主力（它现在**只**给「主力唯一」的候选隐藏用，不得再进备胎链）
+      return dropped === 0 && T.fbFromSet()["workbuddy/glm-5.2"] === true
+        && rs[0].to.length === 1 && rs[0].to[0] === "workbuddy/glm-5.2"
+        && rs[1].to.length === 1 && rs[1].to[0] === "oczen/big-pickle";
+    })()],
+    ["同规则自环在清洗后被剔除（其他备胎不受影响）", (() => {
+      T.__setFbRules([
+        { from: "workbuddy/glm-5.2", to: ["workbuddy/glm-5.2", "workbuddyai/deepseek-v4.1-flash"] },
+      ]);
+      const dropped = T.fbSanitize();
+      const rs = T.__getFbRules();
+      return dropped === 1 && rs[0].to.length === 1 && rs[0].to[0] === "workbuddyai/deepseek-v4.1-flash";
+    })()],
+  ];
+  for (const [label, pass] of need) {
+    console.log(`  ${pass ? "✅" : "❌"} ${label}`);
+    if (!pass) failed++;
+  }
+  T.__setFbRules([]); // 复位，避免污染后续场景的编辑态
 }
 
 // ---- 思考强度注入（issue #96）：设置弹层接线与三态语义文案 ----
