@@ -52,6 +52,11 @@ type Client struct {
 	// 兜底表不缓存：一次瞬时失败不得污染整个进程生命周期（协议 §6 缓存纪律）。
 	catMu   sync.RWMutex
 	dynamic []catalogEntry
+
+	// expMu 保护积分批次到期缓存（token 哈希 → 最早到期时刻）。
+	// 到期时间是慢变量，按 5 分钟兜住「hover 明细」这类高频调用。
+	expMu    sync.Mutex
+	expiries map[string]creditExpiryEntry
 }
 
 // New 生产默认客户端。
@@ -62,6 +67,8 @@ func New() *Client {
 		StreamHTTP: &http.Client{Transport: tr}, // 共用 Transport，不设 Timeout
 		Base:       APIHost,
 		Account:    AccountHost,
+
+		expiries: map[string]creditExpiryEntry{},
 	}
 }
 
@@ -316,6 +323,11 @@ func (c *Client) creditDetail(a *auth.Auth) (int64, []provider.ResourceItem, err
 	items := []provider.ResourceItem{{
 		Name: "积分余额", Total: sum, Remain: sum, Usable: true, Key: "credits",
 	}}
+	// 最早到期时刻：credit/details 的每批都带 expire_at_ms，取还有剩余且未过期
+	// 的最早一笔。账本读不全 / 接口失败时返回空串，余额照常返回。
+	if expireAt := expireAtString(c.creditExpiry(a)); expireAt != "" {
+		items[0].ExpireAt = expireAt
+	}
 	return sum, items, nil
 }
 
