@@ -1421,7 +1421,19 @@ for (const [label, re] of uniq) {
     [".credit-tip 不再重复定义（原两块，后者静默覆盖前者）", (css.match(/^\.credit-tip \{/gm) || []).length === 1],
     ["浮窗宽度自适应视口（手机不再溢出）", /width: min\(420px, calc\(100vw - 24px\)\)/.test(css)],
     // 响应式：断点是按实测溢出阈值卡位的，调宽会破坏桌面端逐像素一致性，调窄则手机仍溢出。
-    ["渠道按钮基础为 6 列（消除孤行，按钮数变动时按行自然流）", css.includes("repeat(6, auto)")],
+    ["渠道按钮基础为 6 列等宽（消除孤行，按钮数变动时按行自然流）",
+      /\.pa-right \{[^}]*grid-template-columns: repeat\(6, minmax\(0, 1fr\)\);/.test(css)],
+    // 顶部按钮区占满行宽（票 05）：早期是「弹性空白 + 右组 grid 靠右」，把同排的
+    // 「刷新积分/全部签到/视图切换」搬去 .fn-bar 后左侧留下一条死的空白（owner 报障）。
+    // 现由网格自身 flex:1 吃掉行宽 —— 这两条是它的正向锁（占满 + 无空档）。
+    ["渠道网格弹性占满行宽（.pa-right 自带 flex:1 撑满 wrap，wrap 仍是 flex 容器）",
+      /\.pa-right \{[^}]*flex: 1;[^}]*min-width: 0;[^}]*grid-template-columns: repeat\(6, minmax\(0, 1fr\)\)/.test(css) &&
+      /\.panel-actions-wrap \{ display: flex;/.test(css)],
+    // 反向护栏：死的弹性空档元素与它的 CSS 规则都不得回来（注释里的历史提及不算，
+    // 与本文件「hover 关闭函数已删除（防回退；注释提及不算）」同款口径）。
+    // 注：.fn-bar 的 .fn-spacer 是另一处弹性空档（把视图切换推向右端），职责不同，不得误伤。
+    ["顶部按钮区不再有死的弹性空档元素（DOM 无 class=\"pa-spacer\"、CSS 无 .pa-spacer 规则）",
+      !/<div class="pa-spacer/.test(html) && !/\.pa-spacer\s*\{/.test(css) && /class="fn-spacer"/.test(html)],
     ["渠道按钮摆位全归 CSS（index.html 不再内联 grid-column，否则窄屏无法重排）", !/btnAdd\w+" style="grid-column/.test(html)],
     // R142（2026-10-30 用户拍板）：渠道展示序唯一规则 = 内建渠道按**显示名的 UTF-8 字节序**升序，
     // 自定义渠道 / 自定义模型**硬编码钉在最末**。三处（面板按钮 / 汇总条 / 后端费率 tab）
