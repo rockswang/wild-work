@@ -517,13 +517,28 @@ check("汇总临期 = 100", sum.includes("临期100"));
 check("汇总含合计", sum.includes("合计"));
 // 汇总条聚合 + 摘要文案分支共用一个共享函数（工单 01，零可见变化 prefactor）：
 // 后续「列表模式分组行小计」复用同一处，分组行与 chip 逐字同源在结构上不可能漂移。
+const csStart = raw.indexOf("function channelSummaries(");
+const csEnd = raw.indexOf("\n}", csStart);
+const csBody = csStart >= 0 && csEnd > csStart ? raw.slice(csStart, csEnd) : "";
+const rsStart = raw.indexOf("function renderSummary()");
+const rsEnd = raw.indexOf("\n}", rsStart);
+const rsBody = rsStart >= 0 && rsEnd > rsStart ? raw.slice(rsStart, rsEnd) : "";
 check("存在共享函数 channelSummaries（聚合 + 文案分支同处一处）",
-  /^function channelSummaries\s*\(/m.test(raw));
-check("汇总条 chip 由 channelSummaries 渲染",
-  /renderSummary\(\)[\s\S]*?channelSummaries\(state\.accounts\)/.test(raw));
-check("按渠道求和逻辑只有一份（无第二份 credits += 循环）",
-  (raw.match(/c\.credits \+= a\.credits/g) || []).length === 1,
-  `实际 ${(raw.match(/c\.credits \+= a\.credits/g) || []).length} 份`);
+  /^function channelSummaries\s*\(/m.test(raw) && csBody.length > 0);
+check("汇总条 chip 由 channelSummaries 渲染（限定在 renderSummary 作用域内）",
+  rsBody.includes("channelSummaries(state.accounts)") && rsBody.includes("const body = c.body;"));
+check("按渠道求和逻辑只有一份（单聚合循环且只累加一次）",
+  (raw.match(/for \(const a of accounts\)/g) || []).length === 1
+    && (raw.match(/c\.credits \+= a\.credits/g) || []).length === 1
+    && (raw.match(/c\.tokens \+= a\.credits/g) || []).length === 1
+    && csBody.includes("c.credits += a.credits"),
+  `循环 ${(raw.match(/for \(const a of accounts\)/g) || []).length} 处`);
+// 四种摘要分支的判据与文案都在共享函数内 —— 丢条件（尤其 token 计量与「不适用」
+// 两条最容易在搬运时漏）会立即变红。
+check("共享函数含四种摘要分支（不适用 / tokens / 待刷新 / 数字）",
+  csBody.includes('credit-na">不适用') && csBody.includes("cs-tok")
+    && csBody.includes('credit-stale">待刷新') && csBody.includes("cs-num")
+    && csBody.includes("c.isToken") && csBody.includes("c.na") && csBody.includes("c.allStale"));
 
 // ---- 场景 2.1：临期口径可配（R112b）----
 // 背景：R112 把临期展示固定成 1 个自然日并删掉设置项，导致「明早 05:47 到期」
