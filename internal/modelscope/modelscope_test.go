@@ -109,4 +109,8 @@ func TestNoCreditsAreZeroWithoutError(t *testing.T) {
 	if err := c.DailyCheckin(nil); err != nil {
 		t.Errorf("DailyCheckin 应为空实现，得到 %v", err)
 	}
+	// 费率同理：上游不声明价格 ⇒ (nil, nil)，不是「查不到就报错」也不是「编一个 1x」。
+	if pricing, err := c.FetchModelPricing(nil); pricing != nil || err != nil {
+		t.Errorf("FetchModelPricing = (%v, %v)，期望 (nil, nil)", pricing, err)
+	}
 }
