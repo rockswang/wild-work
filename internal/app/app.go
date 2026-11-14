@@ -138,6 +138,11 @@ type App struct {
 	loginErr  string
 	pricingFP string
 
+	// msValidate 面板粘贴魔搭 Access Token 时的上游校验函数（**测试注入点**）。
+	// nil = modelscope.ValidateToken（真实上游）；生产**不得**设置。整机级离线测试
+	// 用它把「粘贴即接入」成功链路接到 httptest 假上游，产品行为零变化。
+	msValidate func(kind provider.Kind, token string) (string, error)
+
 	// 智谱清言自动登录会话（独立于通用 OAuth 登录流程：
 	// 它不轮询 state 文件，而是经 CDP 从浏览器 Cookie 捕获凭据）。
 	muGLMLogin sync.Mutex
@@ -2037,11 +2042,20 @@ func (a *App) SubmitModelScopeToken(kind provider.Kind, token string) (string, s
 	if tok == "" {
 		return "", "", errors.New("Access Token 不能为空")
 	}
-	uid, err := modelscope.ValidateToken(kind, tok)
+	uid, err := a.modelScopeValidate()(kind, tok)
 	if err != nil {
 		return "", "", err
 	}
 	return a.persistModelScopeAccount(kind, tok, uid)
+}
+
+// modelScopeValidate 返回生效的粘贴校验函数：默认是包级 modelscope.ValidateToken
+// （真实上游），测试可经 a.msValidate 注入 httptest 假上游（见 e2e-findings §5.1）。
+func (a *App) modelScopeValidate() func(provider.Kind, string) (string, error) {
+	if a.msValidate != nil {
+		return a.msValidate
+	}
+	return modelscope.ValidateToken
 }
 
 // persistModelScopeAccount 魔搭账号入库的唯一路径：同 token 检测 → 落盘 → 重载账号池。
@@ -2636,6 +2650,25 @@ func (a *App) reloadAccounts() {
 		auths, err := auth.LoadOfficeAceDir(a.cfg.AuthDir)
 		if err != nil {
 			log.Printf("reload officeace accounts: %v", err)
+		} else {
+			rt.Pool.SyncToDir(auths)
+		}
+	}
+	// ModelScope / ModelScopeAI：一枚 `ms-` token = 一个账号，凭据由面板「粘贴 Access Token」写入。
+	// 两条都要接：两区各自成池（R159），漏掉任一分支的后果就是「粘贴成功但账号不出现，
+	// 必须重启 daemon」——同一类「声明了却没接线」缺陷（2026-11-14 e2e-findings §5.1 开缝后发现）。
+	if rt := a.runtime(provider.ModelScope); rt != nil && rt.Pool != nil {
+		auths, err := auth.LoadModelscopeDir(a.cfg.AuthDir)
+		if err != nil {
+			log.Printf("reload modelscope accounts: %v", err)
+		} else {
+			rt.Pool.SyncToDir(auths)
+		}
+	}
+	if rt := a.runtime(provider.ModelScopeAI); rt != nil && rt.Pool != nil {
+		auths, err := auth.LoadModelscopeAIDir(a.cfg.AuthDir)
+		if err != nil {
+			log.Printf("reload modelscopeai accounts: %v", err)
 		} else {
 			rt.Pool.SyncToDir(auths)
 		}
@@ -5079,6 +5112,9 @@ type feesModelRow struct {
 	SupportsImages    bool `json:"supports_images"`
 	SupportsReasoning bool `json:"supports_reasoning"`
 	SupportsTools     bool `json:"supports_tools"`
+	// SupportsImageGeneration 标记「能出图」（文生图/图生图）：与 supports_images（能看图）
+	// 正交，前端据此显示 🎨 图标，让面板与 /v1/models 的 supports_image_generation 同源。
+	SupportsImageGeneration bool `json:"supports_image_generation,omitempty"`
 	// 思考档位（issue #96，与 /v1/models 同源）：上游声明的可选档位与默认档，
 	// 空表 = 上游未声明（前端不展示，不编造）。
 	ReasoningEfforts       []string `json:"reasoning_efforts,omitempty"`
@@ -5151,6 +5187,8 @@ func buildFeesChannels(modelsByKind map[provider.Kind][]provider.ModelInfo,
 				SupportsImages:    mi.SupportsImages,
 				SupportsReasoning: mi.SupportsReasoning,
 				SupportsTools:     mi.SupportsTools,
+				// 能出图与能看图正交（D12）：面板模型行据此显示 🎨
+				SupportsImageGeneration: mi.SupportsImageGeneration,
 				// 思考档位（issue #96）与 /v1/models 同源透传
 				ReasoningEfforts:       mi.ReasoningEfforts,
 				DefaultReasoningEffort: mi.DefaultReasoningEffort,
