@@ -1630,7 +1630,7 @@ select.input::-ms-expand, .select::-ms-expand { display: none; }
    既不横滚也不折行爆炸（行高 44.1~46.1px，≈15 行/700px）。
    卡片网格的单列断点仍独立挂在 679（第 3 条规则），两条互不影响。
    横滚容器与 min-width: 560px 保持不变：窄屏宁可横滚也不裁列、不降级回卡片。
-   （<679 的极窄视口仍按设计横滚：578.5px 需求 > 视口 −70，见 .tbl-scroll。） */
+   （<≈648 的极窄视口仍按设计横滚：578.5px 需求 > 视口 −70，见 .tbl-scroll。） */
 @media (max-width: 869px) {
   .acct-table { font-size: 12px; --acct-cred-unit: 44px; }
   .acct-table th, .acct-table td { padding: 5px 6px; }

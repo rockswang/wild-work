@@ -783,9 +783,9 @@ check("非 officeace 账号不带「缺续期凭据」（渠道限定，避免�
   check("闸 2 状态徽标封顶（max-width + 省略号）",
     /\.acct-table \.cell-tags \.tag \{[^}]*max-width: \d+px[^}]*text-overflow: ellipsis/.test(css));
   // 窄屏断点卡在**实测阈值** 869（不是拍脑袋的档位）：不压紧的表内容需求 725px，而容器 = 视口 −85
-  //         ⇒ 810px 视口才不溢出；但 810~869 的行高因长昵称折行跳到 82.3px（紧凑档内 45.8~46.1，870 起 49.3）。
-  //         故紧凑规则挂在 869：压紧内边距/字号/徽标上限、状态列允许折行，不动 min-width: 560px。
-  check("闸 2 窄屏断点：列表紧凑档挂在实测阈值 869（不新增第四档）",
+  // ⇒ 810px 视口才不溢出；但 810~869 的行高因长昵称折行跳到 82.3px（紧凑档内 45.8~46.1，870 起 49.3）。
+  // 故紧凑规则挂在 869：压紧内边距/字号/徽标上限、状态列允许折行，不动 min-width: 560px。
+  check("闸 2 窄屏断点：列表紧凑档挂在实测阈值 869（物理阈值，非视觉档位）",
     /@media \(max-width: 869px\) \{\s*\.acct-table \{ font-size: 12px; --acct-cred-unit: 44px; \}/.test(css)
       && /\.acct-table \.cell-tags \{ white-space: normal; \}/.test(css));
 
