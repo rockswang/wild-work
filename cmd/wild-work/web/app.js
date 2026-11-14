@@ -2806,16 +2806,28 @@ function fbFromSet() {
   for (const r of fbRules) if (r.from) s[r.from] = true;
   return s;
 }
-// fbSelfExclude 返回「一条规则必须排除的模型集合」= **仅它自己的主力**（自环）。
+// fbSelfLoop 是「备胎 = 本规则自己的主力」的唯一判据（自环）。
 // 备胎侧全部 6 处排除（行内候选集 / 行内点选守卫 / 底栏候选集 / 新增规则预过滤 /
-// ＋ 追加 / 回车追加）与 2 处清洗（渲染前 / 保存前）统一走这个 helper，避免各写一份而漂移。
+// ＋ 追加 / 回车追加）与 2 处清洗（渲染前 / 保存前）共用它，避免各写一份而漂移。
 // 语义边界：同一模型可以既是某规则的主力、又作为**其他规则**的备胎（重叠合法）；
 // 只有「备胎 = 本规则自己的主力」这种自环被禁止。
+function fbSelfLoop(from, model) {
+  return String(model || "").trim() === String(from || "").trim();
+}
+// fbSelfExclude 把 self-loop 判据包成「候选排除集」形式（attachModelPicker 的 excludeSet API 要集合）。
 function fbSelfExclude(from) {
   const s = {};
   const t = String(from || "").trim();
   if (t) s[t] = true;
   return s;
+}
+// fbAppendTo 把解析后的备胎追加到第 i 条规则（跳过自环与已上链项），返回实际追加条数。
+function fbAppendTo(i, tos) {
+  const r = fbRules[i];
+  if (!r) return 0;
+  const before = r.to.length;
+  r.to.push(...tos.filter((t) => !fbSelfLoop(r.from, t) && !r.to.includes(t)));
+  return r.to.length - before;
 }
 // fbSanitize 就地清洗 fbRules：只剔除「本规则自环」（备胎 = 该条规则自己的主力），返回剔除条数。
 // **其他规则的主力不是脏数据**：历史版本按「全部主力集合」清洗，打开面板时会把合法的重叠
@@ -2824,7 +2836,7 @@ function fbSelfExclude(from) {
 function fbSanitize() {
   let dropped = 0;
   for (const r of fbRules) {
-    const keep = r.to.filter((t) => t !== r.from);
+    const keep = r.to.filter((t) => !fbSelfLoop(r.from, t));
     dropped += r.to.length - keep.length;
     r.to = keep;
   }
@@ -2920,8 +2932,7 @@ function attachFbPickers() {
       onPick: (id) => {
         const r = fbRules[i];
         if (!r) return;
-        if (id === r.from || r.to.includes(id)) return; // 自环或已上链 → 不追加（候选已隐藏，双保险）
-        r.to.push(id);
+        if (fbAppendTo(i, [id]) === 0) return; // 自环或已上链 → 不追加（候选已隐藏，双保险）
         renderFbList();
         toast(`已加入备胎链第 ${r.to.length} 位（点保存生效）`);
       },
@@ -4098,8 +4109,7 @@ function bind() {
     if (tos.length === 0) { $("fbErr").textContent = "至少填一个备胎模型ID"; return; }
     // 自环预过滤：只剔除「新 from 自身」（其他规则的主力合法，必须保留）；
     // renderFbList 兜底同规则，此处前置只为给即时反馈。
-    const selfExcl = fbSelfExclude(from);
-    const kept = tos.filter((t) => !selfExcl[t]);
+    const kept = tos.filter((t) => !fbSelfLoop(from, t));
     if (kept.length === 0) { $("fbErr").textContent = "备胎只有自环项（备胎不能等于本规则的主力），请更换备胎"; return; }
     if (kept.length < tos.length) toast(`已剔除 ${tos.length - kept.length} 个自环备胎`);
     fbRules.push({ from, to: kept, name: "" });
@@ -4121,7 +4131,7 @@ function bind() {
       const [tos, err] = parseModelList(inp && inp.value);
       if (err) { $("fbErr").textContent = err; return; }
       if (tos.length === 0) { $("fbErr").textContent = "先在输入框填备胎模型ID 再点 ＋"; return; }
-      fbRules[i].to.push(...tos.filter((t) => t !== fbRules[i].from && !fbRules[i].to.includes(t))); // 只排本规则自环
+      fbAppendTo(i, tos);
       renderFbList();
       return;
     }
@@ -4148,7 +4158,7 @@ function bind() {
     const [tos, err] = parseModelList(e.target.value);
     if (err) { $("fbErr").textContent = err; return; }
     if (tos.length === 0) return;
-    fbRules[i].to.push(...tos.filter((t) => t !== fbRules[i].from && !fbRules[i].to.includes(t))); // 只排本规则自环
+    fbAppendTo(i, tos);
     renderFbList();
   });
   // 行内主模型 ID 编辑：change（失焦/回车后 blur）提交——形态校验 + 主模型唯一性校验，
@@ -4162,7 +4172,7 @@ function bind() {
     if (!/^[^/]+\/.+/.test(from)) { $("fbErr").textContent = `主力模型ID ${from} 需为 channel/model 形式（如 workbuddyai/deepseek-v4.1-flash）`; e.target.value = cur; return; }
     if (fbRules.some((r, k) => k !== i && r.from === from)) { $("fbErr").textContent = `主模型 ${from} 已有规则（每个主模型只允许一条）`; e.target.value = cur; return; }
     fbRules[i].from = from;
-    fbRules[i].to = fbRules[i].to.filter((t) => t !== from);
+    fbRules[i].to = fbRules[i].to.filter((t) => !fbSelfLoop(from, t));
     renderFbList();
   });
   // 行内别名编辑：change（失焦/回车）提交——非法则回滚输入框并报错，合法写回编辑态。
