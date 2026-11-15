@@ -472,6 +472,14 @@ func LoadRaccoonDir(dir string) ([]*Auth, error) {
 // LoadLoomyDir 扫描讯飞 Loomy 凭证（loomy-*.json）。
 //
 // 凭据不来自本工具的登录编排，而是由面板「从本机客户端导入」生成（见 app.ImportLocalCredentials）。
+// LoadDoubaoDir 扫描豆包渠道凭证（doubao-*.json）。
+//
+// 凭据来自面板「扫码登录」（internal/login_doubao）或手工粘贴 Cookie；
+// 与 raccoon 的 glob 边界已核：raccoon- / doubao- 无包含关系。
+func LoadDoubaoDir(dir string) ([]*Auth, error) {
+	return loadPrefixed(dir, "doubao")
+}
+
 func LoadLoomyDir(dir string) ([]*Auth, error) {
 	return loadPrefixed(dir, "loomy")
 }

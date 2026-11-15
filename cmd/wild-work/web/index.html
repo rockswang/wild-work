@@ -90,6 +90,7 @@
           <button class="btn primary alt qwenwork" id="btnAddQwen">＋ 千问办公</button>
           <button class="btn primary alt raccoon" id="btnAddRaccoon">＋ 小浣熊</button>
           <button class="btn primary alt glm" id="btnAddGLM" title="体验渠道：仅文本对话，不支持工具调用/多模态">＋ 智谱清言</button>
+          <button class="btn primary alt doubao" id="btnAddDoubao" title="豆包（ByteDance Doubao）渠道">＋ 豆包</button>
           <button class="btn primary alt custom" id="btnOpenCustomModels" title="自定义模型（OpenAI 兼容）：接入任意兼容端点，Provider 与模型都在一个弹窗里增删改">＋ 自定义模型</button>
         </div>
       </div>
@@ -351,6 +352,60 @@
     <div class="modal-actions">
       <button class="btn" id="btnClineCancel">取消</button>
       <button class="btn primary" id="btnClineSubmit">添加</button>
+    </div>
+  </div>
+</div>
+
+<!-- 豆包：扫码登录（服务端纯 HTTP，不需要桌面/浏览器）+ 手工粘贴 Cookie 兜底 -->
+<div class="overlay hidden" id="doubaoOverlay">
+  <div class="modal modal-wide">
+    <div class="modal-title">添加豆包账号</div>
+    <div class="modal-body settings-body">
+
+      <!-- 扫码登录（推荐）：二维码由**服务端**向豆包 passport 申请，手机豆包 App 扫码确认后
+           服务端自己收 Cookie 并校验落盘。全程不需要本机浏览器，也不需要桌面客户端 ——
+           WSL / NAS / systemd 下同样可用（CDP 拉浏览器那条路在这些环境起不来）。 -->
+      <div class="cfg-section" id="doubaoQr">
+        <div class="cfg-heading">扫码登录（推荐）</div>
+        <ol class="glm-steps">
+          <li>用手机上的 <b>豆包 App</b> 扫下方二维码。</li>
+          <li>手机上点「确认登录」，这里会自动完成，<b>不需要复制任何 Cookie</b>。</li>
+          <li>二维码由服务器自己申请、自己换登录态，NAS / 服务器部署同样有效。</li>
+        </ol>
+        <div class="doubao-qr-box">
+          <img id="doubaoQrImg" class="doubao-qr hidden" alt="豆包登录二维码" width="180" height="180">
+          <div id="doubaoQrEmpty" class="doubao-qr-empty">正在申请二维码…</div>
+        </div>
+        <div class="hint" id="doubaoQrStatus">用手机豆包 App「扫一扫」扫描二维码</div>
+        <div class="hint" style="margin-top:8px">
+          <button class="btn small primary" id="btnDoubaoQrStart">重新申请二维码</button>
+        </div>
+        <div class="hint">每个账号单独扫一次；二维码过期会自动换新。</div>
+      </div>
+
+      <!-- 手工粘贴 Cookie 兜底：扫码不可用（面板打不开图片）时，从浏览器 DevTools
+           复制 www.doubao.com 的完整 Cookie 粘进来。校验与扫码同一条通道。 -->
+      <div class="cfg-section">
+        <div class="cfg-heading">
+          手工粘贴 Cookie（兜底）
+          <span class="help-mark" title="在已登录豆包网页版的浏览器里按 F12 → 应用/Application → Cookie → https://www.doubao.com，整行复制（必须含 sessionid）。">?</span>
+        </div>
+        <div id="doubaoManual" class="hidden">
+          <textarea id="doubaoCookieInput" rows="4" class="grow" placeholder="sessionid=…; ttwid=…; s_v_web_id=…"></textarea>
+          <div class="hint" style="margin-top:8px">
+            <button class="btn small primary" id="btnDoubaoCookie">验证并添加</button>
+            <span id="doubaoCookieErr" class="err"></span>
+          </div>
+        </div>
+        <div class="hint" style="margin-top:8px">
+          <button class="btn small" id="btnDoubaoManualToggle">展开手工方式</button>
+        </div>
+      </div>
+
+    </div>
+    <div class="modal-foot">
+      <span class="err" id="doubaoErr"></span>
+      <button class="btn" id="btnDoubaoCancel">取消</button>
     </div>
   </div>
 </div>
