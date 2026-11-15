@@ -395,6 +395,10 @@ func main() {
 	rcUp := raccoon.NewWithTimeout(time.Duration(cfg.Upstream.TimeoutSeconds) * time.Second)
 	dbUp := doubao.New()
 	dbUp.HTTP.Timeout = time.Duration(cfg.Upstream.TimeoutSeconds) * time.Second
+	// 会话焚化：按 UID 反查凭据（焚化在后台 goroutine，不能持 pool 锁）。
+	doubao.SetAuthLookup(func(uid string) *auth.Auth {
+		return dbPool.AuthByUID(uid)
+	})
 	lmUp := loomy.New()
 	lmUp.HTTP.Timeout = time.Duration(cfg.Upstream.TimeoutSeconds) * time.Second
 	clUp := cline.New()

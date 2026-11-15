@@ -100,6 +100,11 @@ func (c *Client) identityURLWith(path string, params map[string]string, cookie, 
 // last-event-id / x-flow-trace。参考实现证明这套足够，多带浏览器头（sec-ch-ua 等）
 // 反而与桌面客户端身份自相矛盾。
 func (c *Client) do(method, url, cookie string, body []byte) (*http.Response, []byte, error) {
+	return c.doWithHeaders(method, url, cookie, body, nil)
+}
+
+// doWithHeaders 带额外头的请求（焚化路径要 csrf 头）。
+func (c *Client) doWithHeaders(method, url, cookie string, body []byte, extra map[string]string) (*http.Response, []byte, error) {
 	var rdr io.Reader
 	if body != nil {
 		rdr = bytes.NewReader(body)
@@ -120,6 +125,9 @@ func (c *Client) do(method, url, cookie string, body []byte) (*http.Response, []
 	}
 	if cookie != "" {
 		req.Header.Set("Cookie", cookie)
+	}
+	for k, v := range extra {
+		req.Header.Set(k, v)
 	}
 	resp, err := c.HTTP.Do(req)
 	if err != nil {
@@ -161,6 +169,15 @@ func (c *Client) RefreshToken(a *auth.Auth) error {
 	}
 }
 
+// chatStreamBody 上游响应体包装：携带本次请求的缓存键与工具门控标志，供
+// Stream/Aggregate 捕获 SSE_ACK 时写回会话缓存、以及工具文本协议解析
+//（避免改 provider.Upstream 接口签名）。
+type chatStreamBody struct {
+	io.ReadCloser
+	sessionKey string
+	hasTools   bool
+}
+
 // ChatStream 发一次对话请求，返回上游响应体（豆包私有 SSE）。
 func (c *Client) ChatStream(a *auth.Auth, body []byte) (io.ReadCloser, int, []byte, error) {
 	cookie, dev, webID, fp := devOf(a)
@@ -169,7 +186,13 @@ func (c *Client) ChatStream(a *auth.Auth, body []byte) (io.ReadCloser, int, []by
 	}
 	// 客户端 OpenAI 请求体 → 上游 /chat/completion 请求体（**必须转换**，
 	// 原样转发会被上游按 content_block 形状解析失败，见 outboundBody 的注释）。
-	out, err := outboundBody(body, dev)
+	// 会话式复用：按 (账号 UID, 会话键) 查缓存，命中则只发最后一句（增量轮），
+	// 未命中则建会话 + 历史压平（首轮）。UID 为空时退回无状态（理论不可达，防御性）。
+	uid := ""
+	if a != nil {
+		uid = a.UID
+	}
+	out, err := outboundBodyFor(body, dev, uid, globalSessions)
 	if err != nil {
 		return nil, 0, nil, err
 	}
@@ -200,7 +223,68 @@ func (c *Client) ChatStream(a *auth.Auth, body []byte) (io.ReadCloser, int, []by
 		resp.Body.Close()
 		return nil, resp.StatusCode, raw, nil
 	}
-	return resp.Body, resp.StatusCode, nil, nil
+	// 成功响应才携带会话键：SSE_ACK 捕获的 conv id 只应绑定到真正建/续了会话的那次响应。
+	// 键在此重算（与 outboundBodyFor 同一输入同一结果）：接口签名不能改，只能这样让
+	// 键随响应体流过 Stream/Aggregate。复用轮也带上：豆包同会话多 section 会续发 ACK。
+	key := sessionKeyOf(uid, conversationKeyOf(body))
+	return &chatStreamBody{ReadCloser: resp.Body, sessionKey: key, hasTools: len(parseTools(body)) > 0}, resp.StatusCode, nil, nil
+}
+
+// deleteConversation 删除豆包侧会话（/samantha/thread/delete，焚化路径）。
+//
+// 协议（temp/doubao-tools-delete-research2.md B2）：body {"thread_id": conv_id}；
+// query 身份参数照 kitsch/DoubaoProxy delete.go 全套（aid/version_code/samantha_web/
+// 设备三件套/web_id）；头必带 Cookie + x-tt-passport-csrf-token（取 Cookie 里的
+// passport_csrf_token，缺失用常量兑底——kitsch 未带头也成功过，但带总是更稳）。
+// 成功 = HTTP 200 + {"code":0}。失败不重试（焚化是锦上添花）。
+func (c *Client) deleteConversation(a *auth.Auth, convID string) error {
+	cookie, dev, webID, fp := devOf(a)
+	if cookie == "" {
+		return fmt.Errorf("无 Cookie")
+	}
+	q := url.Values{}
+	for k, v := range identityQuery {
+		q.Set(k, v)
+	}
+	q.Set("device_id", dev)
+	q.Set("fp", fp)
+	q.Set("tea_uuid", dev)
+	if webID != "" {
+		q.Set("web_id", webID)
+	}
+	q.Set("web_tab_id", newUUID())
+	target := c.baseURL + "/samantha/thread/delete?" + q.Encode()
+	body, _ := json.Marshal(map[string]string{"thread_id": convID})
+	extra := map[string]string{
+		"Origin":                   BaseURL,
+		"Referer":                  BaseURL + "/chat/" + convID,
+		"x-tt-passport-csrf-token": csrfTokenOf(cookie),
+	}
+	resp, raw, err := c.doWithHeaders(http.MethodPost, target, cookie, body, extra)
+	if err != nil {
+		return err
+	}
+	if resp.StatusCode >= 400 {
+		return fmt.Errorf("HTTP %d: %s", resp.StatusCode, truncateStr(string(raw), 120))
+	}
+	var env struct {
+		Code int `json:"code"`
+	}
+	if json.Unmarshal(raw, &env) == nil && env.Code != 0 {
+		return fmt.Errorf("code=%d: %s", env.Code, truncateStr(string(raw), 120))
+	}
+	return nil
+}
+
+// csrfTokenOf 从 Cookie 里取 passport_csrf_token（缺失回退常量，参考实现两种都出现过）。
+func csrfTokenOf(cookie string) string {
+	for _, part := range strings.Split(cookie, ";") {
+		part = strings.TrimSpace(part)
+		if strings.HasPrefix(part, "passport_csrf_token=") {
+			return strings.TrimPrefix(part, "passport_csrf_token=")
+		}
+	}
+	return ""
 }
 
 // Classify 归类上游错误。
@@ -259,8 +343,8 @@ func (c *Client) FetchModels(a *auth.Auth) ([]provider.ModelInfo, error) {
 	out := make([]provider.ModelInfo, 0, len(staticModels))
 	for id, spec := range staticModels {
 		out = append(out, provider.ModelInfo{
-			ID:    id,
-			Name:  spec.Display,
+			ID:   id,
+			Name: spec.Display,
 			// 上下文窗口来自参考实现的静态记录，非上游声明、亦非本工具实测：
 			// 三个来源标志全部不置，面板据此标注「未知」，不冒充容量（R49/R46）。
 			ContextWindow: 0,
@@ -296,13 +380,27 @@ func (c *Client) FetchModelPricing(a *auth.Auth) ([]provider.ModelPricing, error
 // Stream 私有 SSE → OpenAI Chat SSE（复用 internal/upstream 的规范化链路）。
 func (c *Client) Stream(w http.ResponseWriter, r io.Reader, model string) (map[string]any, error) {
 	var usage map[string]any
-	err := upstream.StreamCapture(w, newDoubaoStream(r, model), func(u map[string]any) { usage = u })
+	// 会话回写 + 工具门控：响应体若携带缓存键/hasTools（来自 ChatStream），
+	// 捕获 SSE_ACK 时写回缓存、CHUNK_DELTA 进工具文本协议门控（tools.go）。
+	var sessions *sessionStore
+	var skey string
+	var toolsOn bool
+	if cb, ok := r.(*chatStreamBody); ok {
+		sessions, skey, toolsOn = globalSessions, cb.sessionKey, cb.hasTools
+	}
+	err := upstream.StreamCapture(w, newDoubaoStreamWithSessions(r, model, skey, sessions, toolsOn), func(u map[string]any) { usage = u })
 	return usage, err
 }
 
 // Aggregate 非流式出口：走同一条转换链路收敛。
 func (c *Client) Aggregate(r io.Reader, model string) (map[string]any, error) {
-	res, err := upstream.Aggregate(newDoubaoStream(r, model))
+	var sessions *sessionStore
+	var skey string
+	var toolsOn bool
+	if cb, ok := r.(*chatStreamBody); ok {
+		sessions, skey, toolsOn = globalSessions, cb.sessionKey, cb.hasTools
+	}
+	res, err := upstream.Aggregate(newDoubaoStreamWithSessions(r, model, skey, sessions, toolsOn))
 	if res != nil {
 		res["model"] = model
 	}

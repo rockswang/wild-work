@@ -19,7 +19,7 @@ type workOptions struct {
 	ReasoningEffort string
 	DeviceName      string
 	LocalAppID      string
-	LocalDeviceID    string
+	LocalDeviceID   string
 	Workspace       string
 }
 
@@ -39,6 +39,7 @@ func parseChatRequest(body []byte) (*chatRequest, error) {
 	if err := jsonUnmarshal(body, &req); err != nil {
 		return nil, err
 	}
+	req.hasTools = len(parseTools(body)) > 0
 	return &req, nil
 }
 
@@ -54,6 +55,14 @@ func parseChatRequest(body []byte) (*chatRequest, error) {
 // 的 OpenAI 请求体原样转发，上游报 `invalid character 'h' ...`，而表面的 710020202
 // 完全指向错误方向。
 func outboundBody(body []byte, dev string) ([]byte, error) {
+	return outboundBodyFor(body, dev, "", nil)
+}
+
+// outboundBodyFor 带会话状态 outboundBody：sessionStore 命中时走复用分支。
+//
+// convKey 为空（调用方不参与会话复用，如旧测试路径）或 cache 为 nil 时退回
+// 无状态压平（旧行为），保证所有既有调用点零破坏。
+func outboundBodyFor(body []byte, dev, accountUID string, cache *sessionStore) ([]byte, error) {
 	req, err := parseChatRequest(body)
 	if err != nil {
 		return nil, &provider.Error{Kind: provider.ErrBadParams, Msg: "doubao：请求体解析失败: " + err.Error()}
@@ -72,10 +81,15 @@ func outboundBody(body []byte, dev string) ([]byte, error) {
 			Msg:  "doubao：未知模型 " + name + "（可用模型见 /v1/models）",
 		}
 	}
+	// 随聊随删：恒首轮（不复用），conv id 由 SSE_ACK 捕获、流收尾后焚化。
+	session := sessionState{}
 	// 思考强度：工作模式固定深思考（reasoning_effort=4）。客户端的 low/medium/high 不是
 	// 豆包档位、暂不映射（R63 出站注入留待后续，不编造档位）。
-	return buildChatBody(req, spec.ItemKey, "", dev, spec.MemoryProfile, spec.TotalWindow)
+	return buildChatBody(req, spec.ItemKey, "", dev, spec.MemoryProfile, spec.TotalWindow, session, parseTools(body))
 }
+
+// conversationKey 暴露给调用方的会话键推导（供测试与诊断）。
+func conversationKey(body []byte) string { return conversationKeyOf(body) }
 
 // ---------- 编译期断言：Client 实现 provider.Upstream ----------
 

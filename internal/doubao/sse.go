@@ -8,7 +8,8 @@
 //
 //   - 帧块以空行分隔，每块 `event:` 行 + `data:` 行；
 //   - `SSE_HEARTBEAT` = 心跳（首帧就是它，跳过）；
-//   - `SSE_ACK` = 会话建立（带 conversation_id/section_id；本渠道无状态，忽略）；
+//   - `SSE_ACK` = 会话建立（带 conversation_id/section_id，捕获后回写会话缓存，
+//     下轮同会话键的请求走增量分支——见 session.go）；
 //   - `CHUNK_DELTA` = 正文增量 `{"text":"…"}`（主要正文通道，置 sawChunkDelta）；
 //   - `STREAM_CHUNK` = patch 形状，content_block[]：
 //     block_type 10000 = 正文（text_block.text，**CHUNK_DELTA 已给过则不再重复吐**）、
@@ -21,7 +22,8 @@
 //
 // # 已知限制
 //
-//   - 上游**每次请求都是独立会话**（不保留上下文），多轮靠本渠道把历史压成一段文本；
+//   - 会话缓存是进程内 map（session.go），重启即失——丢了自动回到首轮全量压平，
+//     行为等同旧版；复用被上游拒绝时同理降级。
 //   - 上游**不下发 usage**，故本渠道不产出 token 统计（调用方记 0 token + 请求数）。
 package doubao
 
@@ -52,6 +54,18 @@ type doubaoStreamReader struct {
 	src   *bufio.Reader
 	model string
 
+	// 随聊随删（2026-11-15 拍板，取代复用）：捕获 SSE_ACK 的 conv id，流正常收尾后
+	// 0.8s 后台焚化豆包侧会话。sessions 暂存 (key→conv)，key 由调用方按 (账号, 请求键)
+	// 预先算好（现在只作焚化关联，不复用）。
+	sessions      *sessionStore
+	sessionKeyOf_ string
+	pendingConvID string // SSE_ACK 捕获的会话 id（随聊随删：流收尾后焚化）
+
+	// 工具文本协议门控（tools.go）：hasTools=true 时 CHUNK_DELTA 正文进缓冲，
+	// 识别 <tool_call> 标签转标准 OpenAI tool_calls delta。解析失败降级为正文。
+	hasTools bool
+	toolGate *toolGate
+
 	pending []byte
 	lineBuf []byte // 未成事件块的行缓冲
 
@@ -59,11 +73,11 @@ type doubaoStreamReader struct {
 	created   int64
 	sentFirst bool
 
-	sawContent  bool
+	sawContent    bool
 	sawChunkDelta bool // CHUNK_DELTA 已给过正文：STREAM_CHUNK 的 block_type 10000 不再重复吐（参考实现同款去重）
-	finished    bool
-	abnormal   error
-	err        error
+	finished      bool
+	abnormal      error
+	err           error
 
 	// dbgRaw 原始响应前缀（仅 DOUBAO_DEBUG_RAW=1 时累积）。
 	dbgRaw  []byte
@@ -78,6 +92,18 @@ func newDoubaoStream(r io.Reader, model string) io.Reader {
 		created: time.Now().Unix(),
 		id:      "chatcmpl-doubao-" + randomHex(8),
 	}
+}
+
+// newDoubaoStreamWithSessions 带会话回写：SSE_ACK 捕获的 conv/section id 会写回缓存。
+func newDoubaoStreamWithSessions(r io.Reader, model, sessionKey string, sessions *sessionStore, hasTools bool) io.Reader {
+	rdr := newDoubaoStream(r, model).(*doubaoStreamReader)
+	rdr.sessions = sessions
+	rdr.sessionKeyOf_ = sessionKey
+	rdr.hasTools = hasTools
+	if hasTools {
+		rdr.toolGate = newToolGate()
+	}
+	return rdr
 }
 
 // Read 以帧为单位吐出转换结果。
@@ -141,8 +167,24 @@ func (s *doubaoStreamReader) finalize() error {
 	if s.err != nil {
 		return s.err
 	}
+	// 工具门控 flush：缓冲里若攒着完整调用，转 tool_calls delta（finish_reason=tool_calls）；
+	// 解析失败降级为普通正文（绝不丢）。
+	if s.toolGate != nil {
+		calls, rest := s.toolGate.flush()
+		if rest != "" {
+			s.pending = append(s.pending, s.chunks(map[string]any{"content": rest})...)
+		}
+		if len(calls) > 0 {
+			s.pending = append(s.pending, s.toolCallFrames(calls)...)
+		}
+	}
 	if !s.sawContent {
 		return fmt.Errorf("doubao：模型未返回任何内容")
+	}
+	// 随聊随删：流正常收尾（正文已完整交付）后焚化本会话。失败流（错误/空响应）
+	// 不焚——会话可能未建成或需排查，保守不删（宁留勿错删）。
+	if s.pendingConvID != "" {
+		s.sessions.forget(s.sessionKeyOf_)
 	}
 	s.pending = append(s.pending, s.finish()...)
 	return nil
@@ -200,16 +242,41 @@ func (s *doubaoStreamReader) convertEvent(block []byte) []byte {
 		}
 		if json.Unmarshal([]byte(payload), &d) == nil && d.Text != "" {
 			s.sawChunkDelta = true
+			// 工具文本协议门控：hasTools 时正文先进缓冲，是标签则转 tool_calls delta
+			if s.toolGate != nil {
+				if out := s.toolGate.feed(d.Text); out != "" {
+					return s.chunks(map[string]any{"content": out})
+				}
+				return nil
+			}
 			return s.chunks(map[string]any{"content": d.Text})
 		}
 		return nil
 	case "STREAM_CHUNK":
 		return s.convertStreamChunk(payload)
 	case "SSE_ACK":
-		return nil // 会话 id：本渠道不做会话续接，忽略
+		// 会话锚点：need_ack_conversation=true 换来的回报（调研报告 §1.3，三个独立实现
+		// 的同一契约）。过滤 "0" 占位（SeiShonagon520 同款）。随聊随删：记住 conv id，
+		// 流正常收尾后焚化；同时仍写缓存（保持 forget/焚化单一入口，防重复删）。
+		var d struct {
+			AckClientMeta struct {
+				ConversationID string `json:"conversation_id"`
+				SectionID      string `json:"section_id"`
+			} `json:"ack_client_meta"`
+		}
+		if json.Unmarshal([]byte(payload), &d) == nil {
+			conv := strings.TrimSpace(d.AckClientMeta.ConversationID)
+			if conv != "" && conv != "0" {
+				s.pendingConvID = conv
+				if s.sessions != nil {
+					s.sessions.remember(s.sessionKeyOf_, conv, strings.TrimSpace(d.AckClientMeta.SectionID))
+				}
+			}
+		}
+		return nil
 	case "SSE_REPLY_END":
 		var d struct {
-			EndType      int    `json:"end_type"`
+			EndType       int `json:"end_type"`
 			MsgFinishAttr struct {
 				Brief string `json:"brief"`
 			} `json:"msg_finish_attr"`
@@ -219,6 +286,12 @@ func (s *doubaoStreamReader) convertEvent(block []byte) []byte {
 		}
 		// end_type 是「收尾原因」而非错误码——工作模式正常收尾即 end_type=1（2026-11-15
 		// 实测：正文完整 + end_type=1）。真正的错误走 STREAM_ERROR / 空响应（R36/R40）。
+		// 工具门控模式例外：正文可能全在门控缓冲里（sawContent=false 但缓冲非空），
+		// 此处不做空响应判定，交给 finalize 统一 flush 后判定（否则缓冲里的完整调用
+		// 会被这里的提前 err 吃掉）。
+		if s.toolGate != nil {
+			return nil
+		}
 		var out []byte
 		if !s.sawContent {
 			// 无流式正文：用 brief 兜底（参考实现同款），仍无则按 R36 上抛、不补 [DONE]。
@@ -228,6 +301,11 @@ func (s *doubaoStreamReader) convertEvent(block []byte) []byte {
 				s.err = fmt.Errorf("doubao：模型未返回任何内容")
 				return nil
 			}
+		}
+		// 随聊随删：正常收尾（finish 在此分支发出，finalize 只处理无收尾行的残余）
+		// 立即安排焚化。失败流（err 已置）不焚——保守不删（宁留勿错删）。
+		if s.err == nil && s.pendingConvID != "" && s.sessions != nil {
+			s.sessions.forget(s.sessionKeyOf_)
 		}
 		out = append(out, s.finish()...)
 		return out
@@ -451,6 +529,13 @@ func (s *doubaoStreamReader) convertStreamChunk(payload string) []byte {
 			switch b.BlockType {
 			case 10000:
 				if !s.sawChunkDelta && b.Content.TextBlock != nil && b.Content.TextBlock.Text != "" {
+					// 工具门控：STREAM_CHUNK 的正文块是本渠道主力通道，与 CHUNK_DELTA 同过门控
+					if s.toolGate != nil {
+						if gated := s.toolGate.feed(b.Content.TextBlock.Text); gated != "" {
+							out = append(out, s.chunks(map[string]any{"content": gated})...)
+						}
+						continue
+					}
 					out = append(out, s.chunks(map[string]any{"content": b.Content.TextBlock.Text})...)
 				}
 			case 10040:
@@ -484,6 +569,50 @@ func (s *doubaoStreamReader) chunks(delta map[string]any) []byte {
 		"id": s.id, "object": "chat.completion.chunk", "created": s.created, "model": s.model,
 		"choices": []any{map[string]any{"index": 0, "delta": delta, "finish_reason": nil}},
 	})...)
+	return out
+}
+
+// toolCallFrames 把解析出的调用转成标准 OpenAI tool_calls delta 帧：
+// 首帧 role+tool_calls（name+id），次帧 arguments 全量，finish_reason=tool_calls。
+// 标记 finished/sawContent：finish() 的 stop 帧不再补（一次请求只应有一个 finish_reason）。
+func (s *doubaoStreamReader) toolCallFrames(calls []parsedToolCall) []byte {
+	type tcFn struct {
+		Name      string `json:"name"`
+		Arguments string `json:"arguments"`
+	}
+	type tc struct {
+		Index    int    `json:"index"`
+		ID       string `json:"id,omitempty"`
+		Type     string `json:"type,omitempty"`
+		Function tcFn   `json:"function"`
+	}
+	var out []byte
+	// 第一帧：role + tool_calls 骨架
+	tcs := make([]tc, 0, len(calls))
+	for i, c := range calls {
+		tcs = append(tcs, tc{Index: i, ID: newCallID(), Type: "function", Function: tcFn{Name: c.Name}})
+	}
+	out = append(out, s.frame(map[string]any{
+		"id": s.id, "object": "chat.completion.chunk", "created": s.created, "model": s.model,
+		"choices": []any{map[string]any{"index": 0, "delta": map[string]any{"role": "assistant", "tool_calls": tcs}, "finish_reason": nil}},
+	})...)
+	// 第二帧：arguments 全量（客户端按 index 拼接）
+	tcs2 := make([]tc, 0, len(calls))
+	for i, c := range calls {
+		tcs2 = append(tcs2, tc{Index: i, Function: tcFn{Arguments: c.Arguments}})
+	}
+	out = append(out, s.frame(map[string]any{
+		"id": s.id, "object": "chat.completion.chunk", "created": s.created, "model": s.model,
+		"choices": []any{map[string]any{"index": 0, "delta": map[string]any{"tool_calls": tcs2}, "finish_reason": nil}},
+	})...)
+	// 收尾帧：finish_reason=tool_calls
+	out = append(out, s.frame(map[string]any{
+		"id": s.id, "object": "chat.completion.chunk", "created": s.created, "model": s.model,
+		"choices": []any{map[string]any{"index": 0, "delta": map[string]any{}, "finish_reason": "tool_calls"}},
+	})...)
+	out = append(out, []byte("data: [DONE]\n\n")...)
+	s.finished = true
+	s.sawContent = true
 	return out
 }
 

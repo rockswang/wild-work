@@ -13,11 +13,30 @@ type chatRequest struct {
 	Messages        []chatMessage `json:"messages"`
 	Stream          bool          `json:"stream"`
 	ReasoningEffort string        `json:"reasoning_effort"`
+	// Tools 不进请求体（上游无 tools 通道，真机已证），只用于首轮注入 system prompt
+	// 与流式门控（tools.go / sse.go）。
+	hasTools bool
 }
 
 type chatMessage struct {
 	Role    string          `json:"role"`
 	Content json.RawMessage `json:"content"`
+	// 工具循环字段（OpenAI 形状）：assistant 的调用发起 + tool 的结果回传。
+	// 上游无 tools 通道，这些字段只用于首轮压平时的格式化还原（tools.go）。
+	ToolCalls []chatToolCall `json:"tool_calls,omitempty"`
+	ToolCallID string        `json:"tool_call_id,omitempty"`
+	// toolName 从 tool_call_id 关联出的工具名（压平时回填，见 buildChatBody 调用方）。
+	toolName string
+}
+
+// chatToolCall OpenAI assistant.tool_calls 的最小切片。
+type chatToolCall struct {
+	ID       string `json:"id"`
+	Type     string `json:"type"`
+	Function struct {
+		Name      string `json:"name"`
+		Arguments string `json:"arguments"`
+	} `json:"function"`
 }
 
 // Text 提取 content 的纯文本（兼容 string 与分块数组两种形态）。
@@ -53,9 +72,10 @@ func (m chatMessage) Text() string {
 // `710020202`——根因是请求体形状不对（缺 content_block / conversation_init_ext /
 // model_config / general_task_param 这一整套），不是号的问题（已在合格账号上实测通过）。
 //
-// 多轮处理：每次请求 need_create_conversation=true + 本地 uuid，**无状态**；首轮把历史压成
-// 一段文本（与旧 samantha 同款取舍），适合 Codex/Claude Code 这种每轮发全历史的客户端。
-func buildChatBody(req *chatRequest, itemKey, effort, dev, memProfile, totalWindow string) ([]byte, error) {
+//   - 多轮处理：会话式复用（2026-11-15 起，session.go）——首轮 need_create_conversation=true
+//   - 历史压平；同会话键后续轮 need_create_conversation=false、只发最后一句 user，
+//     上下文由豆包服务端会话承载。会话锚点从 SSE_ACK 的 ack_client_meta 捕获。
+func buildChatBody(req *chatRequest, itemKey, effort, dev, memProfile, totalWindow string, session sessionState, tools []toolDefinition) ([]byte, error) {
 	if len(req.Messages) == 0 {
 		return nil, fmt.Errorf("messages 不能为空")
 	}
@@ -70,14 +90,53 @@ func buildChatBody(req *chatRequest, itemKey, effort, dev, memProfile, totalWind
 		return nil, fmt.Errorf("缺少 user 消息")
 	}
 
-	// 历史压平：除最后一条 user 外，全部拼成「角色：内容」段落。
+	// 首轮（无会话）：历史压平成「角色：内容」段落；复用轮（有会话）：
+	// 只发最后一句，上下文由豆包服务端会话承载（yyydsz/doubao2api 同款规则）。
+	// 工具协议（tools.go）：压平轮额外做两件事——① 工具清单注入段首（含调用格式
+	// 指令与禁用内置搜索）；② role:tool / assistant.tool_calls 消息格式化保留
+	// （调研报告 A6.4：丢弃会让 agent 循环第二轮就断）。复用轮不重复注入：
+	// 豆包服务端会话已记住首轮的工具清单与格式约定。
 	text := lastUser
-	{
+	if session.ConversationID == "" {
+		// tool_call_id → 工具名关联：role:tool 的 tool_call_id 对应同会话里 assistant
+		// 的某个 tool_calls[].id，压平时回填工具名让回传段可读。
+		callNames := map[string]string{}
+		for _, m := range req.Messages {
+			for _, tc := range m.ToolCalls {
+				if tc.ID != "" {
+					callNames[tc.ID] = tc.Function.Name
+				}
+			}
+		}
 		lastIdx := len(req.Messages) - 1
 		var b strings.Builder
+		if len(tools) > 0 {
+				b.WriteString(toolsPrompt(tools))
+				b.WriteString("\n")
+			}
 		for i, m := range req.Messages {
 			t := strings.TrimSpace(m.Text())
-			if t == "" || i == lastIdx {
+			if i == lastIdx {
+				continue
+			}
+			// 工具历史消息格式化保留（即使 t 为空也处理 tool_calls 还原）
+			if m.Role == "tool" {
+				b.WriteString(formatToolResult(callNames[m.ToolCallID], m.Text()))
+				b.WriteString("\n")
+				continue
+			}
+			if m.Role == "assistant" && len(m.ToolCalls) > 0 {
+				b.WriteString("助手：")
+				for _, tc := range m.ToolCalls {
+					b.WriteString(reconstructToolCall(tc.Function.Name, tc.Function.Arguments))
+					b.WriteString("\n")
+				}
+				if t != "" {
+					b.WriteString(t + "\n")
+				}
+				continue
+			}
+			if t == "" {
 				continue
 			}
 			switch m.Role {
@@ -112,7 +171,7 @@ func buildChatBody(req *chatRequest, itemKey, effort, dev, memProfile, totalWind
 	block := map[string]any{
 		"block_type": 10000,
 		"content": map[string]any{
-			"text_block":    map[string]any{"text": text, "icon_url": "", "icon_url_dark": "", "summary": ""},
+			"text_block":     map[string]any{"text": text, "icon_url": "", "icon_url_dark": "", "summary": ""},
 			"pc_event_block": "",
 		},
 		"block_id": newUUID(), "parent_id": "", "meta_info": []any{}, "append_fields": []any{},
@@ -129,31 +188,35 @@ func buildChatBody(req *chatRequest, itemKey, effort, dev, memProfile, totalWind
 	clientOpt := map[string]any{
 		"enable_sandbox": false, "os": "Windows", "shared_folder_path": []string{},
 		"agent_workspace": map[string]any{"agent_workspace": wo.Workspace, "local_skill_paths": []string{}},
-		"client_env_id":  newUUID(), "sandbox_id": "sandbox-" + newUUID(), "sandbox_auth_type": 1,
+		"client_env_id":   newUUID(), "sandbox_id": "sandbox-" + newUUID(), "sandbox_auth_type": 1,
 	}
 	taskInput := map[string]any{
-		"agents_md": map[string]any{"files": []any{}, "state": 2},
+		"agents_md":      map[string]any{"files": []any{}, "state": 2},
 		"schema_version": 1, "home_dir": "/home/user", "project_context": map[string]any{}, "localConnectors": []any{},
 	}
 	gtp := map[string]any{
 		"action": 0, "thread_local_message_id": []string{msgID}, "client_option": clientOpt,
 		"runtime_type": 2, "agent_task_param": taskParam,
-		"agent_task_param_change": map[string]any{"runtime_changed": false, "device_changed": false, "sandbox_auth_type_changed": false},
-		"need_modify_conversation":  false, "task_input_json": mustJSONString(taskInput),
+		"agent_task_param_change":  map[string]any{"runtime_changed": false, "device_changed": false, "sandbox_auth_type_changed": false},
+		"need_modify_conversation": false, "task_input_json": mustJSONString(taskInput),
 	}
 	gtpStr := mustJSONString(gtp)
 
+	convID := ""
+	if session.ConversationID != "" {
+		convID = session.ConversationID
+	}
 	opt := map[string]any{
 		"create_time_ms": time.Now().UnixMilli(), "answer_with_suggest": false, "agent_mode": 1,
 		"need_deep_think": 10001, "unique_key": newUUID(), "start_seq": 0,
-		"need_create_conversation": true,
+		"need_create_conversation":  convID == "",
 		"conversation_init_option":  map[string]any{"need_ack_conversation": true},
 		"sse_recv_event_options":    map[string]any{"support_chunk_delta": true},
 		"support_lazy_fetch_stream": true, "is_old_user": true, "message_storage_type": 0,
-		"conversation_mode":    2,
+		"conversation_mode":     2,
 		"conversation_init_ext": initExt,
 		"model_config": map[string]any{
-			"model_item_key": itemKey,
+			"model_item_key":     itemKey,
 			"model_extra_params": map[string]any{"memory_profile": memProfile, "total_window_size": totalWindow},
 			"reasoning_effort":   4,
 		},
@@ -171,16 +234,16 @@ func buildChatBody(req *chatRequest, itemKey, effort, dev, memProfile, totalWind
 	}
 	body := map[string]any{
 		"client_meta": map[string]any{
-			"local_conversation_id": localConv, "conversation_id": "", "bot_id": WorkBotID,
-			"last_section_id": "", "last_message_index": nil,
+			"local_conversation_id": localConv, "conversation_id": convID, "bot_id": WorkBotID,
+			"last_section_id": session.SectionID, "last_message_index": nil,
 			"local_permissions": []any{
 				map[string]any{"permission_name": "ACCESS_COARSE_LOCATION", "status": 1},
 				map[string]any{"permission_name": "ACCESS_FINE_LOCATION", "status": 1},
 				map[string]any{"permission_name": "ACCESS_BACKGROUND_LOCATION", "status": 1},
 			},
 		},
-		"messages":    []any{map[string]any{"local_message_id": msgID, "content_block": []any{block}, "message_status": 0}},
-		"option":      opt,
+		"messages":     []any{map[string]any{"local_message_id": msgID, "content_block": []any{block}, "message_status": 0}},
+		"option":       opt,
 		"user_context": []any{},
 	}
 	return json.Marshal(body)
