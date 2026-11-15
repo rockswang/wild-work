@@ -36,8 +36,9 @@ import (
 //	data: {"type":"reasoning","data":"..."}            → reasoning_content
 //	data: {"type":"error","data":"..."|{"message":...}} → 流内错误
 //
-// 转换规则：type=text→content 增量、type=reasoning→reasoning_content、
+// 转换规则：type=text/ppt_outline_text→content 增量、type=reasoning→reasoning_content、
 // type=end/text_end→finish stop、type=error→StreamError、其余类型丢弃。
+// 2026-11-15 实测：Kimi 长上下文回答可只使用 ppt_outline_text 承载正文。
 // 帧的 data 字段两种形态：纯字符串直接用；对象取 .text / .message / .error。
 
 // parseSSE 逐行读上游 SSE，把每个完整 data 帧的 payload 交给 onFrame。
@@ -195,7 +196,7 @@ func (sc *streamConverter) handleFrame(w io.Writer, flush func(), payload []byte
 	}
 
 	switch f.Type {
-	case "text":
+	case "text", "ppt_outline_text":
 		text := frameText(f.Data)
 		if text == "" {
 			return nil
@@ -308,7 +309,7 @@ func (c *Client) Aggregate(r io.Reader, model string) (map[string]any, error) {
 			return nil
 		}
 		switch f.Type {
-		case "text":
+		case "text", "ppt_outline_text":
 			fullText.WriteString(frameText(f.Data))
 		case "reasoning":
 			fullThink.WriteString(frameText(f.Data))
