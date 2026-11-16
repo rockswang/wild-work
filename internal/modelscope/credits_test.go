@@ -25,12 +25,16 @@ type siteObs struct {
 	auth   []string
 	cookie []string
 	ua     []string
+	txAuth []string
+	txUA   []string
 }
 
 // fakeSite 假主站：按端点返回可覆盖的状态码/报文，并记录收到的请求头。
 type fakeSite struct {
 	balanceStatus int
 	balanceBody   string
+	txStatus      int
+	txBody        string
 	usageStatus   int
 	usageBody     string
 	obs           siteObs
@@ -51,6 +55,16 @@ func (f *fakeSite) start(t *testing.T) *httptest.Server {
 		f.obs.auth = append(f.obs.auth, r.Header.Get("Authorization"))
 		f.obs.ua = append(f.obs.ua, r.Header.Get("User-Agent"))
 		f.write(w, f.balanceStatus, f.balanceBody)
+	})
+	mux.HandleFunc(EpMagicubesTransactions, func(w http.ResponseWriter, r *http.Request) {
+		f.obs.txAuth = append(f.obs.txAuth, r.Header.Get("Authorization"))
+		f.obs.txUA = append(f.obs.txUA, r.Header.Get("User-Agent"))
+		body := f.txBody
+		if body == "" {
+			// 默认空流水：存量测试（未点名 transactions）不该因 404 而走降级分支。
+			body = `{"success":true,"data":{"page":1,"page_size":20,"total":0,"records":[]}}`
+		}
+		f.write(w, f.txStatus, body)
 	})
 	mux.HandleFunc(EpDailyUsage, func(w http.ResponseWriter, r *http.Request) {
 		f.obs.cookie = append(f.obs.cookie, r.Header.Get("Cookie"))
