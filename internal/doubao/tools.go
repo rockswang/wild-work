@@ -5,10 +5,10 @@
 // 约定标签 + 网关解析」跑通了 agent 工具循环（temp/doubao-tools-delete-research2.md
 // Part A），本文件照搬其中工程化最完整的 SeiShonagon520/doubao2api 语义：
 //
-//   1. 请求面：OpenAI tools → TS 压缩签名文本 + 调用格式指令，注入 system prompt
-//      （复用首轮压平通道；复用轮由豆包服务端会话记忆承载，不重复注入）；
-//   2. 响应面：四级容错解析 <tool_call>{json}</tool_call> → 标准 OpenAI tool_calls；
-//   3. 多轮回传：role:"tool" → [工具调用结果] 文本段、assistant.tool_calls → 还原标签。
+//  1. 请求面：OpenAI tools → TS 压缩签名文本 + 调用格式指令，注入 system prompt
+//     （复用首轮压平通道；复用轮由豆包服务端会话记忆承载，不重复注入）；
+//  2. 响应面：四级容错解析 <tool_call>{json}</tool_call> → 标准 OpenAI tool_calls；
+//  3. 多轮回传：role:"tool" → [工具调用结果] 文本段、assistant.tool_calls → 还原标签。
 //
 // 纪律：解析失败一律降级为普通正文输出（绝不丢正文）；上游未声明该能力，
 // /v1/models 不得宣告 supports_tools（R49）——文本协议是网关侧的兼容层，
@@ -26,8 +26,8 @@ import (
 
 // toolDefinition OpenAI 风格工具定义（请求面入参的最小切片）。
 type toolDefinition struct {
-	Name        string         `json:"name"`
-	Description string         `json:"description"`
+	Name        string          `json:"name"`
+	Description string          `json:"description"`
 	Parameters  json.RawMessage `json:"parameters"` // JSON Schema
 }
 
@@ -334,8 +334,8 @@ const (
 	gateMaxChars = 64 << 10 // 门控缓冲上限，超过强制放行（防失控）
 	// guardWindow 普通放行模式的尾部护栏宽度（≥最长标签长度）。
 	guardWindow = 12
-	tagOpen  = "<tool_call>"
-	tagClose = "</tool_call>"
+	tagOpen     = "<tool_call>"
+	tagClose    = "</tool_call>"
 )
 
 type toolGate struct {
@@ -367,7 +367,10 @@ func (g *toolGate) feed(text string) string {
 			g.buf.WriteString(all[idx:])
 			g.toolMode = true
 			g.done = false
-			return all[:idx]
+			// 必须从 emitted 游标起吐（旧实现 all[:idx] 从 0 重发 ⇒ 已 emit 的前缀重复，
+			// 2026-11-15 审查探针实测：分 ≥2 帧到达的「先说话后出标签」形态必现）；
+			// idx 由 indexTagPrefix(all, g.emitted) 保证 >= g.emitted。
+			return all[g.emitted:idx]
 		}
 		safe := len(all) - guardWindow
 		if safe <= g.emitted {
@@ -415,7 +418,7 @@ func (g *toolGate) feed(text string) string {
 }
 
 // indexTagPrefix 在 all[searchFrom:] 找标签或其**尾部不完整前缀**的最早出现位置
-//（标签跨帧断裂时也要拦，宁枉勿纵）。没有返回 -1。
+// （标签跨帧断裂时也要拦，宁枉勿纵）。没有返回 -1。
 func indexTagPrefix(all string, searchFrom int) int {
 	patterns := []string{"<tool_call>", "</tool_call>", "<tool_call", "</tool_call", "<tool", "</tool"}
 	best := -1

@@ -294,6 +294,11 @@ func (s *QRSession) run(ctx context.Context, flow *passportFlow, token string, o
 			return
 		case "scanning", "scanned":
 			s.setState(StateScanned, "已扫码，请在手机上确认")
+		case "cancelled", "canceled":
+			// 用户在手机上取消：立即失败，不傻等满整体超时（normalizeStatus 已认识
+			// 该态，2026-11-15 审查补齐 run 侧分支）。
+			s.set(StateFailed, fmt.Errorf("用户在手机上取消了扫码登录"), "")
+			return
 		case "expired":
 			round++
 			if round > maxQRRound {

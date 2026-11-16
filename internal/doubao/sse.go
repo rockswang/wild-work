@@ -38,6 +38,8 @@ import (
 	"os"
 	"strings"
 	"time"
+
+	"wild-work/internal/provider"
 )
 
 // debugRawLimit 原始响应转储的上限（字节）。
@@ -183,7 +185,7 @@ func (s *doubaoStreamReader) finalize() error {
 	}
 	// 随聊随删：流正常收尾（正文已完整交付）后焚化本会话。失败流（错误/空响应）
 	// 不焚——会话可能未建成或需排查，保守不删（宁留勿错删）。
-	if s.pendingConvID != "" {
+	if s.pendingConvID != "" && s.sessions != nil {
 		s.sessions.forget(s.sessionKeyOf_)
 	}
 	s.pending = append(s.pending, s.finish()...)
@@ -231,7 +233,11 @@ func (s *doubaoStreamReader) convertEvent(block []byte) []byte {
 	case "SSE_HEARTBEAT":
 		return nil // 心跳：跳过
 	case "gateway-error":
-		s.err = fmt.Errorf("doubao：网关级错误 %s", truncateStr(payload, 200))
+		// 网关级错误：带分类上抛（ErrServer，不换号不罚号，与 R109 对 5xx 的裁定一致）。
+		s.err = provider.AsClassified(&provider.Error{
+			Kind: provider.ErrServer, Status: 0,
+			Msg: "网关级错误 " + truncateStr(payload, 200),
+		})
 		return nil
 	case "STREAM_ERROR":
 		s.err = streamErrorOf(payload)
@@ -473,7 +479,10 @@ func samanthaErrText(p samanthaPayload) string {
 	return ""
 }
 
-// streamErrorOf 解析 STREAM_ERROR 帧（字段两套都认）。
+// streamErrorOf 解析 STREAM_ERROR 帧（字段两套都认），并转成带分类的错误。
+// 为什么不能裸 fmt.Errorf：handler 的换号/惩罚全靠 errors.As 取 StreamErrorClassifier
+// （R108/R111 同款）；裸 error 会让首帧前发生的业务错误既不换号也不冷却，还会被
+// upstream.StreamCapture 标成 upstream_truncated（业务错误伪装成截断，违反 R58）。
 func streamErrorOf(payload string) error {
 	var d struct {
 		Code      int    `json:"code"`
@@ -493,7 +502,14 @@ func streamErrorOf(payload string) error {
 	if msg == "" {
 		msg = truncateStr(payload, 200)
 	}
-	return fmt.Errorf("doubao：上游流内错误 code=%d msg=%s", code, msg)
+	// 分类复用与 HTTP 路径同一张表（Classify 不用接收者，code 走 riskCodeOf 的
+	// JSON/文本双路挖取）；未知码落 ErrClient（可换号、不冷却），与 Classify 对
+	// 未知 HTTP >=400 的裁定一致。
+	kind := (&Client{}).Classify(0, payload)
+	return provider.AsClassified(&provider.Error{
+		Kind: kind, Status: 0,
+		Msg: fmt.Sprintf("上游流内错误 code=%d msg=%s", code, msg),
+	})
 }
 
 // convertStreamChunk 旧方言兜底（/chat/completion 的 patch_op 形状）。

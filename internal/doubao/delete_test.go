@@ -96,7 +96,7 @@ func TestLookupMissNoPanic(t *testing.T) {
 	lookupAuthByUID = func(uid string) *auth.Auth { return nil }
 	s := newIsolatedStore()
 	s.remember("ghost|k", "conv-x", "")
-	s.forget("ghost|k") // 不应 panic
+	s.forget("ghost|k")                 // 不应 panic
 	time.Sleep(1100 * time.Millisecond) // 等 0.8s 延迟 + 余量
 }
 

@@ -155,7 +155,7 @@ func TestBuildChatBodyFormatsToolHistory(t *testing.T) {
 			tc.Function.Name, tc.Function.Arguments = "get_weather", `{"city":"北京"}`
 			return []chatToolCall{tc}
 		}()},
-		{Role: "tool", ToolCallID: "call_1", Content: rawStr(`{"temp":25}`)},
+		{Role: "tool", ToolCallID: "call_1", Content: jsonContent(`{"temp":25}`)},
 		{Role: "user", Content: rawStr("谢谢，明天呢")},
 	}}
 	out, err := buildChatBody(req, staticModels["deepseek-v4-flash"].ItemKey, "", diagDev, "", "", sessionState{}, nil)
@@ -169,6 +169,74 @@ func TestBuildChatBodyFormatsToolHistory(t *testing.T) {
 	if !strings.Contains(got, "get_weather 返回：") {
 		t.Fatalf("tool_call_id 未关联出工具名：\n%s", got)
 	}
+	// 内容必须真的进请求体（rawStr 不转义内嵌引号时 Text() 为空，曾掩蔽此缺陷；
+	// got 是原始 JSON，内嵌引号以 \\\" 形态出现）
+	if !strings.Contains(got, "{\\\"temp\\\":25}") {
+		t.Fatalf("工具结果内容未进请求体：\n%s", got)
+	}
+}
+
+// TestBuildChatBodyToolResultAtTail 🔴-1 回归（2026-11-15 审查）：agent 第二轮的末条是
+// role:tool——旧实现跳过条件误用 len-1，工具结果整段丢失 + 问题重复。修复后：
+// ① 工具结果必须进压平文本；② 用户问题只出现一次；③ 末条是 tool 时不回问 lastUser。
+func TestBuildChatBodyToolResultAtTail(t *testing.T) {
+	req := &chatRequest{Model: "doubao/deepseek-v4-flash", Messages: []chatMessage{
+		{Role: "user", Content: rawStr("北京天气如何")},
+		{Role: "assistant", Content: json.RawMessage("null"), ToolCalls: func() []chatToolCall {
+			var tc chatToolCall
+			tc.ID, tc.Type = "call_1", "function"
+			tc.Function.Name, tc.Function.Arguments = "get_weather", `{"city":"北京"}`
+			return []chatToolCall{tc}
+		}()},
+		{Role: "tool", ToolCallID: "call_1", Content: jsonContent(`{"temp":28}`)},
+	}}
+	out, err := buildChatBody(req, staticModels["deepseek-v4-flash"].ItemKey, "", diagDev, "", "", sessionState{}, nil)
+	if err != nil {
+		t.Fatalf("buildChatBody: %v", err)
+	}
+	text := chatBodyFlatText(t, out)
+	if !strings.Contains(text, "get_weather 返回：") {
+		t.Fatalf("末条 role:tool 的结果整段丢失：\n%s", text)
+	}
+	if !strings.Contains(text, `{"temp":28}`) {
+		t.Fatalf("工具结果内容未进请求体：\n%s", text)
+	}
+	if n := strings.Count(text, "北京天气如何"); n != 1 {
+		t.Fatalf("用户问题出现 %d 次（旧缺陷是 2 次）：\n%s", n, text)
+	}
+	if strings.HasSuffix(text, "用户：北京天气如何") {
+		t.Fatalf("tool 续跑轮不得回问 lastUser（模型应接着工具结果继续）：\n%s", text)
+	}
+}
+
+// chatBodyFlatText 从 buildChatBody 产物里抽出压平文本（测试专用）。
+// jsonContent 构造**转义正确**的 JSON 字符串 RawMessage：rawStr 不转义内嵌引号，
+// rawStr(`{"temp":28}`) 生成非法 JSON ⇒ Text() 空——既有用例因此掩蔽过「内容为空」。
+func chatBodyFlatText(t *testing.T, out []byte) string {
+	t.Helper()
+	var body struct {
+		Messages []struct {
+			ContentBlock []struct {
+				Content struct {
+					TextBlock struct {
+						Text string `json:"text"`
+					} `json:"text_block"`
+				} `json:"content"`
+			} `json:"content_block"`
+		} `json:"messages"`
+	}
+	if err := json.Unmarshal(out, &body); err != nil {
+		t.Fatalf("解析请求体：%v", err)
+	}
+	if len(body.Messages) == 0 || len(body.Messages[0].ContentBlock) == 0 {
+		t.Fatalf("请求体无消息块：%s", out)
+	}
+	return body.Messages[0].ContentBlock[0].Content.TextBlock.Text
+}
+
+func jsonContent(s string) json.RawMessage {
+	b, _ := json.Marshal(s)
+	return b
 }
 
 // ---------- 流式门控 ----------
@@ -318,6 +386,35 @@ func TestStreamGateTagAfterProse(t *testing.T) {
 	// 前后普通文本不丢
 	if !strings.Contains(out, "我来查一下天气。") || !strings.Contains(out, "再看看别的。") {
 		t.Fatalf("普通正文被误吞：\n%s", out)
+	}
+}
+
+// TestStreamGateProsePrefixNotRepeated 🔴-2 回归（2026-11-15 审查）：done 模式切工具收集时
+// 必须从 emitted 游标起吐，否则已放行的正文前缀会重复下发（分 ≥2 帧的「先说话后出标签」
+// 形态必现，旧实现的 Contains 断言探测不到重复）。全等比对锁死无重复、无丢失。
+func TestStreamGateProsePrefixNotRepeated(t *testing.T) {
+	prose := "我来帮你查询一下北京的天气情况。"
+	text := prose + "\n<tool_call>\n{\"name\": \"get_weather\", \"arguments\": {\"city\": \"北京\"}}\n</tool_call>"
+	g := newToolGate()
+	var emitted strings.Builder
+	runes := []rune(text)
+	for i := 0; i < len(runes); i += 5 {
+		end := i + 5
+		if end > len(runes) {
+			end = len(runes)
+		}
+		emitted.WriteString(g.feed(string(runes[i:end])))
+	}
+	calls, rest := g.flush()
+	out := emitted.String() + rest
+	if n := strings.Count(out, "北京的天气情况"); n != 1 {
+		t.Fatalf("正文前缀出现 %d 次（旧缺陷是重复下发）：\n%s", n, out)
+	}
+	if want := prose + "\n"; out != want {
+		t.Fatalf("下发正文应恰为「正文+换行」：got %q want %q", out, want)
+	}
+	if len(calls) != 1 || calls[0].Name != "get_weather" {
+		t.Fatalf("调用未解析出：calls=%v out=%s", calls, out)
 	}
 }
 

@@ -117,7 +117,6 @@ func NormalizeCookie(raw string) string {
 	return strings.Join(parts, "; ")
 }
 
-
 // GenerateDeviceParams 生成一套**随机**设备指纹（扫码登录时用，每次登录换新身份，
 // 避免继承上一次会话的风控分——与参考实现同思路）。
 func GenerateDeviceParams() (deviceID, webID, fp string) {
@@ -195,6 +194,8 @@ func isAlnum(c rune) bool {
 }
 
 // randDigits 生成指定位数的十进制数字串，首位固定为 prefix。
+// crypto/rand 失败（极低概率）时用 '0' 填满保证形状合法（设备指纹形状不对上游
+// 会回 710020202），绝不 panic / 返回短串。
 func randDigits(n int, prefix string) string {
 	out := make([]byte, 0, n)
 	out = append(out, prefix...)
@@ -204,6 +205,9 @@ func randDigits(n int, prefix string) string {
 			break
 		}
 		out = append(out, byte('0'+v.Int64()))
+	}
+	for len(out) < n {
+		out = append(out, '0')
 	}
 	return string(out[:n])
 }

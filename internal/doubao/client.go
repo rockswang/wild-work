@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"wild-work/internal/auth"
+	"wild-work/internal/idle"
 	"wild-work/internal/provider"
 	"wild-work/internal/upstream"
 )
@@ -171,7 +172,7 @@ func (c *Client) RefreshToken(a *auth.Auth) error {
 
 // chatStreamBody 上游响应体包装：携带本次请求的缓存键与工具门控标志，供
 // Stream/Aggregate 捕获 SSE_ACK 时写回会话缓存、以及工具文本协议解析
-//（避免改 provider.Upstream 接口签名）。
+// （避免改 provider.Upstream 接口签名）。
 type chatStreamBody struct {
 	io.ReadCloser
 	sessionKey string
@@ -213,12 +214,15 @@ func (c *Client) ChatStream(a *auth.Auth, body []byte) (io.ReadCloser, int, []by
 	req.Header.Set("x-flow-trace", "04-0000000000000000000000000000000-0000000000000000-01")
 	req.Header.Set("Cookie", cookie)
 
-	// 流式**不设**整体超时（不变量：R35），只有响应头上限与流中空闲看门狗兜底。
+	// 流式**不设**整体超时（R35）；下方接 idle 看门狗（R58：静默 90s 即断流，首字节前由 ResponseHeaderTimeout 约束；成功分支 cancel 所有权交给 idle.Monitor）。
+	req, cancel := idle.WithCancel(req)
 	resp, err := c.StreamHTTP.Do(req)
 	if err != nil {
+		cancel()
 		return nil, 0, nil, err
 	}
 	if resp.StatusCode >= 400 {
+		cancel()
 		raw, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 		resp.Body.Close()
 		return nil, resp.StatusCode, raw, nil
@@ -227,7 +231,7 @@ func (c *Client) ChatStream(a *auth.Auth, body []byte) (io.ReadCloser, int, []by
 	// 键在此重算（与 outboundBodyFor 同一输入同一结果）：接口签名不能改，只能这样让
 	// 键随响应体流过 Stream/Aggregate。复用轮也带上：豆包同会话多 section 会续发 ACK。
 	key := sessionKeyOf(uid, conversationKeyOf(body))
-	return &chatStreamBody{ReadCloser: resp.Body, sessionKey: key, hasTools: len(parseTools(body)) > 0}, resp.StatusCode, nil, nil
+	return &chatStreamBody{ReadCloser: idle.Monitor(resp.Body, DefaultIdleTimeout, cancel), sessionKey: key, hasTools: len(parseTools(body)) > 0}, resp.StatusCode, nil, nil
 }
 
 // deleteConversation 删除豆包侧会话（/samantha/thread/delete，焚化路径）。
@@ -277,6 +281,8 @@ func (c *Client) deleteConversation(a *auth.Auth, convID string) error {
 }
 
 // csrfTokenOf 从 Cookie 里取 passport_csrf_token（缺失回退常量，参考实现两种都出现过）。
+// csrfTokenOf 从 Cookie 里取 passport_csrf_token；缺失返回空串（delete 请求将
+// 不带 csrf 头——kitsch 未带头也成功过；带总是更稳，故不做常量兑底）。
 func csrfTokenOf(cookie string) string {
 	for _, part := range strings.Split(cookie, ";") {
 		part = strings.TrimSpace(part)
@@ -309,6 +315,8 @@ func (c *Client) Classify(status int, body string) provider.ErrKind {
 			return provider.ErrPassthrough
 		}
 	}
+	// 已知限制：额度是「窗口限额」口径（credits.go），上游未实测到 402 形态；
+	// 若将来窗口耗尽回 402/等价业务码，需补 ErrHardCredit 归类（模型级冷却）。
 	if status >= 500 {
 		return provider.ErrServer
 	}

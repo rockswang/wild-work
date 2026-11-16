@@ -37,12 +37,12 @@ import (
 	"wild-work/internal/config"
 	"wild-work/internal/custom"
 	"wild-work/internal/devdump"
+	"wild-work/internal/doubao"
 	"wild-work/internal/gateway"
 	"wild-work/internal/gemini"
 	"wild-work/internal/glm"
 	"wild-work/internal/kilo"
 	"wild-work/internal/ledger"
-	"wild-work/internal/doubao"
 	"wild-work/internal/lingxi"
 	"wild-work/internal/lobsterai"
 	"wild-work/internal/loomy"
@@ -187,9 +187,12 @@ func main() {
 	}
 	// 小浣熊：导入型渠道，凭据由面板「从本机客户端导入」或浏览器授权登录写入 auths/。
 	rcAuths, err := auth.LoadRaccoonDir(cfg.AuthDir)
-	dbAuths, err := auth.LoadDoubaoDir(cfg.AuthDir)
 	if err != nil {
 		fatal("读取小浣熊账号目录失败：%v", err)
+	}
+	dbAuths, err := auth.LoadDoubaoDir(cfg.AuthDir)
+	if err != nil {
+		fatal("读取豆包账号目录失败：%v", err)
 	}
 	// Loomy：导入型渠道，凭据由面板「从本机客户端导入」写入 auths/。
 	lmAuths, err := auth.LoadLoomyDir(cfg.AuthDir)

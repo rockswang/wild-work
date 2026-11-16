@@ -45,7 +45,7 @@
 
 ---
 
-## 1. 决议项索引（R1–R157）
+## 1. 决议项索引（R1–R158）
 
 **全文（含证据链、反例、已知限制）见 [`docs/决议项.md`](docs/决议项.md)** —— 改动相关代码前必读对应条目。
 
@@ -190,6 +190,7 @@
 | R155 | **OCZen 免费档闸门判的是 TLS ClientHello 指纹：必须复刻官方 CLI（Bun 1.4.4/BoringSSL）那一份；Go 原生 ClientHello 恒 429**（2026-11-04 定案，用户报「对话恒 429 FreeUsageLimitError」） | **决定性实验（同一份 body、同一分钟、同一出口 49.68.54.61）**：把 wild-work 整形后的 24041 B 出站体交五类客户端发往 `https://opencode.ai/inference/openai/v1/chat/completions`——Go 默认 Transport（h1.1）→ **429**；Node `https.request`（OpenSSL，h1.1）→ **429**；Chrome 同源 `fetch`（h2）→ **429**；uTLS `HelloChrome_133` 预设（h1.1）→ **429**；**uTLS 复刻 Bun ClientHello（h1.1）→ 200 + 真实 SSE**（`x-zen-model: big-pickle`、`cf-ray …-BOS`、`x-opencode-log-id`）。**同一份官方抓包体逐字节重放**（含官方 session/project/b3/traceparent 头）→ 429，而**官方 CLI 自己发** → 200（多次，DB 记真实 usage，如 `17*23→391`）⇒ 请求体/头/路径/会话 id/`Bearer public`/HTTP 版本**全部排除为判据**；`Retry-After` 指向下个 UTC 00:00 只是上游拒绝免费档的统一文案，**不代表本机出口额度耗尽**。**指纹实测（本机采集，0 上游请求）**：Bun JA3 md5 `1523504b38f0fae0d881d4b6554aac1b` / JA4 `t13d1713h1_5b57614c22b0_7f527383e249`（17 cipher、13 扩展、ALPN 仅 `http/1.1`、无 GREASE）；Go 原生（13/11，因 `TLSNextProto` 非 nil 空表而**完全不发 ALPN**；其 JA3 md5 随 Go 版本/环境浮动——本机两次测量分别得 `9b7dcdf3…` 与 `20b27999…`，故只作「≠Bun」对照、不作断言基准）；Chrome `t13i1516h2_…`（15/16、扩展序随机化）⇒ Bun ≠ Chrome，「类浏览器指纹」不通过。**抓取方法**：`BUN_BE_BUN=1 opencode-cli.exe` 让官方 CLI 退化成 Bun 1.4.4 运行时；本地 CONNECT 嗅探器（只回 200、只抓首个 TLS record、不落地 MITM）+ `HTTPS_PROXY` ⇒ 拿到 SNI=opencode.ai 的原件。**修法**：新增依赖 `github.com/refraction-networking/utls v1.8.2`；`internal/oczen/tlsfp.go` 内嵌 `assets/clienthello_bun_2.2.5.bin`（1502 B 原件），`Fingerprinter{AllowBluntMimicry:true}.RawClientHello` **每条连接重新解析**成 spec（避免 `ApplyPreset` 的 slice 跨连接共享），`New()` 给 Transport 挂 `DialTLSContext`（uTLS `HelloCustom` + `ApplyPreset` + `HandshakeContext`），保持 HTTP/1.1；**自加 10s 握手超时**（net/http 只在自己 `addTLS` 分支装 `TLSHandshakeTimeout`，走自定义 `DialTLSContext` 的连接**不受它约束**——独立验证实测静默上游 >25s 挂住、原生路径 10.02s 超时，而 oczen 的 `StreamHTTP` 无整体 Timeout）；诊断开关 `OCZEN_NO_FINGERPRINT=1` 退回 Go 原生（复现 429）。**回归**：`TestEmbeddedClientHelloAsset`（资产 JA3 == 取证值）、`TestOfficialClientHelloIsMimicked`（真实拨号打到本地监听，断言出站 ClientHello 的 JA3 md5 == `1523504b…`）、`TestNewWiresFingerprintDialer`（默认挂载 + 开关生效）、`TestFingerprintDialerHandshakeTimeout`（静默上游必须 ~300ms 超时）、`TestOfficialFingerprintDialerTimesOutOnSilentUpstream`（同样打静默上游但走**生产入口** + 4s 守卫——独立验证用变异 A 证明前一条不经过生产接线、改坏接线仍绿，故补）、`TestJA3ParserDropsGrease`（JA3 的 cipher/扩展/curves 三处都剔 GREASE）。**已知限制**：① 嵌入的 hello 是**官方客户端快照**，上游换客户端/换白名单后必须重抓（抓取脚本见运维项目 `dev/oczen-tls-test/hello-snoop.js`）；② 新增依赖（utls + x/crypto + x/sys + klauspost/compress + brotli）会让二进制变大；③ 未实证上游是「按 JA3 白名单」还是「按 Bot score 里的其它信号」——只实证了结果面（复刻即 200）。 |
 | R156 | **脱敏表支持 `sanitize.toml` 追加自定义规则：TOML 单引号字面量让正则零转义；只 append、不覆盖、不隐式补预检**：JSON 承载正则有静默陷阱（`\b` 被解成退格符），故用 TOML 字面量字符串；段键=源文件路径、字段名=源变量名，解析器共享于 `internal/sanitizecfg`（两包各留约 30 行 append 接线）；段级 `enabled` 只管本段自定义规则是否加载（字段缺失或非布尔值按默认 `true`，显式 `false` 跳过本段追加、内置规则照常生效）；坏条目逐条跳过，文件缺失/语法错误保留内置规则；首次启动生成完整模板。已知限制：只增不删、无隐式预检、手改需重启。详见 [`docs/决议项.md`](docs/决议项.md) R156 |
 | R157 | **灵犀正文帧变体 `ppt_outline_text` 必须按 content 增量承接**（2026-11-15，PR #223）：Kimi 长上下文可只用 `ppt_outline_text` 帧承载正文（R141 序列之外变体），只认 `text` 会把它全丢弃 ⇒ HTTP 200 + stop 但 `content` 空；流式与聚合双路径均补该帧类型，`ppt_outline_start/end` 仍忽略。详见 [`docs/决议项.md`](docs/决议项.md) R157 |
+| R158 | **新增内建渠道豆包（`doubao/*`，第 24 条）；流式纪律四缺口合并后补修**（2026-11-16，PR #225）：工作模式 `/chat/completion` + 9 真模型 + 扫码登录 + 签到/窗口限额额度 + 工具调用文本协议（R49：不宣告能力）+ 随聊随删会话焚化；合并后补修 4 个真机探针复现的阻塞项（tool 末条被跳过且消息重复 / gate 前缀重复下发 / 空闲看门狗缺失 / 流内错误未分类）及装配层杂项（err 覆盖、注释错位、randDigits panic、取消态、rawStr 测试掩蔽）。详见 [`docs/决议项.md`](docs/决议项.md) R158 |
 
 > ⚠️ **R71 附带的实测纪律**（也是 §0.1 的来源）：上游校验的是**头族齐全**而非单点
 > （只补 `X-Conversation-ID` 仍被拒）；且 `X-Conversation-ID` 的**取值形态不被校验**
@@ -372,7 +373,7 @@
 
 **面板区块与 API 全量清单**见 [`docs/接口参考.md`](docs/接口参考.md)。
 
-### 渠道清单（23 条内建，其中旧 Qoder 仅保留路由 + 自定义）
+### 渠道清单（24 条内建，其中旧 Qoder 仅保留路由 + 自定义）
 
 WorkBuddyCN（`workbuddy/*`）、WorkBuddyAI（`workbuddyai/*`）、TraeWork（`traework/*`）、
 TraeCode（`traecode/*`）、QoderCN（`qodercn/*`）、QoderCOM（`qodercom/*`）、
@@ -382,9 +383,10 @@ Kilo（`kilo/*`，免密免费池、无账号）、MiniMax Code（`minimax/*`，
 LobsterAI（`lobsterai/*`，本机回调授权）、ZCode（`zcode/*`，设备授权；积分领取依赖网页验证码，本工具不自动领取）、
 Gemini（`gemini/*`，本机回调授权）、CodeArts（`codearts/*`，PKCE 授权）、
 Cline（`cline-free/*`）、华为云果办 OfficeAce（`officeace/*`）、WPS Comate（`comate/*`，CDP 自动捕获 `wps_sid`、手工粘贴兜底）、
-WPS 灵犀（`lingxi/*`，扫码/`wps_sid` 粘贴 + CDP 捕获，与 comate 共用 Cookie 但 uid 前缀 `lxsid-`）；
+WPS 灵犀（`lingxi/*`，扫码/`wps_sid` 粘贴 + CDP 捕获，与 comate 共用 Cookie 但 uid 前缀 `lxsid-`）、
+豆包（`doubao/*`，扫码/粘贴 Cookie，工作模式 `/chat/completion` + 工具调用文本协议 + 会话焚化，R158）；
 另有用户自定义 OpenAI 兼容渠道（`custom_channels`，R66）。
-旧 Qoder（`qoder/*`）已从界面下线，路由保留（`provider.BuiltinKinds()` 仍计入 ⇒ 23 条内建、可添加 22 条）。
+旧 Qoder（`qoder/*`）已从界面下线，路由保留（`provider.BuiltinKinds()` 仍计入 ⇒ 24 条内建、可添加 23 条）。
 
 **新增渠道步骤**：① `internal/<channel>/` 实现 `provider.Upstream`；
 ② `internal/auth` 加 `Load<Channel>Dir()`（注意 glob 边界：`qoder*.json` 会吞 `qodercn-`/`qodercom-`）；
@@ -490,7 +492,7 @@ bash scripts/probe-dump.sh summarize                # 汇总各渠道 usage 字�
 | [README.md](README.md) | 用户文档 |
 | [DEVELOPMENT.md](DEVELOPMENT.md) | 开发者文档（面向 AI Agent） |
 | [AGENTS.md](AGENTS.md) | **本文件**：纪律 + 决议索引 + 关键不变量 + 构建发版 |
-| [docs/决议项.md](docs/决议项.md) | **R1–R157 决议全文**（证据链、反例、已知限制） |
+| [docs/决议项.md](docs/决议项.md) | **R1–R158 决议全文**（证据链、反例、已知限制） |
 | [docs/渠道接入备忘.md](docs/渠道接入备忘.md) | 各渠道协议要点、凭据模型、已知限制与踩坑 |
 | [docs/接口参考.md](docs/接口参考.md) | 面板区块规划 + 管理 API 全量清单 |
 | [docs/模型降级链定义.md](docs/模型降级链定义.md) | **模型降级链的唯一权威定义**：三维归因、错误类型全量归属、两条触发路径、三条硬规则、已知限制（R94） |

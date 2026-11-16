@@ -23,8 +23,8 @@ type chatMessage struct {
 	Content json.RawMessage `json:"content"`
 	// 工具循环字段（OpenAI 形状）：assistant 的调用发起 + tool 的结果回传。
 	// 上游无 tools 通道，这些字段只用于首轮压平时的格式化还原（tools.go）。
-	ToolCalls []chatToolCall `json:"tool_calls,omitempty"`
-	ToolCallID string        `json:"tool_call_id,omitempty"`
+	ToolCalls  []chatToolCall `json:"tool_calls,omitempty"`
+	ToolCallID string         `json:"tool_call_id,omitempty"`
 	// toolName 从 tool_call_id 关联出的工具名（压平时回填，见 buildChatBody 调用方）。
 	toolName string
 }
@@ -80,9 +80,11 @@ func buildChatBody(req *chatRequest, itemKey, effort, dev, memProfile, totalWind
 		return nil, fmt.Errorf("messages 不能为空")
 	}
 	lastUser := ""
+	lastUserIdx := -1 // 最后一条 user 的下标：压平时跳过它（末尾统一拼），不是跳过末条消息
 	for i := len(req.Messages) - 1; i >= 0; i-- {
 		if req.Messages[i].Role == "user" {
 			lastUser = req.Messages[i].Text()
+			lastUserIdx = i
 			break
 		}
 	}
@@ -108,15 +110,20 @@ func buildChatBody(req *chatRequest, itemKey, effort, dev, memProfile, totalWind
 				}
 			}
 		}
-		lastIdx := len(req.Messages) - 1
+		// 旧实现跳过条件误用 len-1：agent 第二轮的末条是 role:tool，被当「当前消息」
+		// 跳过 ⇒ 工具结果整段丢失 + 问题重复（2026-11-15 审查探针实测复现）。
+		// 跳过条件应为「最后一条 user」的下标。
+		// 末条是 role:tool 的续跑轮（模型该接着工具结果往下写）不回问 lastUser：
+		// 压平到工具结果为止收尾，避免「回答完工具结果再重答一遍原问题」。
+		tailIsTool := req.Messages[len(req.Messages)-1].Role == "tool"
 		var b strings.Builder
 		if len(tools) > 0 {
-				b.WriteString(toolsPrompt(tools))
-				b.WriteString("\n")
-			}
+			b.WriteString(toolsPrompt(tools))
+			b.WriteString("\n")
+		}
 		for i, m := range req.Messages {
 			t := strings.TrimSpace(m.Text())
-			if i == lastIdx {
+			if !tailIsTool && i == lastUserIdx {
 				continue
 			}
 			// 工具历史消息格式化保留（即使 t 为空也处理 tool_calls 还原）
@@ -151,7 +158,11 @@ func buildChatBody(req *chatRequest, itemKey, effort, dev, memProfile, totalWind
 			b.WriteString("\n")
 		}
 		if b.Len() > 0 {
-			text = b.String() + "用户：" + lastUser
+			if tailIsTool {
+				text = b.String()
+			} else {
+				text = b.String() + "用户：" + lastUser
+			}
 		}
 	}
 

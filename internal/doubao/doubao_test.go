@@ -124,6 +124,30 @@ func TestStreamStreamError(t *testing.T) {
 	}
 }
 
+// TestStreamErrorClassified 🔴-4 回归（2026-11-15 审查）：流内业务错误必须带分类，
+// 裸 fmt.Errorf 会让 errors.As 取不到 StreamErrorClassifier ⇒ 首帧前错误不换号不冷却，
+// 还被 upstream.StreamCapture 标成 upstream_truncated（R108/R111 同款）。
+func TestStreamErrorClassified(t *testing.T) {
+	src := "id: 0\nevent: STREAM_ERROR\ndata: {\"code\":710022002,\"message\":\"请求频率过高\"}\n\n"
+	_, err := io.ReadAll(newDoubaoStream(strings.NewReader(src), "doubao/auto"))
+	if err == nil {
+		t.Fatal("STREAM_ERROR 必须报错")
+	}
+	var sec provider.StreamErrorClassifier
+	if !errors.As(err, &sec) {
+		t.Fatalf("流内错误必须是 StreamErrorClassifier（裸 error 不能换号）：%T %v", err, err)
+	}
+	if sec.Kind() != provider.ErrSoftRate {
+		t.Fatalf("限流码 710022002 应归 ErrSoftRate，实际：%v", sec.Kind())
+	}
+	// 未知码：落 ErrClient（可换号、不冷却），与 Classify 对未知 HTTP >=400 同裁定
+	src = "id: 0\nevent: STREAM_ERROR\ndata: {\"code\":999999,\"message\":\"未知\"}\n\n"
+	_, err = io.ReadAll(newDoubaoStream(strings.NewReader(src), "doubao/auto"))
+	if !errors.As(err, &sec) || sec.Kind() != provider.ErrClient {
+		t.Fatalf("未知流内码应归 ErrClient，实际：%v", err)
+	}
+}
+
 // TestStreamSamanthaRealFrames 用**真实抓到的帧**验证整条链（2026-11-15 实盘）。
 //
 // 最保值的回归：上游真实形态是 event_data 为 **JSON 字符串**、首帧是
