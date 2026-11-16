@@ -177,22 +177,23 @@ func TestTransactionsEmptyPoolKeepsExpiry(t *testing.T) {
 	}
 }
 
-// TestTransactionsIgnoresNonEarnAndExpired 只认**未到期**的 EARN：
-// SPEND_CONFIRM / EXPIRE 不参与拆分，已到期的 EARN 必须剔除（否则最早到期恒为过期笔）。
-func TestTransactionsIgnoresNonEarnAndExpired(t *testing.T) {
-	future := txStamp(4)
-	past := txStamp(-1)
+// TestTransactionsIgnoresNonEarn 只认 EARN：SPEND_CONFIRM / EXPIRE 不参与拆分
+// （它们用于对账，不单独成条）。
+//
+// 夹具刻意让非 EARN 行**更早到期**且池子大到需要动用两笔：若类型筛选失效，
+// 拆分条目会从 1 条变成 2 条（保证这条断言真能咬住类型筛选）。
+func TestTransactionsIgnoresNonEarn(t *testing.T) {
+	soon := txStamp(2)
+	later := txStamp(4)
 	f := &fakeSite{
-		balanceBody: `{"success":true,"data":{"total_balance":200,"available_balance":200,"frozen_amount":0}}`,
+		balanceBody: `{"success":true,"data":{"total_balance":450,"available_balance":450,"frozen_amount":0}}`,
 		usageBody:   fakeUsageBody,
 		txBody: txEnvelope(
-			earnRecord(past, 300),
-			// 非 EARN 行即便带上 expire_at 字段也不得被当成发放。
-			fmt.Sprintf(`{"gmt_created":"%s","type":"SPEND_CONFIRM","rule_key":"api_inference","total_amount":100,"count":1,"expire_at":"%s"}`,
-				time.Now().In(creditLoc).Format("2006-01-02"), future),
+			fmt.Sprintf(`{"gmt_created":"%s","type":"SPEND_CONFIRM","rule_key":"api_inference","total_amount":150,"count":1,"expire_at":"%s"}`,
+				time.Now().In(creditLoc).Format("2006-01-02"), soon),
 			fmt.Sprintf(`{"gmt_created":"%s","type":"EXPIRE","rule_key":"expire","total_amount":200,"count":2}`,
 				time.Now().In(creditLoc).Format("2006-01-02")),
-			earnRecord(future, 300),
+			earnRecord(later, 300),
 		),
 	}
 	c := newSiteClient(provider.ModelScope, f.start(t).URL, "ms-x")
@@ -207,10 +208,31 @@ func TestTransactionsIgnoresNonEarnAndExpired(t *testing.T) {
 		}
 	}
 	if len(split) != 1 {
-		t.Fatalf("拆分条目 = %d, want 1（只认未到期 EARN）: %+v", len(split), split)
+		t.Fatalf("拆分条目 = %d, want 1（非 EARN 行不得参与拆分）: %+v", len(split), split)
 	}
-	if split[0].Remain != 200 || split[0].ExpireAt != wantStamp(future) {
-		t.Fatalf("余额应挂在未到期的 EARN 上: %+v", split[0])
+	// 450 分池 + 只有一笔 300 的 EARN：余量 150 挂在这一笔上。
+	if split[0].Remain != 450 || split[0].ExpireAt != wantStamp(later) {
+		t.Fatalf("余额应全部挂在未到期 EARN 上: %+v", split[0])
+	}
+}
+
+// TestTransactionsDropsExpiredGrants 已到期的 EARN 必须剔除（否则「按到期升序」的
+// 第一笔永远是过期笔，今日到期恒为 0）。全部发放都已过期时退回「无到期信息」口径。
+func TestTransactionsDropsExpiredGrants(t *testing.T) {
+	f := &fakeSite{
+		balanceBody: `{"success":true,"data":{"total_balance":0,"available_balance":0,"frozen_amount":0}}`,
+		usageBody:   fakeUsageBody,
+		txBody:      txEnvelope(earnRecord(txStamp(-1), 300)),
+	}
+	c := newSiteClient(provider.ModelScope, f.start(t).URL, "ms-x")
+	_, items, err := c.UserResourceDetail(&auth.Auth{AccessToken: "ms-x"})
+	if err != nil {
+		t.Fatalf("UserResourceDetail: %v", err)
+	}
+	for _, it := range items {
+		if it.Name == itemNameUsable && it.ExpireAt != "" {
+			t.Fatalf("已过期的发放不得成为到期判据（ExpireAt = %q）", it.ExpireAt)
+		}
 	}
 }
 
