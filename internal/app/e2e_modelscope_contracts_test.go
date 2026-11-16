@@ -232,8 +232,8 @@ func TestE2E_US15_DocsSynced(t *testing.T) {
 			{"docs/决议项.md 标题", res},
 		}
 		for _, m := range marks {
-			if !strings.Contains(m.body, "R1–R159") {
-				t.Errorf("%s 缺范围标记 R1–R159", m.name)
+			if !strings.Contains(m.body, "R1–R160") {
+				t.Errorf("%s 缺范围标记 R1–R160", m.name)
 			}
 		}
 	})

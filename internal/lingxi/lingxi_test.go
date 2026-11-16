@@ -327,6 +327,44 @@ func TestAggregate(t *testing.T) {
 	}
 }
 
+// ppt_outline_text 是灵犀已实测的正文变体，不能按未知帧丢弃。
+const outlineSSE = "event: execution\n" +
+	`data: {"type":"ppt_outline_start","data":{}}` + "\n\n" +
+	"event: execution\n" +
+	`data: {"type":"ppt_outline_text","data":"# 第一行\n"}` + "\n\n" +
+	"event: execution\n" +
+	`data: {"type":"ppt_outline_text","data":"第二行"}` + "\n\n" +
+	"event: execution\n" +
+	`data: {"type":"ppt_outline_end","data":{}}` + "\n\n" +
+	"event: aigc\n" +
+	`data: {"type":"end","data":null}` + "\n\n"
+
+func TestAggregatePPTOutlineText(t *testing.T) {
+	out, err := New().Aggregate(strings.NewReader(outlineSSE), "lingxi/kimi-k3.1-pro")
+	if err != nil {
+		t.Fatalf("Aggregate: %v", err)
+	}
+	choices, _ := out["choices"].([]any)
+	choice, _ := choices[0].(map[string]any)
+	msg, _ := choice["message"].(map[string]any)
+	if msg["content"] != "# 第一行\n第二行" {
+		t.Fatalf("content = %q, want outline deltas joined", msg["content"])
+	}
+}
+
+func TestStreamPPTOutlineText(t *testing.T) {
+	w := httptest.NewRecorder()
+	if _, err := New().Stream(w, strings.NewReader(outlineSSE), "lingxi/kimi-k3.1-pro"); err != nil {
+		t.Fatalf("Stream: %v", err)
+	}
+	body := w.Body.String()
+	for _, want := range []string{`"content":"# 第一行\n"`, `"content":"第二行"`, `"finish_reason":"stop"`} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("stream missing %q in %s", want, body)
+		}
+	}
+}
+
 // 流内 error 帧 → StreamError（不是把错误当正文吐出）。
 // W1 回归（2026-10-29 审查）：文案「积分不足」必须分类为 ErrHardCredit——
 // 修复前 kind 恒 ErrPassthrough，流内耗尽/失效帧永远不触发换号与罚号。
