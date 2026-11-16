@@ -41,9 +41,11 @@ import (
 	"wild-work/internal/auth"
 	"wild-work/internal/config"
 	"wild-work/internal/glm"
+	"wild-work/internal/ledger"
 	"wild-work/internal/modelscope"
 	"wild-work/internal/pool"
 	"wild-work/internal/provider"
+	"wild-work/internal/scheduler"
 	"wild-work/internal/server"
 )
 
@@ -60,6 +62,9 @@ type e2eEnv struct {
 
 	cn, ai *msFake
 	glm    *glmStub
+	// site 主站假上游（魔粒余额/流水/今日用量/每日领取）。与对话假上游是**两个 host**，
+	// 正是「双 host 双鉴权」这条判据唯一能成立的装配方式（credits.go D7）。
+	site *msSite
 
 	cnPool, aiPool *pool.Pool
 	authDir        string
@@ -76,6 +81,14 @@ type e2eOptions struct {
 	AITokens  []string
 	GLM       *glmStub // 非 nil 时装配 glm 渠道（生图回归）
 	StickyMax int
+
+	// Site 非 nil 时装配主站假上游（两区共用）——额度/领取面全部落在它上面。
+	Site *msSite
+	// ExpiringDays 面板「临期」窗口（自然日，0 = 默认 1）。
+	ExpiringDays int
+	// CheckinMinutes 两区调度器的签到时刻（0 值取 []int{9*60}：必须是**非空**切片，
+	// 否则 finishCheckin 会跳过签到状态落盘，面板永远看不到结果，见 R150）。
+	CheckinMinutes []int
 }
 
 // 端口用本包既有的 freePort（session_test.go）：App.serveLocked 记的是配置里的地址串，
@@ -92,8 +105,11 @@ func newE2EEnv(t *testing.T, opt e2eOptions) *e2eEnv {
 	cfg.AuthDir = filepath.Join(dir, "auths")
 	cfg.AdminPass = "" // 面板不鉴权（环回 + 无密码 = 默认部署形态，R4）
 	cfg.Listen = config.Listen{Host: "127.0.0.1", Port: freePort(t)}
+	if opt.ExpiringDays > 0 {
+		cfg.Schedule.ExpiringDays = opt.ExpiringDays
+	}
 
-	env := &e2eEnv{t: t, cn: opt.CN, ai: opt.AI, glm: opt.GLM,
+	env := &e2eEnv{t: t, cn: opt.CN, ai: opt.AI, glm: opt.GLM, site: opt.Site,
 		authDir: cfg.AuthDir, stateDir: filepath.Dir(cfg.StateFile),
 		msUPs: map[provider.Kind]*modelscope.Client{}}
 
@@ -124,6 +140,16 @@ func newE2EEnv(t *testing.T, opt e2eOptions) *e2eEnv {
 
 	appRts := map[provider.Kind]*Runtime{}
 	srvRts := map[provider.Kind]*server.Runtime{}
+	// 流水记录器：与 App / scheduler 共用同一实例（main.go 同构）。提前建出来是为了让
+	// 调度器在 App.New 之前就挂到 Runtime 上——启动后补挂会与统计喂入器并发读写同一结构。
+	lg, err := ledger.New(filepath.Join(dir, "ledger"))
+	if err != nil {
+		t.Fatalf("建流水记录器失败: %v", err)
+	}
+	checkinMinutes := opt.CheckinMinutes
+	if checkinMinutes == nil {
+		checkinMinutes = []int{9 * 60}
+	}
 	addMS := func(kind provider.Kind, fake *msFake) {
 		if fake == nil {
 			return
@@ -149,10 +175,30 @@ func newE2EEnv(t *testing.T, opt e2eOptions) *e2eEnv {
 		}
 		up := modelscope.New(kind)
 		up.Base = fake.URL() // 唯一的上游注入点（Client.Base 是显式测试口）
+		if opt.Site != nil {
+			// 额度面走主站（另一个 host）：不设它的会是**真** modelscope.cn——绝不能在测试里发生。
+			up.SiteBase = opt.Site.URL()
+		}
 		up.HTTP.Timeout = 10 * time.Second
 		up.StreamHTTP.Transport = up.HTTP.Transport
 		env.msUPs[kind] = up
-		appRts[kind] = &Runtime{Kind: kind, Pool: p, Upstream: up}
+		rt := &Runtime{Kind: kind, Pool: p, Upstream: up}
+		// 调度器：与 main.go 同构（FollowGlobalCheckin + KeepaliveHours 显式空），供
+		// /api/account/checkin（票 04 每日领取三态）与「签到后刷余额」走真实链路。
+		// 只在装配了主站假上游时才建——无额度面的用例不该多一个依赖。
+		if opt.Site != nil {
+			rt.Scheduler = scheduler.New(scheduler.Config{
+				Pool:                p,
+				Upstream:            up,
+				Name:                kind.String(),
+				CheckinMinutes:      append([]int{}, checkinMinutes...),
+				KeepaliveHours:      []int{}, // ms- token 无 refresh 端点（R39 显式空切片）
+				FollowGlobalCheckin: true,
+				Ledger:              lg,
+				ExpiringDays:        opt.ExpiringDays,
+			})
+		}
+		appRts[kind] = rt
 		srvRts[kind] = &server.Runtime{Kind: kind, Pool: p, Upstream: up, StaticModels: modelscope.StaticModels()}
 	}
 	addMS(provider.ModelScope, opt.CN)
@@ -167,7 +213,7 @@ func newE2EEnv(t *testing.T, opt e2eOptions) *e2eEnv {
 		srvRts[provider.GLM] = &server.Runtime{Kind: provider.GLM, Pool: gp, Upstream: opt.GLM, StaticModels: glm.StaticModels()}
 	}
 
-	a, err := New(Options{ConfigPath: filepath.Join(dir, "config.json"), Config: cfg, Runtimes: appRts})
+	a, err := New(Options{ConfigPath: filepath.Join(dir, "config.json"), Config: cfg, Runtimes: appRts, Ledger: lg})
 	if err != nil {
 		t.Fatalf("App.New: %v", err)
 	}
@@ -181,7 +227,7 @@ func newE2EEnv(t *testing.T, opt e2eOptions) *e2eEnv {
 	stickyMax := opt.StickyMax
 	h := server.NewHandler(server.Config{
 		Runtimes:          srvRts,
-		Ledger:            a.Ledger(),
+		Ledger:            lg,
 		Stats:             a.Stats(), // 平台概览表 / 模型榜的数据面
 		AttachAPI:         a.HandleAPI,
 		SoftCooldown:      time.Minute,

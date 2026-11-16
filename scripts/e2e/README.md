@@ -57,12 +57,31 @@ node scripts/e2e/fallback-primary-overlap.mjs
 | 文件 | 职责 |
 |---|---|
 | `fallback-primary-overlap.mjs` | 具体套件：spec 的 17 条 user story，每条一个 story 块 |
+| `modelscope-credits.sh` | **Go 整机层**套件的可复跑入口（`internal/app/e2e_modelscope_*_test.go`，说明见下节） |
 | `lib/harness.mjs` | 起/停 daemon + 加载面板的编排、断言收集、彩色汇总 |
 | `lib/backend.mjs` | 编译与启停真 daemon（隔离 home、空闲端口、就绪探测、config 读写） |
 | `lib/panel.mjs` | 在最小 DOM 里求值真 app.js，并把「用户手势」封装成 `typeInlineAndEnter()` 这类入口 |
 | `lib/dom.mjs` | 最小 DOM：HTML 解析、元素查询、事件派发与冒泡 |
 
 写新套件时只加 `scripts/e2e/<feature>.mjs`，复用 `lib/`；不要复制 DOM 或后端编排。
+
+### 唯一的例外：`modelscope-credits.sh`（Go 整机层）
+
+它不满足本目录「真 daemon + 真 app.js」的范式，因为那套范式要求驱动**面板**；而 ModelScope
+魔粒额度面的失败面在**双 host 装配**上（额度端点挂在主站 `modelscope.cn`，对话挂在
+`api-inference.modelscope.*`），面板反而只是消费 `/api/state`。于是那层用例写在 Go 里
+（`internal/app/e2e_modelscope_{harness,site_fake,credits}_test.go`）：两台上游都是进程内
+`httptest`，App/server.Handler 起**真 TCP 端口**，断言用真 HTTP 打到 `/api/*`，就地验证
+「余额请求落在哪台 host、带哪种鉴权」这类只有装配层才看得见的证据。
+
+```bash
+bash scripts/e2e/modelscope-credits.sh          # 全部魔粒用例（-v）
+bash scripts/e2e/modelscope-credits.sh -run FIFO   # 附加参数原样透传给 go test
+```
+
+覆盖票 02（余额/今日用量/面板口径/失败保快照）、票 03（逐笔到期 FIFO 与 ΣRemain 对齐）、
+票 04（`claimed` / `already_claimed` / `no_campaign` 三态与文案）。**不联网、不打真上游**：
+凭据是假 token，两个 host 都是 httptest。
 
 ## 变异验证（本层是否真的有牙）
 
@@ -79,6 +98,16 @@ node scripts/e2e/fallback-primary-overlap.mjs
 
 US-14 是跨脚本护栏：它跑仓库既有的 `scripts/ui-static-check.mjs`，一旦有人把
 「主力/备胎互斥」加回去，两层同时变红。
+
+Go 整机层（`modelscope-credits.sh`）同样逐条验过：
+
+| 变异 | 变红的用例 |
+|---|---|
+| 领取前的流水复读失效（`already_claimed` 分支永不命中） | `DailyClaimThreeStates/already_claimed`（`login/info` 被调 1 次） |
+| `Remain` 取 `total_balance`（而非 `available_balance`） | `BalanceUsageAndPanel/明细`、`PerGrantExpiryFIFO`（ΣRemain ≠ available） |
+| 临期窗口未接线（`ExpiringDays=0` ⇒ 回退默认 1 天） | `BalanceUsageAndPanel/面板口径`、`PerGrantExpiryFIFO`（`expiring_credits` = 0） |
+| AI 区凭据加载改读 CN 目录（`LoadModelscopeAIDir` 串区） | `TwoZonesIndependent`（CN 账号数 2） |
+
 
 ## 已知限制
 
