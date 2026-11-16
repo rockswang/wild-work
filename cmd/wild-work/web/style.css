@@ -247,10 +247,12 @@ body {
 /* ===== 列表视图（卡片的替代形态） =====
    同一容器 #acctList 加 .list-mode 后由「两列卡片网格」退化为纵向块
    （否则表格会被网格的两条轨道挤成半宽）。表体按渠道分段（每段一个 tbody），
-   每段以跨列的分组行开头；表头唯一（thead 只在表顶部出现一次）。
+   **分组行已删除**（2026-11-16，R157 修订）：渠道合计只住汇总条，表内只有账号行。
+   表头唯一（thead 只在表顶部出现一次），列固定五列：平台 / 账号 / 积分 / 状态 / 操作。
    窄屏由 .tbl-scroll 横向滚动展示全部列，**不**隐藏列也不降级回卡片。 */
 .acct-grid.list-mode { display: block; }
 .tbl-scroll { overflow-x: auto; }
+/* min-width：本票（列 4 → 5）暂沿用四列时代的实测值 560px，待票 04 实测重定。 */
 .acct-table { width: 100%; border-collapse: collapse; font-size: 13px; min-width: 560px;
   /* 积分列的「单位带」宽度（闸 2 实测：最宽单位「可用积分」11px 字号 ≈44px，留 4px 间隙）。
      单位绝对定位在这一带内 ⇒ 不占列宽、不推移数字右缘；表头 .num 也用同一个变量对齐（见下）。 */
@@ -271,6 +273,15 @@ body {
    表头带上与数据格相同的单位带 + 自身 10px 内边距 ⇒ 差值为 0。 */
 .acct-table thead th.num { padding-right: calc(var(--acct-cred-unit) + 10px); }
 .acct-table tbody tr:last-child td { border-bottom: 0; }
+/* 平台列（只放渠道徽标一个元素）：徽标自带渠道名，故不再有重复显示名节点；
+   徽标不折行（渠道名长短不一，折行会把平台列的高度撑成账号列的两倍）。 */
+.acct-table .cell-platform { white-space: nowrap; }
+/* 账号列（昵称 + 第二行 UID）：长昵称折行而不撑破列宽（闸 2 实测 869px 阈值即按此）；
+   UID 跟着账号走（原先把徽章挤在同一格里，现在搬进独立列）。 */
+.acct-table .cell-acct { max-width: 220px; overflow-wrap: anywhere; }
+.acct-table .cell-acct .acct-name { font-weight: 600; font-size: 14px; }
+.acct-table .cell-acct .acct-name.editable { cursor: pointer; border-bottom: 1px dashed transparent; }
+.acct-table .cell-acct .acct-name.editable:hover { color: var(--primary); border-bottom-color: var(--primary); }
 .acct-table .cell-uid { font-size: 11px; color: var(--muted); }
 /* 积分格的排版在两视图下各自作用域（卡片走 .acct-card .acct-credits，既有规则勿动）：
    同样的分层——数字 / 单位小字 / 临期红 / 不可用灰 / 待刷新脉动。
@@ -304,20 +315,6 @@ body {
 .acct-table .cell-ops { white-space: nowrap; text-align: right; }
 .acct-table tr.disabled-row { opacity: .5; background: #f9fafb; }
 .acct-table tr.cooling-row td:first-child { box-shadow: inset 3px 0 0 var(--warn); }
-/* 分组行：一张表里唯一的渠道分隔（小计与汇总条 chip 同源渲染，见 app.js 的 channelSummaries）。 */
-.acct-table tr.group-row th { padding: 0; background: var(--bg); border-bottom: 1px solid var(--border); }
-.acct-group-head {
-  display: flex; align-items: center; gap: 8px; padding: 8px 10px;
-  font-size: 13px; white-space: nowrap;
-}
-.acct-group-head.clickable { cursor: pointer; }
-.acct-group-head.clickable:hover { background: #eff6ff; }
-.acct-group-head.clickable:focus-visible { outline: 2px solid var(--primary); outline-offset: -2px; }
-/* 分组行高亮 = 该渠道筛选选中（与汇总条 chip 的 .on 同一状态、同一真相） */
-.acct-group-head.on { background: #eff6ff; box-shadow: inset 3px 0 0 var(--primary); }
-.acct-group-head .g-name { font-weight: 600; }
-.acct-group-head .g-sub { display: inline-flex; align-items: center; gap: 4px; margin-left: 2px; }
-.acct-group-head .g-lbl { font-size: 11px; color: var(--muted); }
 
 /* 账号卡片网格 */
 .acct-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
@@ -1641,7 +1638,6 @@ select.input::-ms-expand, .select::-ms-expand { display: none; }
   .acct-table .cell-credits { font-size: 13px; }
   .acct-table .cell-tags { white-space: normal; }
   .acct-table .cell-tags .tag { max-width: 150px; }
-  .acct-group-head { padding: 6px; font-size: 12px; }
 }
 
 /* 4) 费率表：桌面每行两模型（模型|倍率|模型|倍率）；窄屏将同一 tr 的

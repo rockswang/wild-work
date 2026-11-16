@@ -1018,8 +1018,8 @@ const CH_SUMMARY_ORDER = Object.keys(CH_LABEL)
   .sort((a, b) => (chLabel(a) < chLabel(b) ? -1 : chLabel(a) > chLabel(b) ? 1 : 0));
 
 // channelSummaries 按渠道聚合账号 + 生成该渠道的摘要文案分支的**唯一**共享来源。
-// 汇总条 chip 是当前唯一消费者；后续「列表模式分组行小计」复用同一个函数，
-// 使「分组行与 chip 逐字同源」在结构上不可能漂移。
+// 汇总条 chip 是渠道小计的唯一住所（列表模式已无分组行，R157 修订）；
+// 表格不会再算第二份 —— 「渠道级数字只有一处」在结构上不可能漂移。
 // ⚠️ 聚合循环与文案分支必须同处一处：只抽聚合、把每种状态的渲染分支留给调用方，
 // 会留下「数字同源、角标各写一份」的半吊子状态（token 计量与「不适用」两条分支
 // 最容易在搬运时丢条件）。
@@ -1065,7 +1065,7 @@ function channelSummaries(accounts) {
 }
 
 // chSummariesOrder 渠道展示顺序（R142）：已知渠道按 CH_SUMMARY_ORDER，未登记的新渠道
-// （自定义渠道等）按渠道名升序**垫后**（保证不丢行）。汇总条与列表视图的分组行必须同序，
+// （自定义渠道等）按渠道名升序**垫后**（保证不丢行）。汇总条与列表视图的渠道块必须同序，
 // 两处各排一次必然漂移，故收口到这里。
 function chSummariesOrder(byCh) {
   return CH_SUMMARY_ORDER.filter((k) => byCh[k])
@@ -1231,10 +1231,6 @@ function applyAcctFilter() {
       .some((u) => !u.classList.contains("hidden"));
     grp.classList.toggle("hidden", !anyVisible);
   });
-  // 分组行高亮与汇总条 chip 同步：两处都从 acctFilter 派生，不各自维护状态。
-  grid.querySelectorAll(".acct-group-head").forEach((h) => {
-    h.classList.toggle("on", Boolean(acctFilter) && h.dataset.wg === acctFilter);
-  });
   // 全部卡片都被收起时给出可执行的提示：留一片空白会被当成「账号丢了」。
   const tip = $("acctHiddenTip");
   if (tip) {
@@ -1272,23 +1268,6 @@ function bindSummaryFilter() {
   });
 }
 
-// bindAcctListFilter 列表视图的分组行点击 = 筛选该渠道（等价于点汇总条上的同名 chip），
-// 键盘 Enter/Space 同效；再点同一条 = 取消（由 setAcctFilter 的幂等切换负责）。
-// 事件委托绑在账号容器上：分组行每次渲染都会重建；高亮同步由 applyAcctFilter 统一处理
-// （唯一真相 = acctFilter），这里只把点击转成筛选动作。
-function bindAcctListFilter() {
-  const el = $("acctList");
-  if (!el) return;
-  const pick = (target) => {
-    const head = target.closest(".acct-group-head");
-    if (!head) return;
-    setAcctFilter(head.dataset.wg || null);
-  };
-  el.addEventListener("click", (e) => pick(e.target));
-  el.addEventListener("keydown", (e) => {
-    if (e.key === "Enter" || e.key === " ") { e.preventDefault(); pick(e.target); }
-  });
-}
 // checkinPending 后端如实的「上游尚未发放」形态（CheckinNoCampaign）：调度器已跑过领取，
 // 只是上游这天没有可领的东西（ModelScope：「上游还没有发放」）。它不是失败（R150）——
 // 卡片必须显示中性文案，绝不能报红「签到失败」。
@@ -1465,9 +1444,11 @@ function acctCardHtml(a) {
     </div>`;
 }
 
-// acctRowHtml 列表模式下单个账号的行（四列：账号 / 积分 / 状态 / 操作）。
+// acctRowHtml 列表模式下单个账号的行（五列：平台 / 账号 / 积分 / 状态 / 操作）。
 // 行本身**不可点**（行内已有停用/删除等破坏性动作），只有积分单元格与昵称各自可点；
 // 状态徽标与操作按钮全部来自 acctParts —— 卡片上有的这里必须有，不另立一套。
+// 平台格**只有渠道徽标一个元素**（徽标自带渠道名，不再重复显示名；徽章/配色单一来源 R99）；
+// 昵称 + `UID: <短 uid>` 归账号格（UID 跟着账号走，不挪进平台格）。
 // 积分格刻意沿用卡片的语义类 acct-credits（+ 表格列类 cell-credits）：
 //   明细浮窗的「点另一个账号=切换不关」与「就地回写积分格」都认 acct-credits，
 //   列表里少这个类会让那两条链路静默失灵（spec 已知风险 ④：刻意复用卡片语义类名）。
@@ -1479,7 +1460,8 @@ function acctRowHtml(a) {
     + (p.naHidden ? " hidden" : "");
   return `
       <tr class="${cls}" data-group="${esc(a.group || "workbuddy")}" data-na="${isVirtualAcct(a) ? 1 : 0}">
-        <td class="cell-acct">${chBadge(a.group)}${p.nameHtml}<div class="cell-uid">UID: ${esc(shortUid(a.uid))}</div></td>
+        <td class="cell-platform">${chBadge(a.group)}</td>
+        <td class="cell-acct">${p.nameHtml}<div class="cell-uid">UID: ${esc(shortUid(a.uid))}</div></td>
         <td class="num cell-credits acct-credits${p.noCredits ? "" : " clickable"}" data-uid="${a.uid}"${p.noCredits ? "" : ` onclick="showCreditDetail(event,'${a.uid}')" title="点击查看积分明细（含分页）" role="button" tabindex="0" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();showCreditDetail(event,'${a.uid}')}"`}>${creditsTextRow(a)}</td>
         <td class="cell-tags">${p.tags}</td>
         <td class="cell-ops">${p.ops}</td>
@@ -1487,31 +1469,26 @@ function acctRowHtml(a) {
 }
 
 // acctGroupsHtml 列表视图的整表（**单表**）：唯一一处列名表头（thead），表体按渠道分段
-// ——每段一个 tbody（分组容器），首行是跨四列的分组行。
-//   · 空渠道不出现（分组键从 channelSummaries 派生，没有账号就没有键）；
-//   · 小计**只**消费 channelSummaries 的 c.body（与汇总条 chip 逐字同源，工单 01），
-//     这里不得再求一次和 —— 两处各算一份必然漂移；
+// ——每段一个 tbody（分组容器），容器内**只有账号行**。
+//   · 分组行（渠道标题 /「N 号」/ 该渠道小计）已于 2026-11-16 整体删除（R157 修订）：
+//     渠道合计只住上方汇总条，表格里一行渠道级数字都没有；
+//   · 分组键从 channelSummaries 派生（没有账号就没有键 ⇒ 空渠道不出现），
+//     但**不消费它的任何数字**（c.body / c.credits / c.tokens 一个都不用）——
+//     表格里再算一份小计必然与汇总条漂移，这是硬性反向护栏；
 //   · 分组顺序沿用 chSummariesOrder（R142：内建按显示名字节序、自定义垫底），
 //     分组内保持后端下发原序（不排序）。
 function acctGroupsHtml() {
   const byCh = channelSummaries(state.accounts);
   const groups = chSummariesOrder(byCh).map((k) => {
-    const c = byCh[k];
-    if (!c || !c.n) return "";
-    const on = acctFilter === k ? " on" : "";
-    const head = `<tr class="group-row"><th colspan="4">`
-      + `<div class="acct-group-head clickable${on}" data-wg="${esc(k)}" role="button" tabindex="0"`
-      + ` title="点击筛选该渠道账号，再次点击取消">${chBadge(k)}`
-      + `<span class="g-name">${esc(chLabel(k))}</span>`
-      + `<span class="cs-n">${c.n}号</span>`
-      + `<span class="g-sub"><span class="g-lbl">小计</span>${c.body}</span></div></th></tr>`;
+    if (!byCh[k]) return "";
     const rows = state.accounts
       .filter((a) => (a.group || "workbuddy") === k)
       .map(acctRowHtml).join("");
-    return `<tbody class="acct-group" data-group="${esc(k)}">${head}${rows}</tbody>`;
+    return `<tbody class="acct-group" data-group="${esc(k)}">${rows}</tbody>`;
   }).join("");
   return `<div class="tbl-scroll"><table class="acct-table" id="acctTable">`
-    + `<thead><tr><th class="col-acct">账号</th><th class="num">积分</th><th>状态</th><th class="col-ops">操作</th></tr></thead>`
+    + `<thead><tr><th class="col-platform">平台</th><th class="col-acct">账号</th>`
+    + `<th class="num col-credits">积分</th><th class="col-status">状态</th><th class="col-ops">操作</th></tr></thead>`
     + groups + `</table></div>`;
 }
 
@@ -4863,8 +4840,7 @@ function bindMainTabs() {
   });
 
   bindFeesTabs(); // 费率面板渠道标签切换（事件委托一次绑定）
-  bindSummaryFilter(); // 积分汇总条 chip 点击筛选账号（事件委托一次绑定）
-  bindAcctListFilter(); // 列表视图分组行点击 = 该渠道筛选（等价于点 chip）
+  bindSummaryFilter(); // 积分汇总条 chip 点击筛选账号（事件委托一次绑定；**唯一**筛选入口）
   // 功能按钮条的视图切换（卡片⇄列表）：按本地偏好回显高亮（默认卡片）。
   $("acctViewSeg").addEventListener("click", (e) => {
     const b = e.target.closest("[data-view]");
