@@ -31,6 +31,7 @@ import (
 	"wild-work/internal/login"
 	logincodearts "wild-work/internal/login_codearts"
 	"wild-work/internal/login_comate"
+	logindoubao "wild-work/internal/login_doubao"
 	logingemini "wild-work/internal/login_gemini"
 	"wild-work/internal/login_glm"
 	loginlingxi "wild-work/internal/login_lingxi"
@@ -45,6 +46,7 @@ import (
 	logintrae "wild-work/internal/login_trae"
 	"wild-work/internal/login_wbai"
 	loginzcode "wild-work/internal/login_zcode"
+	"wild-work/internal/doubao"
 	"wild-work/internal/loopguard"
 	"wild-work/internal/oczen"
 	"wild-work/internal/officeace"
@@ -145,6 +147,9 @@ type App struct {
 	// WPS Comate 扫码登录会话（服务端 HTTP，不需要桌面/浏览器；见 internal/login_comate）。
 	muComateLogin sync.Mutex
 	comateLogin   *logincomate.QRSession
+
+	muDoubaoLogin sync.Mutex
+	doubaoLogin   *logindoubao.QRSession
 	// comateBrowser 接管本机浏览器登录的会话（与扫码会话互斥使用，但各自独立存放：
 	// 用户可能先用扫码、再改用浏览器，两条会话不应互相清状态）。
 	comateBrowser *logincomate.BrowserSession
@@ -2053,6 +2058,167 @@ func (a *App) CancelComateQRLogin() error {
 	return nil
 }
 
+// ---------- 豆包：扫码登录 ----------
+
+// StartDoubaoQRLogin 发起豆包「扫码登录」：服务端向 passport 申请二维码，
+// 面板用 <img> 显示，用户用豆包 App 扫码确认后服务端自己收 Cookie 并落盘。
+//
+// 为什么不像 raccoon 那样用 CDP 拉浏览器：CDP 只能拉起「运行 wild-work 的那台机器」
+// 的浏览器，WSL / NAS / systemd 没有桌面时窗口永远弹不出来（用户实测踩过）。
+// 豆包的扫码链路是纯 HTTP，与部署环境无关（与 Comate 二维码登录同范式，R132）。
+func (a *App) StartDoubaoQRLogin() error {
+	a.muDoubaoLogin.Lock()
+	defer a.muDoubaoLogin.Unlock()
+	if a.doubaoLogin != nil {
+		switch a.doubaoLogin.State() {
+		case logindoubao.StatePending, logindoubao.StateScanned:
+			return errors.New("已有豆包扫码登录进行中，请在手机上完成确认，或先取消")
+		}
+	}
+	sess, err := logindoubao.Start(func(r logindoubao.Result) error {
+		_, _, werr := a.SubmitDoubaoCookie(r.Cookie)
+		return werr
+	})
+	if err != nil {
+		return err
+	}
+	a.doubaoLogin = sess
+	return nil
+}
+
+// GetDoubaoQRLoginStatus 查询扫码登录状态。
+func (a *App) GetDoubaoQRLoginStatus() map[string]any {
+	a.muDoubaoLogin.Lock()
+	sess := a.doubaoLogin
+	a.muDoubaoLogin.Unlock()
+	if sess == nil {
+		return map[string]any{"state": "idle"}
+	}
+	return sess.Snapshot()
+}
+
+// CancelDoubaoQRLogin 取消扫码登录。
+func (a *App) CancelDoubaoQRLogin() error {
+	a.muDoubaoLogin.Lock()
+	sess := a.doubaoLogin
+	a.muDoubaoLogin.Unlock()
+	if sess == nil {
+		return errors.New("没有进行中的豆包登录")
+	}
+	sess.Cancel()
+	return nil
+}
+
+// SubmitDoubaoCookie 校验并保存一份豆包登录 Cookie（扫码与手工粘贴共用）。
+//
+// 返回 (uid, warn, error)。校验判据是**额度接口能通**（doubao.VerifyCookie），
+// 不是「Cookie 里有没有 sessionid」——后者可能拿到预登录凭据（R128 同款纪律）。
+func (a *App) SubmitDoubaoCookie(raw string) (string, string, error) {
+	cookie := doubao.NormalizeCookie(raw)
+	if cookie == "" {
+		return "", "", errors.New("Cookie 不能为空")
+	}
+	if doubao.SessionIDOf(cookie) == "" {
+		return "", "", errors.New("Cookie 里没有 sessionid（请从豆包网页登录态里复制完整 Cookie）")
+	}
+	uid := doubao.UIDOfCookie(cookie)
+
+	// 同账号检测：与已入库豆包账号的 uid 比对（uid 由 sessionid 派生，
+	// 同一账号重复扫码会落到同一个 uid，提示而不重复入账）。
+	warn := ""
+	if existing, lerr := auth.LoadDoubaoDir(a.cfg.AuthDir); lerr == nil {
+		for _, e := range existing {
+			if e.UID == uid {
+				warn = fmt.Sprintf("这个豆包账号（%s）已经添加过了，本次会用新 Cookie 更新它。", shortUID(uid))
+				break
+			}
+		}
+	}
+
+	// 昵称优先保留用户改过的（同 comate 的 comateNicknameFor 思路）；
+	// 上游没有可用的身份端点，故取不到就退回 uid 尾号，不编造。
+	prevNick := ""
+	if existing, lerr := auth.LoadDoubaoDir(a.cfg.AuthDir); lerr == nil {
+		for _, e := range existing {
+			if e.UID == uid {
+				prevNick = e.Nickname
+				break
+			}
+		}
+	}
+	nick := prevNick
+	if strings.HasPrefix(nick, doubaoNickPrefix) || nick == "" {
+		nick = doubaoNickname(uid)
+	}
+
+	if verr := doubao.VerifyCookie(cookie); verr != nil {
+		return "", "", fmt.Errorf("豆包登录态校验未通过：%v", verr)
+	}
+
+	_ = os.MkdirAll(a.cfg.AuthDir, 0o755)
+	// 设备指纹：每次登录生成**新**的一套（参考实现同思路——不复用旧身份的风控分），
+	// 并随凭据持久化，保证同一账号每次请求是同一套设备。三个字段的形状上游会校验，
+	// 不对直接回 710020202（2026-11-15 实测）。
+	devID, webID, fp := doubao.GenerateDeviceParams()
+	da := &auth.Auth{
+		Kind:        "doubao",
+		UID:         uid,
+		Nickname:    nick,
+		AccessToken: cookie,
+		// Cookie 无过期概念：远期值，0 会让 NeedsRefresh 恒真（不变量 21 同款陷阱）
+		ExpiresAt: farFutureExpiry(),
+		FilePath:  filepath.Join(a.cfg.AuthDir, "doubao-"+uid+".json"),
+		Extra: map[string]string{
+			doubao.ExtraCookie:   cookie,
+			doubao.ExtraDeviceID: devID,
+			doubao.ExtraWebID:    webID,
+			doubao.ExtraFP:       fp,
+		},
+	}
+	if err := da.SaveAtomic(); err != nil {
+		return "", "", fmt.Errorf("保存豆包凭据失败：%w", err)
+	}
+	// 日志零 token（不变量 2）：只打 uid，绝不打 Cookie
+	log.Printf("doubao 账号已添加（扫码/粘贴）uid=%s", uid)
+	a.reloadAccounts()
+	a.afterAccountAdded(provider.Doubao)
+	// 首次签到：让当日积分马上落账（与 raccoon/comate 登录后补签同思路）。
+	a.safeGo(func() { a.firstCheckinDoubao(uid) })
+	return uid, warn, nil
+}
+
+// farFutureExpiry 远期过期时间（Cookie 无过期概念；0 会让 NeedsRefresh 恒真）。
+func farFutureExpiry() int64 { return time.Now().AddDate(80, 0, 0).Unix() }
+
+// doubaoNickPrefix 占位昵称前缀.
+const doubaoNickPrefix = "豆包账号"
+
+// doubaoNickname 兜底昵称（uid 尾号 6 位）。
+func doubaoNickname(uid string) string {
+	if len(uid) <= 6 {
+		return doubaoNickPrefix
+	}
+	return doubaoNickPrefix + " " + uid[len(uid)-6:]
+}
+
+// firstCheckinDoubao 登录后补一次签到（异步，失败只记日志不阻塞）。
+func (a *App) firstCheckinDoubao(uid string) {
+	rt := a.runtime(provider.Doubao)
+	if rt == nil || rt.Pool == nil {
+		return
+	}
+	acct := rt.Pool.AuthByUID(uid)
+	if acct == nil {
+		return
+	}
+	rep, err := rt.Upstream.(provider.CheckinReporter).DailyCheckinReport(acct)
+	if err != nil {
+		log.Printf("doubao 首次签到失败 uid=%s err=%v", uid, err)
+		return
+	}
+	log.Printf("doubao 首次签到完成 uid=%s status=%s msg=%s", uid, rep.Status, rep.Msg)
+}
+
 // ComateBrowserInfo 报告「用本机浏览器登录」这条路是否可用。
 //
 // configured=false（没配 login.comate_browser_cdp）时前端根本不显示入口；
@@ -2484,6 +2650,17 @@ func (a *App) reloadAccounts() {
 		auths, err := auth.LoadRaccoonDir(a.cfg.AuthDir)
 		if err != nil {
 			log.Printf("reload raccoon accounts: %v", err)
+		} else {
+			rt.Pool.SyncToDir(auths)
+		}
+	}
+	// 豆包：扫码/粘贴落盘后必须在这里重新入池，否则账号在面板上不出现
+	// （2026-11-15 漏过：只在 main.go 启动路径加了加载，reloadAccounts 漏掉，
+	// 表现为「日志说账号已添加，面板就是没有」）。
+	if rt := a.runtime(provider.Doubao); rt != nil && rt.Pool != nil {
+		auths, err := auth.LoadDoubaoDir(a.cfg.AuthDir)
+		if err != nil {
+			log.Printf("reload doubao accounts: %v", err)
 		} else {
 			rt.Pool.SyncToDir(auths)
 		}
@@ -4415,6 +4592,41 @@ func (a *App) HandleAPI(mux *http.ServeMux) {
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "uid": uid, "warning": warn})
 	})
 	// Comate 扫码登录（服务端申请二维码，手机确认后自动拿 wps_sid）：三段式。
+	mux.HandleFunc("POST /api/login/doubao_qr", func(w http.ResponseWriter, r *http.Request) {
+		if err := a.StartDoubaoQRLogin(); err != nil {
+			apiError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, a.GetDoubaoQRLoginStatus())
+	})
+	mux.HandleFunc("GET /api/login/doubao_qr_status", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, http.StatusOK, a.GetDoubaoQRLoginStatus())
+	})
+	mux.HandleFunc("POST /api/login/doubao_qr_cancel", func(w http.ResponseWriter, r *http.Request) {
+		if err := a.CancelDoubaoQRLogin(); err != nil {
+			apiError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+	})
+	// 手工粘贴 Cookie 兜底：扫码不可用（如面板打不开图片）时，用户可从浏览器
+	// DevTools 复制完整 Cookie 粘进来。校验与扫码共用 SubmitDoubaoCookie。
+	mux.HandleFunc("POST /api/login/doubao_cookie", func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Cookie string `json:"cookie"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		uid, warn, err := a.SubmitDoubaoCookie(req.Cookie)
+		if err != nil {
+			apiError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		out := map[string]any{"ok": true, "uid": uid}
+		if warn != "" {
+			out["warning"] = warn
+		}
+		writeJSON(w, http.StatusOK, out)
+	})
 	mux.HandleFunc("POST /api/login/comate_qr", func(w http.ResponseWriter, r *http.Request) {
 		if err := a.StartComateQRLogin(); err != nil {
 			apiError(w, http.StatusBadRequest, err.Error())

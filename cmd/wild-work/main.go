@@ -42,6 +42,7 @@ import (
 	"wild-work/internal/glm"
 	"wild-work/internal/kilo"
 	"wild-work/internal/ledger"
+	"wild-work/internal/doubao"
 	"wild-work/internal/lingxi"
 	"wild-work/internal/lobsterai"
 	"wild-work/internal/loomy"
@@ -186,6 +187,7 @@ func main() {
 	}
 	// 小浣熊：导入型渠道，凭据由面板「从本机客户端导入」或浏览器授权登录写入 auths/。
 	rcAuths, err := auth.LoadRaccoonDir(cfg.AuthDir)
+	dbAuths, err := auth.LoadDoubaoDir(cfg.AuthDir)
 	if err != nil {
 		fatal("读取小浣熊账号目录失败：%v", err)
 	}
@@ -249,8 +251,8 @@ func main() {
 	if err != nil {
 		fatal("读取 CodeArts 账号目录失败：%v", err)
 	}
-	log.Printf("loaded accounts: workbuddy=%d %s, traework=%d, qoder=%d, qodercn=%d, qodercom=%d, workbuddyai=%d, qwenwork=%d, glm=%d, monkeycode=%d, raccoon=%d, loomy=%d, cline=%d, comate=%d, lingxi=%d, officeace=%d, oczen=%d(匿名), kilo=%d(匿名), minimax=%d, lobsterai=%d, zcode=%d, gemini=%d, codearts=%d from %s",
-		len(wbAuths), cfg.Region, len(trAuths), len(qdAuths), len(qcnAuths), len(qcmAuths), len(wbaAuths), len(qwAuths), len(glmAuths), len(mcAuths), len(rcAuths), len(lmAuths), len(clAuths), len(cmAuths), len(lxAuths), len(oaAuths), len(ocAuths), len(kiAuths), len(mimAuths), len(lobAuths), len(zcdAuths), len(gemAuths), len(caAuths), cfg.AuthDir)
+	log.Printf("loaded accounts: workbuddy=%d %s, traework=%d, qoder=%d, qodercn=%d, qodercom=%d, workbuddyai=%d, qwenwork=%d, glm=%d, monkeycode=%d, raccoon=%d, loomy=%d, cline=%d, comate=%d, lingxi=%d, officeace=%d, oczen=%d(匿名), kilo=%d(匿名), minimax=%d, lobsterai=%d, zcode=%d, gemini=%d, codearts=%d, doubao=%d from %s",
+		len(wbAuths), cfg.Region, len(trAuths), len(qdAuths), len(qcnAuths), len(qcmAuths), len(wbaAuths), len(qwAuths), len(glmAuths), len(mcAuths), len(rcAuths), len(lmAuths), len(clAuths), len(cmAuths), len(lxAuths), len(oaAuths), len(ocAuths), len(kiAuths), len(mimAuths), len(lobAuths), len(zcdAuths), len(gemAuths), len(caAuths), len(dbAuths), cfg.AuthDir)
 
 	wbPool := pool.New(filepath.Join(stateDir, "state-workbuddy.json"))
 	for _, a := range wbAuths {
@@ -297,6 +299,10 @@ func main() {
 	rcPool := pool.New(filepath.Join(stateDir, "state-raccoon.json"))
 	for _, a := range rcAuths {
 		rcPool.Add(a)
+	}
+	dbPool := pool.New(filepath.Join(stateDir, "state-doubao.json"))
+	for _, a := range dbAuths {
+		dbPool.Add(a)
 	}
 	lmPool := pool.New(filepath.Join(stateDir, "state-loomy.json"))
 	for _, a := range lmAuths {
@@ -387,6 +393,12 @@ func main() {
 	mcUp.HTTP.Timeout = time.Duration(cfg.Upstream.TimeoutSeconds) * time.Second
 	// 等响应头上限由 NewWithTimeout 统一算（≥180s，R118）；总超时仍取 upstream.timeout_seconds。
 	rcUp := raccoon.NewWithTimeout(time.Duration(cfg.Upstream.TimeoutSeconds) * time.Second)
+	dbUp := doubao.New()
+	dbUp.HTTP.Timeout = time.Duration(cfg.Upstream.TimeoutSeconds) * time.Second
+	// 会话焚化：按 UID 反查凭据（焚化在后台 goroutine，不能持 pool 锁）。
+	doubao.SetAuthLookup(func(uid string) *auth.Auth {
+		return dbPool.AuthByUID(uid)
+	})
 	lmUp := loomy.New()
 	lmUp.HTTP.Timeout = time.Duration(cfg.Upstream.TimeoutSeconds) * time.Second
 	clUp := cline.New()
@@ -482,6 +494,7 @@ func main() {
 		provider.QwenWork.String():    {qwUp.HTTP, qwUp.StreamHTTP},
 		provider.MonkeyCode.String():  {mcUp.HTTP, mcUp.StreamHTTP},
 		provider.Raccoon.String():     {rcUp.HTTP, rcUp.StreamHTTP},
+		provider.Doubao.String():      {dbUp.HTTP, dbUp.StreamHTTP},
 		provider.Loomy.String():       {lmUp.HTTP, lmUp.StreamHTTP},
 		provider.Cline.String():       {clUp.HTTP, clUp.StreamHTTP},
 		provider.Comate.String():      {cmUp.HTTP, cmUp.StreamHTTP},
@@ -556,6 +569,11 @@ func main() {
 	// 故**不设 CheckinRetryUntil**（窗口重试是为「活动尚未创建」设计的，本渠道无此语义）。
 	rcSch := scheduler.New(scheduler.Config{Pool: rcPool, Upstream: rcUp, Name: "raccoon", FollowGlobalCheckin: true,
 		CheckinMinutes: checkinMinutes, KeepaliveHours: []int{1, 5, 9, 13, 17, 21}, Ledger: lg})
+	// 豆包：签到走工作模式活动（pc_incentive_task_mvp_v3），积分是「窗口限额」口径。
+	// 上游无 refresh 端点 ⇒ KeepaliveHours 显式空切片（保活没有可刷的东西，
+	// 空跑只会记噪音；Cookie 失效由请求路径上的 401 → ErrSessionDead 兜底转面板重登）。
+	dbSch := scheduler.New(scheduler.Config{Pool: dbPool, Upstream: dbUp, Name: "doubao", FollowGlobalCheckin: true,
+		CheckinMinutes: checkinMinutes, KeepaliveHours: []int{}, Ledger: lg})
 	// Loomy：已实现签到（宠物每日打工奖励，POST /api/v1/pet-work/rewards，
 	// 见 internal/loomy/checkin.go）——判据是该账号当日**有效对话轮次**（上游算），
 	// 故未在官方客户端用过该账号时结果是「未达档位」（如实可重试状态）。
@@ -638,6 +656,7 @@ func main() {
 		provider.QwenWork:   {Kind: provider.QwenWork, Pool: qwPool, Upstream: qwUp, StaticModels: qwenwork.StaticModels()},
 		provider.MonkeyCode: {Kind: provider.MonkeyCode, Pool: mcPool, Upstream: mcUp, StaticModels: monkeycode.StaticModels()},
 		provider.Raccoon:    {Kind: provider.Raccoon, Pool: rcPool, Upstream: rcUp, StaticModels: raccoon.StaticModels()},
+		provider.Doubao:     {Kind: provider.Doubao, Pool: dbPool, Upstream: dbUp, StaticModels: doubao.StaticModels()},
 		provider.Loomy:      {Kind: provider.Loomy, Pool: lmPool, Upstream: lmUp, StaticModels: loomy.StaticModels()},
 		provider.GLM:        {Kind: provider.GLM, Pool: glmPool, Upstream: glmUp, StaticModels: glm.StaticModels()},
 		provider.Cline:      {Kind: provider.Cline, Pool: clPool, Upstream: clUp, StaticModels: cline.StaticModels()},
@@ -685,6 +704,7 @@ func main() {
 		provider.QwenWork:    {Kind: provider.QwenWork, Pool: qwPool, Upstream: qwUp, Scheduler: qwSch},
 		provider.MonkeyCode:  {Kind: provider.MonkeyCode, Pool: mcPool, Upstream: mcUp, Scheduler: mcSch},
 		provider.Raccoon:     {Kind: provider.Raccoon, Pool: rcPool, Upstream: rcUp, Scheduler: rcSch},
+		provider.Doubao:      {Kind: provider.Doubao, Pool: dbPool, Upstream: dbUp, Scheduler: dbSch},
 		provider.Loomy:       {Kind: provider.Loomy, Pool: lmPool, Upstream: lmUp, Scheduler: lmSch},
 		provider.GLM:         {Kind: provider.GLM, Pool: glmPool, Upstream: glmUp, Scheduler: glmSch},
 		provider.Cline:       {Kind: provider.Cline, Pool: clPool, Upstream: clUp, Scheduler: clSch},
@@ -732,6 +752,8 @@ func main() {
 	// 结果必须写日志——面板的「签到成功/失败」标签与 stats 的签到收入都读日志。
 	rcSch.SetCheckinObserver(func(r scheduler.CheckinResult) { appInst.NotifyCheckin("raccoon", r) })
 	rcSch.SetRefreshObserver(func(uid string, ok bool, msg string) { appInst.NotifyRefresh("raccoon", uid, ok, msg) })
+	dbSch.SetCheckinObserver(func(r scheduler.CheckinResult) { appInst.NotifyCheckin("doubao", r) })
+	dbSch.SetRefreshObserver(func(uid string, ok bool, msg string) { appInst.NotifyRefresh("doubao", uid, ok, msg) })
 	oaSch.SetCheckinObserver(func(r scheduler.CheckinResult) { appInst.NotifyCheckin("officeace", r) })
 	oaSch.SetRefreshObserver(func(uid string, ok bool, msg string) { appInst.NotifyRefresh("officeace", uid, ok, msg) })
 
@@ -860,6 +882,7 @@ func main() {
 	go qcmSch.Run(sctx)
 	go mcSch.Run(sctx)
 	go rcSch.Run(sctx)
+	go dbSch.Run(sctx)
 	go lmSch.Run(sctx)
 	go ocSch.Run(sctx)
 	// ⚠️ 新增渠道时必须在这里补 Run()。
@@ -905,6 +928,8 @@ func main() {
 		provider.MonkeyCode,
 		provider.Raccoon,
 		provider.Loomy,
+		// 豆包：额度是窗口限额口径（quota/summary），不刷面板永远显示 0。
+		provider.Doubao,
 		// MiniMax 有 credit/details 额度端点：不纳入就永远显示 0（面板看不到真实余额）。
 		provider.Minimax,
 		// LobsterAI 有 profile-summary 额度端点，同理必须纳入。

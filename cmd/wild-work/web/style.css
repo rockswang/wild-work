@@ -40,6 +40,7 @@
   --ch-zcode: #581c87;       /* ZCode 极客深紫檀 */
   --ch-gemini: #88117c;      /* Gemini 官方星云品紫 */
   --ch-codearts: #991b1b;    /* CodeArts 华为云深绯红 */
+  --ch-doubao: #7c2742;      /* 豆包 酒红/勃艮第（ByteDance Doubao；新增色，实测最近邻 Gemini ΔE2000=15.7，避开 loomy/minimax 暖橙与 lingxi/qodercom 紫） */
 }
 
 * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -147,6 +148,7 @@ body {
 .btn.primary.alt.cline { background: var(--ch-cline); border-color: var(--ch-cline); }
 .btn.primary.alt.comate { background: var(--ch-comate); border-color: var(--ch-comate); }
 .btn.primary.alt.lingxi { background: var(--ch-lingxi); border-color: var(--ch-lingxi); }
+.btn.primary.alt.doubao { background: var(--ch-doubao); border-color: var(--ch-doubao); }
 .btn.primary.alt.custom { background: var(--ch-custom); border-color: var(--ch-custom); }
 
 /* 智谱清言登录弹层步骤列表 */
@@ -155,6 +157,10 @@ body {
 .glm-steps a { color: var(--primary); }
 
 /* Comate 扫码登录：二维码就地展示（服务端申请，不依赖桌面/浏览器） */
+.doubao-qr-box { display: flex; justify-content: center; margin: 10px 0 6px; }
+.doubao-qr { width: 180px; height: 180px; border: 1px solid var(--border); border-radius: 8px; background: #fff; image-rendering: pixelated; }
+.doubao-qr-empty { width: 180px; height: 180px; display: flex; align-items: center; justify-content: center;
+  border: 1px dashed var(--border); border-radius: 8px; color: var(--muted); font-size: 12px; text-align: center; }
 .comate-qr-box { display: flex; justify-content: center; margin: 10px 0 6px; }
 .comate-qr { width: 180px; height: 180px; border: 1px solid var(--border); border-radius: 8px; background: #fff; image-rendering: pixelated; }
 .comate-qr-empty { width: 180px; height: 180px; display: flex; align-items: center; justify-content: center;
@@ -272,6 +278,7 @@ body {
 .badge.cline { background: var(--ch-cline); }
 .badge.comate { background: var(--ch-comate); }
 .badge.lingxi { background: var(--ch-lingxi); }
+.badge.doubao { background: var(--ch-doubao); }
 .badge.custom { background: var(--ch-custom); }
 
 .tag { font-size: 10px; padding: 2px 7px; border-radius: 10px; white-space: nowrap; }

@@ -747,8 +747,8 @@ function renderTopbar() {
 }
 
 // 渠道显示名与 CSS 短类名（后端 group / 费率 channel 均为 provider.Kind）。
-const CH_LABEL = { workbuddy: "WorkBuddyCN", workbuddyai: "WorkBuddyAI", traework: "TraeWork", traecode: "TraeCode", qoder: "Qoder", qodercn: "QoderCN", qodercom: "QoderCOM", qwenwork: "千问办公", glm: "智谱清言", monkeycode: "MonkeyCode", raccoon: "小浣熊", loomy: "Loomy", oczen: "OpenCodeZen", kilo: "Kilo", minimax: "MiniMax", lobsterai: "LobsterAI", zcode: "ZCode", gemini: "Gemini", codearts: "CodeArts", cline: "Cline", officeace: "OfficeAce", comate: "WPS Comate", lingxi: "WPS 灵犀" };
-const CH_CLASS = { workbuddy: "wb", workbuddyai: "wbai", traework: "trae", traecode: "traecode", qoder: "qoder", qodercn: "qodercn", qodercom: "qodercom", qwenwork: "qwenwork", glm: "glm", monkeycode: "monkeycode", raccoon: "raccoon", loomy: "loomy", oczen: "oczen", kilo: "kilo", minimax: "minimax", lobsterai: "lobsterai", zcode: "zcode", gemini: "gemini", codearts: "codearts", cline: "cline", officeace: "officeace", comate: "comate", lingxi: "lingxi" };
+const CH_LABEL = { workbuddy: "WorkBuddyCN", workbuddyai: "WorkBuddyAI", traework: "TraeWork", traecode: "TraeCode", qoder: "Qoder", qodercn: "QoderCN", qodercom: "QoderCOM", qwenwork: "千问办公", glm: "智谱清言", monkeycode: "MonkeyCode", raccoon: "小浣熊", loomy: "Loomy", oczen: "OpenCodeZen", kilo: "Kilo", minimax: "MiniMax", lobsterai: "LobsterAI", zcode: "ZCode", gemini: "Gemini", codearts: "CodeArts", cline: "Cline", officeace: "OfficeAce", comate: "WPS Comate", lingxi: "WPS 灵犀", doubao: "豆包" };
+const CH_CLASS = { workbuddy: "wb", workbuddyai: "wbai", traework: "trae", traecode: "traecode", qoder: "qoder", qodercn: "qodercn", qodercom: "qodercom", qwenwork: "qwenwork", glm: "glm", monkeycode: "monkeycode", raccoon: "raccoon", loomy: "loomy", oczen: "oczen", kilo: "kilo", minimax: "minimax", lobsterai: "lobsterai", zcode: "zcode", gemini: "gemini", codearts: "codearts", cline: "cline", officeace: "officeace", comate: "comate", lingxi: "lingxi", doubao: "doubao" };
 const chLabel = (k) => CH_LABEL[k] || k;
 const chClass = (k) => CH_CLASS[k] || "custom";
 // ---------- 图表配色：与徽章同源，但保证同图任意两条线颜色可辨 ----------
@@ -2299,6 +2299,109 @@ function cancelGLMLogin() {
 let comatePoll = null;
 
 // 打开 Comate 添加弹层：直接申请二维码（少点一次按钮）。
+// ---------- 豆包：扫码登录 ----------
+
+function openDoubaoDialog() {
+  $("doubaoErr").textContent = "";
+  $("doubaoCookieErr").textContent = "";
+  $("doubaoCookieInput").value = "";
+  $("doubaoManual").classList.add("hidden");
+  $("btnDoubaoManualToggle").textContent = "展开手工方式";
+  $("doubaoQrImg").classList.add("hidden");
+  $("doubaoQrEmpty").classList.remove("hidden");
+  $("doubaoQrStatus").textContent = "正在申请二维码…";
+  $("doubaoOverlay").classList.remove("hidden");
+  startDoubaoQr();
+}
+
+function closeDoubaoDialog() {
+  stopDoubaoPoll();
+  $("doubaoOverlay").classList.add("hidden");
+  // 没有进行中的会话时后端会回 400，属正常情况，静默即可。
+  api("/api/login/doubao_qr_cancel", {}).catch(() => {});
+}
+
+// startDoubaoQr 申请（或重新申请）一张二维码并开始轮询扫码状态。
+function startDoubaoQr() {
+  stopDoubaoPoll();
+  $("doubaoErr").textContent = "";
+  $("doubaoQrStatus").textContent = "正在申请二维码…";
+  $("doubaoQrImg").classList.add("hidden");
+  $("doubaoQrEmpty").classList.remove("hidden");
+  api("/api/login/doubao_qr", {})
+    .then((st) => { renderDoubaoQr(st); startDoubaoPoll(); })
+    .catch((e) => {
+      $("doubaoQrStatus").textContent = "";
+      $("doubaoQrEmpty").textContent = "二维码申请失败";
+      $("doubaoErr").textContent = (e.message || "申请二维码失败") + "（可用下方手工粘贴 Cookie）";
+      $("doubaoManual").classList.remove("hidden");
+    });
+}
+
+// renderDoubaoQr 把后端状态画到弹层上（二维码图片、扫码进度）。
+function renderDoubaoQr(st) {
+  if (!st) return;
+  if (st.qr) {
+    const img = $("doubaoQrImg");
+    // 上游每次换新二维码都是一个新地址，直接按值比较判断是否要重载。
+    if (img.getAttribute("src") !== st.qr) img.setAttribute("src", st.qr);
+    img.classList.remove("hidden");
+    $("doubaoQrEmpty").classList.add("hidden");
+  }
+  if (st.state === "scanned") {
+    $("doubaoQrStatus").textContent = st.hint || "已扫码，请在手机上确认登录";
+  } else if (st.state === "pending") {
+    $("doubaoQrStatus").textContent = "用手机豆包 App「扫一扫」扫描二维码";
+  }
+}
+
+let doubaoPoll = null;
+
+function startDoubaoPoll() {
+  stopDoubaoPoll();
+  doubaoPoll = setInterval(async () => {
+    try {
+      const st = await api("/api/login/doubao_qr_status");
+      renderDoubaoQr(st);
+      if (st.state === "success") {
+        stopDoubaoPoll();
+        $("doubaoQrStatus").textContent = `✅ 已添加账号：${st.uid}`;
+        toast("豆包账号已添加");
+        await loadState();
+        refreshFees();
+        setTimeout(() => closeDoubaoDialog(), 1200);
+      } else if (st.state === "failed") {
+        stopDoubaoPoll();
+        $("doubaoQrStatus").textContent = "";
+        $("doubaoErr").textContent = (st.error || "登录失败") + "（可用下方手工粘贴 Cookie）";
+        $("doubaoManual").classList.remove("hidden");
+      } else if (st.state === "cancelled" || st.state === "idle") {
+        stopDoubaoPoll();
+      }
+    } catch (e) { /* 忽略瞬时错误 */ }
+  }, 1500);
+}
+
+function stopDoubaoPoll() {
+  if (doubaoPoll) { clearInterval(doubaoPoll); doubaoPoll = null; }
+}
+
+// submitDoubaoCookie 手工粘贴 Cookie：与扫码共用后端的同一条校验/落盘通道。
+async function submitDoubaoCookie() {
+  const raw = $("doubaoCookieInput").value || "";
+  $("doubaoCookieErr").textContent = "";
+  try {
+    const r = await api("/api/login/doubao_cookie", { cookie: raw });
+    if (r && r.warning) toast(r.warning);
+    toast("豆包账号已添加");
+    await loadState();
+    refreshFees();
+    closeDoubaoDialog();
+  } catch (e) {
+    $("doubaoCookieErr").textContent = e.message || "验证失败";
+  }
+}
+
 function openComateDialog() {
   $("comateErr").textContent = "";
   $("comateManual").classList.add("hidden");
@@ -2774,6 +2877,7 @@ const RESERVED_CHANNEL_NAMES = new Set([
   "workbuddy", "workbuddyai", "traework", "traecode", "qoder", "qodercn", "qodercom",
   "qwenwork", "monkeycode", "raccoon", "loomy", "oczen", "kilo", "minimax", "lobsterai",
   "zcode", "gemini", "codearts", "glm", "cline", "officeace", "comate", "lingxi",
+  "doubao", // 豆包（扫码/Cookie 渠道）
   "cline-free", // ModelNamespaces：上游 ID 自带命名空间，自定义渠道不得占用
 ]);
 let editCustomChannels = [];
@@ -3779,6 +3883,17 @@ function bind() {
   $("btnClineCancel").onclick = () => $("clineOverlay").classList.add("hidden");
   $("btnAddComate").onclick = () => openComateDialog();
   $("btnComateQrStart").onclick = () => startComateQr();
+  $("btnAddDoubao").onclick = () => openDoubaoDialog();
+  $("btnDoubaoQrStart").onclick = () => startDoubaoQr();
+  $("btnDoubaoCancel").onclick = () => closeDoubaoDialog();
+  $("btnDoubaoManualToggle").onclick = () => {
+    const box = $("doubaoManual");
+    const show = box.classList.contains("hidden");
+    box.classList.toggle("hidden", !show);
+    $("btnDoubaoManualToggle").textContent = show ? "收起手工方式" : "展开手工方式";
+    if (show) setTimeout(() => $("doubaoCookieInput").focus(), 30);
+  };
+  $("btnDoubaoCookie").onclick = () => submitDoubaoCookie();
   $("btnComateBrowserStart").onclick = () => startComateBrowser();
   $("btnComateSubmit").onclick = submitComateSID;
   $("btnComateCancel").onclick = cancelComateLogin;
