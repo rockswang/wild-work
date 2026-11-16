@@ -437,7 +437,7 @@ func withMagicubeExpiry(items []provider.ResourceItem, grants []magicubeGrant) [
 			continue
 		}
 		split = append(split, provider.ResourceItem{
-			Name: itemNameUsable, Total: take, Remain: take,
+			Name: itemNameUsable, Remain: take,
 			ExpireAt: g.ExpireAt, Usable: usable.Usable,
 		})
 		budget -= take
@@ -448,9 +448,10 @@ func withMagicubeExpiry(items []provider.ResourceItem, grants []magicubeGrant) [
 	if budget > 0 {
 		// 上游口径漂移（池子比流水里在效发放之和还大）：余量挂到**最新**那一笔上
 		// （此刻 split[0] 即最新），保证 Remain 之和仍等于 available。
-		split[0].Total += budget
 		split[0].Remain += budget
 	}
+	// 把原聚合条目的 Used/Total 摊回拆分条目，使同键聚合后的三元组与拆分前逐位一致。
+	preserveAggregateUsage(split, usable)
 	// 输出按到期升序：ledger 按 key 聚合取首个非空 Expire，必须是最早那笔。
 	for i, j := 0, len(split)-1; i < j; i, j = i+1, j-1 {
 		split[i], split[j] = split[j], split[i]
@@ -461,6 +462,53 @@ func withMagicubeExpiry(items []provider.ResourceItem, grants []magicubeGrant) [
 	out = append(out, split...)
 	out = append(out, items[idx+1:]...)
 	return out
+}
+
+// preserveAggregateUsage 把原聚合条目的 Used/Total 摊回拆分条目，使同键聚合后的
+// (Remain, Used, Total) 与拆分前逐位一致。
+//
+// 为什么必须做（R101 同族误归因，2026-11-16 评审发现）：ledger.DiffCredits 的
+// poolShrankExpiry 会在「上一轮快照 Expire 为空 + 该渠道 booksUsage 为真 + Total 下降」
+// 时把余额下降归因成 expire。若拆分把 Total 从 total_balance 改成「余额本身」
+// （available），则**升级后的第一次真实消耗**恰好满足这三条（上一轮是票 02 的
+// 无到期快照），本次消耗会被记成「今日作废」而不是「今日消耗」——与 R107 同类。
+// 保留 Used/Total 后，真实消耗只让 Remain 下降、Used 上升、Total 不变，gate3
+// （要求 Total 下降）自然不触发。
+//
+// 分配口径：Used 按 Remain 占比分摊（余数落最后一笔，保证 Σ 精确）；Total = Remain + Used，
+// 再把残差（= 原 Total − Remain − Used，即本条目里未覆盖的部分，如冻结）加到剩余最大的一笔。
+func preserveAggregateUsage(split []provider.ResourceItem, usable provider.ResourceItem) {
+	sumRemain := int64(0)
+	best := 0
+	for i := range split {
+		sumRemain += split[i].Remain
+		if split[i].Remain > split[best].Remain {
+			best = i
+		}
+	}
+	if sumRemain <= 0 {
+		return
+	}
+	if used := usable.Used; used > 0 {
+		var assigned int64
+		for i := range split {
+			share := used * split[i].Remain / sumRemain
+			if i == len(split)-1 {
+				share = used - assigned // 余数落最后一笔
+			}
+			if share < 0 {
+				share = 0
+			}
+			split[i].Used = share
+			assigned += share
+		}
+	}
+	for i := range split {
+		split[i].Total = split[i].Remain + split[i].Used
+	}
+	if extra := usable.Total - sumRemain - usable.Used; extra > 0 {
+		split[best].Total += extra
+	}
 }
 
 // UserResourceDetail 实现 provider.Upstream：返回（可用魔粒, 明细, error）。

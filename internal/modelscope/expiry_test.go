@@ -302,6 +302,55 @@ func TestExpiringWindowShowsMagicubes(t *testing.T) {
 	}
 }
 
+// TestTransactionsPreserveAggregateUsage 评审补强：拆分不得改变同键聚合后的
+// (Remain, Used, Total)。否则升级后的第一次真实消耗会让 ledger 的 poolShrankExpiry
+// 看到 Total 从 total_balance 跳到 available，把「消耗」误归因成「过期」。
+func TestTransactionsPreserveAggregateUsage(t *testing.T) {
+	cases := []struct {
+		name                string
+		balance             string
+		wantR, wantU, wantT int64
+	}{
+		{
+			name:    "frozen=0",
+			balance: `{"success":true,"data":{"total_balance":500,"available_balance":300,"frozen_amount":0}}`,
+			wantR:   300, wantU: 200, wantT: 500,
+		},
+		{
+			name:    "frozen=50",
+			balance: `{"success":true,"data":{"total_balance":500,"available_balance":300,"frozen_amount":50}}`,
+			wantR:   300, wantU: 150, wantT: 500,
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			d3, d4 := txStamp(3), txStamp(4)
+			f := &fakeSite{
+				balanceBody: c.balance,
+				usageBody:   fakeUsageBody,
+				txBody:      txEnvelope(earnRecord(d3, 250), earnRecord(d4, 250)),
+			}
+			cl := newSiteClient(provider.ModelScope, f.start(t).URL, "ms-x")
+			_, items, err := cl.UserResourceDetail(&auth.Auth{AccessToken: "ms-x"})
+			if err != nil {
+				t.Fatalf("UserResourceDetail: %v", err)
+			}
+			var sR, sU, sT int64
+			for _, it := range items {
+				if it.Name == itemNameUsable {
+					sR += it.Remain
+					sU += it.Used
+					sT += it.Total
+				}
+			}
+			if sR != c.wantR || sU != c.wantU || sT != c.wantT {
+				t.Fatalf("拆分后聚合 = (Remain %d, Used %d, Total %d), want (%d, %d, %d)",
+					sR, sU, sT, c.wantR, c.wantU, c.wantT)
+			}
+		})
+	}
+}
+
 // TestNormalizeMagicubeExpire 上游格式换算：空格分隔的 UTC+8 墙钟串 → RFC3339 精确时刻。
 // 纯日期写法不得用于本渠道（魔粒是「发放后 24h 精确过期」）。
 func TestNormalizeMagicubeExpire(t *testing.T) {

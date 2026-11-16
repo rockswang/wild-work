@@ -92,6 +92,89 @@ func TestModelScopeDailyExpireNotSpend(t *testing.T) {
 	}
 }
 
+// TestModelScopeUpgradeSpendStillSpend 升级边界（评审补强）：票 02 的无到期快照
+// （Total=total_balance、Used>0）→ 票 03 的拆分快照。此时若发生一次真实消耗，
+// 必须仍记 spend 而不是 expire。
+//
+// 这要求渠道侧 preserveAggregateUsage 让 ΣTotal 保持 total_balance：
+// 「消耗 2」只让 ΣRemain 降 2、ΣUsed 升 2、ΣTotal 不变（500）。
+// 若把拆分条目的 Total 设成 Remain（聚合 Total=498），ledger 的 poolShrankExpiry
+// （prev.Expire 为空 + booksUsage 真 + Total 下降）会把这次消耗误记成 expire。
+func TestModelScopeUpgradeSpendStillSpend(t *testing.T) {
+	dir := t.TempDir() + "/ledger"
+	l, err := New(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Close()
+
+	// 票 02 的快照形态：无到期时刻、Total=total_balance、Used>0。
+	pre := []provider.ResourceItem{
+		{Name: "可用魔粒", Total: 500, Used: 200, Remain: 300, Usable: true},
+	}
+	if n := l.DiffCredits("modelscope", "u1", 300, pre); n != 1 {
+		t.Fatalf("首次快照应记 1 条 earn，got %d", n)
+	}
+
+	// 票 03 的拆分形态（preserveAggregateUsage 的产物）：ΣRemain=298（花掉 2）、
+	// ΣUsed=202、ΣTotal=500（不变）。
+	post := []provider.ResourceItem{
+		{Name: "可用魔粒", Remain: 150, Total: 349, Used: 199, ExpireAt: "2099-01-01T10:00:00+08:00", Usable: true},
+		{Name: "可用魔粒", Remain: 148, Total: 151, Used: 3, ExpireAt: "2099-01-02T10:00:00+08:00", Usable: true},
+	}
+	if n := l.DiffCredits("modelscope", "u1", 298, post); n != 1 {
+		t.Fatalf("升级边界的一次消耗应记 1 条，got %d", n)
+	}
+	entries := readCreditEntries(t, l)
+	var last *CreditEntry
+	for i := range entries {
+		if entries[i].Kind != "earn" {
+			last = &entries[i]
+		}
+	}
+	if last == nil || last.Kind != "spend" {
+		t.Fatalf("升级后第一次真实消耗被记成 %+v（want spend）——拆分必须保留聚合 Total/Used", last)
+	}
+	if last.Amount != -2 {
+		t.Fatalf("金额 = %d, want -2", last.Amount)
+	}
+}
+
+// TestModelScopeNoExpiryIsSpend 反向护栏：渠道若退化回「无到期信息」（如 transactions
+// 持续读失败），账本只能把余额下降记 spend。这不是缺陷而是降级口径，把它钉死是为了让
+// 「到期清零被记成消耗」这种回归在渠道侧一眼可辨（R107 同款反向护栏）。
+func TestModelScopeNoExpiryIsSpend(t *testing.T) {
+	dir := t.TempDir() + "/ledger"
+	l, err := New(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Close()
+
+	cur1 := []provider.ResourceItem{
+		{Name: "可用魔粒", Remain: 8000, Total: 8000, Usable: true},
+	}
+	l.DiffCredits("modelscope", "u1", 8000, cur1)
+	cur2 := []provider.ResourceItem{
+		{Name: "可用魔粒", Remain: 7800, Total: 7800, Usable: true},
+	}
+	l.DiffCredits("modelscope", "u1", 7800, cur2)
+
+	entries := readCreditEntries(t, l)
+	var last *CreditEntry
+	for i := range entries {
+		if entries[i].Kind != "earn" {
+			last = &entries[i]
+		}
+	}
+	if last == nil || last.Kind != "spend" {
+		t.Fatalf("无到期日时账本只能记 spend（got %+v）——若这里变了说明 ledger 判据被改动，需复核 R101/R107", last)
+	}
+	if last.Amount != -200 {
+		t.Fatalf("金额 = %d, want -200", last.Amount)
+	}
+}
+
 // TestModelScopeRealSpendStillSpend 真实对话消耗（未到期）仍必须记 spend ——
 // 与上一条配对，防修复把真实消耗也吞成 expire（过度归因护栏）。
 func TestModelScopeRealSpendStillSpend(t *testing.T) {
