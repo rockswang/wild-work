@@ -777,7 +777,7 @@ check("非 officeace 账号不带「缺续期凭据」（渠道限定，避免�
     /<td class="cell-platform">\$\{chBadge\(a\.group\)\}<\/td>/.test(raw)
       && /<td class="cell-acct">\$\{p\.nameHtml\}/.test(raw));
   check("窄屏：列表容器横向滚动、列不裁剪、不降级回卡片",
-    /\.tbl-scroll \{ overflow-x: auto; \}/.test(css) && /min-width: 560px/.test(css)
+    /\.tbl-scroll \{ overflow-x: auto; \}/.test(css) && /min-width: 607px/.test(css)
       && /display: block/.test(slice(css, ".acct-grid.list-mode", "\n")));
   check("卡片网格既有规则零改动（升级前形态不变）",
     /\.acct-grid \{ display: grid; grid-template-columns: 1fr 1fr; gap: 12px; \}/.test(css));
@@ -798,9 +798,11 @@ check("非 officeace 账号不带「缺续期凭据」（渠道限定，避免�
   // ⇒ 1440px 视口也出横滚条；封顶后列宽不再被最长理由单点决定（hover 仍有 title 全文）。
   check("闸 2 状态徽标封顶（max-width + 省略号）",
     /\.acct-table \.cell-tags \.tag \{[^}]*max-width: \d+px[^}]*text-overflow: ellipsis/.test(css));
-  // 窄屏断点卡在**实测阈值** 869（不是拍脑袋的档位）：不压紧的表内容需求 725px，而容器 = 视口 −85
-  // ⇒ 810px 视口才不溢出；但 810~869 的行高因长昵称折行跳到 82.3px（紧凑档内 45.8~46.1，870 起 49.3）。
-  // 故紧凑规则挂在 869：压紧内边距/字号/徽标上限、状态列允许折行，不动 min-width: 560px。
+  // 窄屏断点卡在**实测阈值** 869（不是拍脑袋的档位）：票 04 重测五列版（分组行已删）：紧凑档
+  // min-content 606.3px、宽档 761.9px，容器 = 视口 −85 ⇒ 视口 ≥691 起不横溢（690 溢 1px）；
+  // 但 855~869 行高因账号列挤到 min-content 跳到 103.5~209.5px（紧凑档内 47.5，845 起也 47.5）。
+  // 故紧凑规则挂在 869：压紧内边距/字号/徽标上限、状态列允许折行，min-width: 607px 取紧凑档
+  // 实测下限（606.3 向上取整），保证跨引擎可读宽度一致。
   check("闸 2 窄屏断点：列表紧凑档挂在实测阈值 869（物理阈值，非视觉档位）",
     /@media \(max-width: 869px\) \{\s*\.acct-table \{ font-size: 12px; --acct-cred-unit: 44px; \}/.test(css)
       && /\.acct-table \.cell-tags \{ white-space: normal; \}/.test(css));
