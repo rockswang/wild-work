@@ -22,8 +22,17 @@ ModelScope / ModelScopeAI（魔搭）站内的**积分单位**，官网计费与
   与 `credits_unit="token"`（ZCode / MonkeyCode 的 Token 计数）是**两条不同口径**。
 - **不要叫**：「魔方」「积分次数」「Token 额度」。「剩余次数」是我们**从不**展示的东西
   （上游不给次数口径，编造等于说谎）。
+- **逐笔到期**：`GET /openapi/v1/magicubes/transactions` 的 `EARN.expire_at` 是
+  `YYYY-MM-DD HH:MM:SS`（**UTC+8 墙钟，非 RFC3339**）⇒ 按到期升序 FIFO 扣 `SPEND_CONFIRM`、
+  余量挂最后一笔；拆分条目共用同一 `Name` 且不设 `Key`（R107 同款），所以 `ledger` 不会产生假流水，
+  且到期清零不会被记成「消耗」。
+- **每日领取**：上游**没有独立签到端点**，领取动作 = 幂等 `GET /api/v1/users/login/info`
+  （`Cookie: m_session_id=<ms- token>`）；「已领取 / 领到 / 今日无活动」三态借道 `transactions` 的当日
+  `EARN` 判定。金额只在 `CheckinReport.Msg` 里展示，**不重复入账**（账本按差分记 earn）。
+- **两区不通用**：同一枚 token 在 `modelscope.cn` 与 `modelscope.ai` 是两个账号（实测：CN token 打 AI 站回
+  401）⇒ 两个渠道、两个池、互不兜底；AI 站是否有真实魔粒**未实证**。
 - 相关：今日用量（`GET /api/v1/inference/rate-limit` 的 `currentUsagePerDay`）单位按 token 计，
-  走 `InfoOnly` 明细条**只作展示**，不进任何积分算术。
+  走 `InfoOnly` 明细条**只作展示**，不进任何积分算术。完整决议见 R161（更正 R159 的额度口径）。
 
 ## 积分（credits）
 

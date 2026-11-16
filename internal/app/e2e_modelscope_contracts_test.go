@@ -12,10 +12,12 @@
 package app
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -42,6 +44,9 @@ func repoFile(t *testing.T, rel string) string {
 	t.Fatalf("找不到仓库根（go.mod）")
 	return ""
 }
+
+// reDecisionRow 抓决议表体行号（用于派生 R123 四处范围标记的期望值）。
+var reDecisionRow = regexp.MustCompile(`^\| R(\d+) \|`)
 
 // TestE2E_US14_SingleSourceOfTruth 用户故事 14：
 // 「渠道标识、显示名、配色、按钮顺序都有单一真源与静态断言」。
@@ -232,8 +237,8 @@ func TestE2E_US15_DocsSynced(t *testing.T) {
 	notes := repoFile(t, "docs/渠道接入备忘.md")
 	api := repoFile(t, "docs/接口参考.md")
 
-	t.Run("决议项表体与索引表都有 R158/R159", func(t *testing.T) {
-		for _, r := range []string{"| R158 |", "| R159 |"} {
+	t.Run("决议项表体与索引表都有 R158/R159/R161", func(t *testing.T) {
+		for _, r := range []string{"| R158 |", "| R159 |", "| R161 |"} {
 			if !strings.Contains(res, r) {
 				t.Errorf("docs/决议项.md 缺 %s 行", r)
 			}
@@ -244,14 +249,30 @@ func TestE2E_US15_DocsSynced(t *testing.T) {
 	})
 
 	t.Run("范围标记三处同步（R123 纪律）", func(t *testing.T) {
+		// 期望范围由表体最大号派生：既防「新增决议忘了改范围」，
+		// 也防「范围凭空写大」（R161 落地时本条从硬编码 R1–R160 改为派生）。
+		max := 0
+		for _, line := range strings.Split(res, "\n") {
+			m := reDecisionRow.FindStringSubmatch(line)
+			if m == nil {
+				continue
+			}
+			if n, err := strconv.Atoi(m[1]); err == nil && n > max {
+				max = n
+			}
+		}
+		if max < 161 {
+			t.Fatalf("表体最大决议号 = %d，期望至少 R161", max)
+		}
+		want := fmt.Sprintf("R1–R%d", max)
 		marks := []struct{ name, body string }{
 			{"AGENTS.md §1 标题", agents},
 			{"AGENTS.md §6 文档表", agents},
 			{"docs/决议项.md 标题", res},
 		}
 		for _, m := range marks {
-			if !strings.Contains(m.body, "R1–R160") {
-				t.Errorf("%s 缺范围标记 R1–R160", m.name)
+			if !strings.Contains(m.body, want) {
+				t.Errorf("%s 缺范围标记 %s", m.name, want)
 			}
 		}
 	})
