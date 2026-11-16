@@ -16,6 +16,7 @@ import (
 // Client 上游 HTTP 客户端，实现 provider.Upstream。
 //
 // 基址按 Kind 二选一（国内站 / 国际站，见 constants.go）；Base 可覆盖以便测试注入假上游。
+// 魔粒余额与今日用量挂在**主站**（另一个 host），由 SiteBase 覆盖（见 credits.go）。
 type Client struct {
 	// Kind 渠道标识：决定出站基址（两个 kind 是独立服务，token 不通用）。
 	Kind provider.Kind
@@ -26,6 +27,9 @@ type Client struct {
 	StreamHTTP *http.Client
 	// Base 上游基址覆盖（测试用）；空 = 按 Kind 取默认值。
 	Base string
+	// SiteBase 主站基址覆盖（测试用）；空 = 按 Kind 取 SiteURL(Kind)。
+	// 魔粒余额/今日用量在 modelscope.cn / modelscope.ai 上，与对话基址是两个 host。
+	SiteBase string
 	// idle 流中空闲上限（拿到响应头之后才计时）；0 = 默认 90s。
 	idle time.Duration
 	// pollLimit 生图轮询总时限覆盖（**测试注入点**）；0 = imagePollLimit() 现算，
@@ -98,21 +102,10 @@ func (c *Client) FetchModelPricing(_ *auth.Auth) ([]provider.ModelPricing, error
 	return nil, nil
 }
 
-// ---------------------------------------------------------------------------
-// 「不适用」额度口径的空能力（D5）：上游无余额/积分端点
-// ---------------------------------------------------------------------------
+// User-Agent 之外的通用头见 newRequest；主站（魔粒余额/用量）走 credits.go 的 fetchSite。
 
 // RefreshToken 空实现：`ms-` token 无 refresh 端点（失效表现为 401，需人工换 token）。
 func (c *Client) RefreshToken(_ *auth.Auth) error { return nil }
-
-// UserResource 无余额概念 ⇒ 恒 0 且**不报错**（面板据 credits_na 显示「不适用」，
-// 报错会被渲染成「刷新积分失败」）。
-func (c *Client) UserResource(_ *auth.Auth) (int64, error) { return 0, nil }
-
-// UserResourceDetail 同上：没有余额明细条目，也绝不给整池补假到期日（R107 的教训）。
-func (c *Client) UserResourceDetail(_ *auth.Auth) (int64, []provider.ResourceItem, error) {
-	return 0, nil, nil
-}
 
 // DailyCheckin 本渠道无签到活动（调度器以 CheckinMinutes: []int{} 关闭，R39/R150）。
 func (c *Client) DailyCheckin(_ *auth.Auth) error { return nil }

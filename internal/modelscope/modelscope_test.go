@@ -93,24 +93,29 @@ func TestStaticModelsMinimalCatalog(t *testing.T) {
 	}
 }
 
-// TestNoCreditsAreZeroWithoutError 额度口径「不适用」（D5）：上游无余额端点，
-// 必须回 (0, nil) 而不是报错——报错会被面板渲染成「刷新积分失败」。
-func TestNoCreditsAreZeroWithoutError(t *testing.T) {
+// TestEmptyCapabilitiesAreInert 本渠道的「没有这个动作」的空实现必须是**惰性**的：
+// RefreshToken（`ms-` token 无 refresh 端点）、DailyCheckin（无签到活动）、
+// FetchModelPricing（上游不声明价格 ⇒ 不编造 1x）。
+// 额度面（魔粒）已接入，见 credits_test.go。
+func TestEmptyCapabilitiesAreInert(t *testing.T) {
 	c := New(provider.ModelScope)
-	if n, err := c.UserResource(nil); n != 0 || err != nil {
-		t.Errorf("UserResource = (%d, %v)，期望 (0, nil)", n, err)
-	}
-	if n, items, err := c.UserResourceDetail(nil); n != 0 || items != nil || err != nil {
-		t.Errorf("UserResourceDetail = (%d, %v, %v)，期望 (0, nil, nil)", n, items, err)
-	}
 	if err := c.RefreshToken(nil); err != nil {
 		t.Errorf("RefreshToken 应为空实现，得到 %v", err)
 	}
 	if err := c.DailyCheckin(nil); err != nil {
 		t.Errorf("DailyCheckin 应为空实现，得到 %v", err)
 	}
-	// 费率同理：上游不声明价格 ⇒ (nil, nil)，不是「查不到就报错」也不是「编一个 1x」。
 	if pricing, err := c.FetchModelPricing(nil); pricing != nil || err != nil {
 		t.Errorf("FetchModelPricing = (%v, %v)，期望 (nil, nil)", pricing, err)
+	}
+}
+
+// TestSiteURLByKind 魔粒端点挂在**主站**（另一个 host），两区同样独立、互不兜底。
+func TestSiteURLByKind(t *testing.T) {
+	if got := SiteURL(provider.ModelScope); got != OriginCN {
+		t.Errorf("SiteURL(modelscope) = %q，期望 %q", got, OriginCN)
+	}
+	if got := SiteURL(provider.ModelScopeAI); got != OriginAI {
+		t.Errorf("SiteURL(modelscopeai) = %q，期望 %q", got, OriginAI)
 	}
 }

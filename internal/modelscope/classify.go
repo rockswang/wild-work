@@ -30,8 +30,9 @@ var notFoundMarkers = []string{
 //	⑤ 400/422 = 请求形态/参数问题（ErrBadParams：请求级，不罚号不轮转，原文透传）；
 //	⑥ 其余 4xx 兜底 ErrClient。
 //
-// 本渠道**没有**余额/权益概念（credits_na，D5），因此没有任何 hardMarker：
-// 不会也不该出现 ErrHardCredit。
+// 本渠道**没有**余额/权益类的硬失败（额度就是主站的魔粒，见 credits.go），因此没有任何
+// hardMarker：不会也不该出现 ErrHardCredit。魔粒端点的 401/403 由 credits.go 显式归
+// ErrSessionDead，不经过本函数。
 func (c *Client) Classify(status int, body string) provider.ErrKind {
 	switch {
 	case status == http.StatusTooManyRequests:

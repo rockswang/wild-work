@@ -9,8 +9,9 @@
 // 由面板手工粘贴（票 04）。不做 CDP、不做 cookie 换 token。
 //
 // 上游协议是 OpenAI 兼容对话面 + **异步**文生图/图生图（submit 拿 task_id → 轮询），
-// 与 glm 的同步生图面完全不同。额度口径为「不适用」（credits_na，D5）：上游没有
-// 余额/积分端点，只把 token 与请求数记进 stats/ledger（R17 双流水）。
+// 与 glm 的同步生图面完全不同。额度面是主站的「魔粒」（magicubes）：余额与今日用量
+// 与对话面**不在同一个 host**（见 credits.go），按 provider.UserResourceDetail 接入
+// 积分体系（R17 双流水）。
 package modelscope
 
 import (
