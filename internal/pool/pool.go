@@ -328,6 +328,22 @@ func (p *Pool) EarliestExpireOf(uid string) (time.Time, bool) {
 	return e.earliestExpire, true
 }
 
+// MarkCreditStale 标记该账号的余额口径**不可信**（刷新失败时调用）：面板显示「待刷新」
+// 而不是把上次的旧值当真值（旧值仍保留在 credits 里，不清写 0）。
+//
+// 为什么刷新失败也要标：只保留旧数字、不给任何凭据，用户会把 stale 数字当成实时余额
+// （「刷新积分」失败只有一条瞬时 toast，事后无从复查）；而 credits_stale 的既有语义
+// 就是「口径不可信」，把它从「仅旧版 state」扩到「上次刷新失败」是同一个意思。
+// 成功路径（SetCreditDetail / ReenableIfCredits）会清除它。
+func (p *Pool) MarkCreditStale(uid string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if e, ok := p.byUID[uid]; ok && !e.creditsStale {
+		e.creditsStale = true
+		p.saveLocked()
+	}
+}
+
 // SetCreditDetail 更新账号积分：usable 为可消耗余额，expiring 为其中临期部分（仅展示），
 // unusable 为账号名下有但本工具用不了的额度（如 TraeWork 的 ep=1 专用池，仅面板展示）。
 // earliest 为该账号仍有效的最早到期时刻（零值 = 无到期信息），是 Pick() 的第一排序键。

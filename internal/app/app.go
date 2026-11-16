@@ -2806,6 +2806,9 @@ func (a *App) creditSnapshot(rt *Runtime, au *auth.Auth) (remain int64, items []
 		remain, items, err = rt.Upstream.UserResourceDetail(au)
 	}
 	if err != nil {
+		// 保留上次快照的旧值，但标记为「待刷新」（D5）：只留旧数字会让用户把它当实时余额，
+		// 而「刷新积分」失败只有一条瞬时的 toast。**不得**写 0（会被读成「额度用光」）。
+		rt.Pool.MarkCreditStale(au.UID)
 		return 0, nil, 0, 0, err
 	}
 	_, unusable = provider.Summarize(items)

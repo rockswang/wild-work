@@ -942,11 +942,10 @@ function fmtTokens(n) {
   return n.toLocaleString("zh-CN");
 }
 
-// creditTermOf / creditTerm 渠道级**显示术语**（后端 credits_term 是唯一真源）：
+// creditTermOf / creditTermWord 渠道级**显示术语**（后端 credits_term 是唯一真源）：
 // ModelScope 站内把积分叫「魔粒」，面板文案需要跟着它，但计量口径仍是积分
 // （credits_unit 保持空串、并入积分合计与折线图）。**不在前端维护渠道名单**。
 const creditTermOf = (a) => (a && a.credits_term) || "";
-const creditTerm = (g) => creditTermOf((state.accounts || []).find((x) => (x.group || "workbuddy") === g));
 const creditTermWord = (t) => t || "积分";
 
 // creditParts 积分文案的**语义分解**（卡片 / 列表共用的唯一判据来源）：
@@ -1991,9 +1990,10 @@ async function refreshOne(uid) {
     const r = await api("/api/account/refresh", { uid });
     // 单位随账号切换：token 计量渠道（如 ZCode）不叫「积分」（否则上亿 token 被读成积分）。
     const acc = (state.accounts || []).find((x) => x.uid === uid);
+    // 文案随渠道术语走（ModelScope 站内叫「魔粒」），而不是写死「积分」。
     toast(acc && acc.credits_unit === "token"
       ? `刷新成功：剩余 ${fmtTokens(r.remain)} tokens`
-      : `刷新成功：剩余积分 ${r.remain}`);
+      : `刷新成功：剩余${creditTermWord(creditTermOf(acc))} ${r.remain}`);
     delete detailCache[uid]; // 顶层已更新，旧明细缓存须作废，否则「新顶层+旧弹层」
     loadState();
   } catch (e) { toast(e.message); }

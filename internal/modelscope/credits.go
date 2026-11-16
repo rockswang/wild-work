@@ -147,10 +147,12 @@ func (c *Client) fetchSite(a *auth.Auth, path string, mode int) ([]byte, error) 
 	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	// 零 token 落盘纪律：错误原文直接进 provider.Error.Msg，若上游把凭据回显在报文里
 	// （某些网关会），这里统一抹掉，绝不让它流进日志/面板。
-	msg := truncateBody(raw, 256)
+	// ⚠️ 必须**先替换再截断**：倒过来的话，跨截断边界的 token 只会漏半截进错误且替换不命中。
+	body := string(raw)
 	if tok != "" {
-		msg = strings.ReplaceAll(msg, tok, "<token>")
+		body = strings.ReplaceAll(body, tok, "<token>")
 	}
+	msg := truncateBody([]byte(body), 256)
 	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
 		// 401/403 = 凭据失效（与 Classify 同判据，但这里必须**显式**给 ErrSessionDead：
 		// 这是可自愈标记的入口，绝不能退化成账号级惩罚）。

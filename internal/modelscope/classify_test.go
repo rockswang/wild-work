@@ -11,8 +11,8 @@ import (
 // （不变量 15 / R111）：限流报文常带 `quota` / `model not found` 之类的字样，
 // 顺序一颠倒就会把「等一下再试」误判成「模型不存在」甚至硬冷却。
 //
-// 本渠道没有余额/权益概念（credits_na，D5），所以也不可能出现 ErrHardCredit——
-// 带 `quota exceeded` 的 429 只能归 ErrSoftRate。
+// 本渠道的对话面不会返回余额/权益类硬失败（魔粒余额在主站单独读取，见 credits.go），
+// 所以也不可能出现 ErrHardCredit——带 `quota exceeded` 的 429 只能归 ErrSoftRate。
 func TestClassifyOrderRateLimitFirst(t *testing.T) {
 	c := New(provider.ModelScope)
 	cases := []struct {
@@ -33,7 +33,8 @@ func TestClassifyOrderRateLimitFirst(t *testing.T) {
 			t.Errorf("%s: Classify(%d, %s) = %s，期望 %s", tc.name, tc.status, tc.body, got, tc.want)
 		}
 	}
-	// 任何形态都不得出现「硬冷却」：本渠道无余额端点（D5），编造一个只会锁号 12h。
+	// 任何形态都不得出现「硬冷却」：对话面没有余额类失败（魔粒在主站单独读），
+	// 编造一个 ErrHardCredit 只会白锁号 12h。
 	if got := c.Classify(429, `{"error":{"message":"quota exceeded"}}`); got == provider.ErrHardCredit {
 		t.Fatal("429 + quota 被判成 hard_credit（把限流误判成余额耗尽）")
 	}

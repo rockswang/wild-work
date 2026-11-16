@@ -31,14 +31,40 @@ func TestModelScopeCreditsFailureKeepsSnapshot(t *testing.T) {
 	if st.Credits != 350 {
 		t.Errorf("刷新失败后快照被改写：credits=%d，期望保留 350（不得写 0）", st.Credits)
 	}
+	if !st.CreditsStale {
+		t.Error("刷新失败必须标 credits_stale（面板显示「待刷新」）；只留旧数字会让用户把它当实时余额")
+	}
 	if st.Disabled || st.Cooling {
 		t.Errorf("余额读取失败不得产生账号级惩罚：disabled=%v cooling=%v", st.Disabled, st.Cooling)
+	}
+
+	// 恢复后首刷成功 → stale 标记清除（数字重新可信）。
+	up.failResource.Store(false)
+	if _, err := a.RefreshCredits("mst-0000000000000001"); err != nil {
+		t.Fatalf("恢复后刷新应成功：%v", err)
+	}
+	if st, _ := p.Status("mst-0000000000000001"); st.CreditsStale {
+		t.Error("刷新成功后 stale 标记必须清除（否则面板永远显示「待刷新」）")
+	}
+}
+
+// TestModelScopeCreditsStaleSurfacesOnPanel 刷新失败的面板表现（D5）：旧数字保留、
+// credits_stale=true（面板「待刷新」）、credits_na=false（绝不是「不适用」）。
+func TestModelScopeCreditsStaleSurfacesOnPanel(t *testing.T) {
+	up := &fakeUpstream{remain: 350}
+	a, _ := newTestApp(t, provider.ModelScopeAI, up, "msai-1")
+	if _, err := a.RefreshCredits("msai-1"); err != nil {
+		t.Fatalf("首次刷新应成功：%v", err)
+	}
+	up.failResource.Store(true)
+	if _, err := a.RefreshCredits("msai-1"); err == nil {
+		t.Fatal("5xx 应报错")
 	}
 
 	var view *AccountView
 	views := a.accountViews()
 	for i := range views {
-		if views[i].UID == "mst-0000000000000001" {
+		if views[i].UID == "msai-1" {
 			view = &views[i]
 		}
 	}
@@ -50,6 +76,9 @@ func TestModelScopeCreditsFailureKeepsSnapshot(t *testing.T) {
 	}
 	if view.Credits != 350 {
 		t.Errorf("面板 credits=%d，期望保留 350（不是 0）", view.Credits)
+	}
+	if !view.CreditsStale {
+		t.Error("面板 credits_stale 应为 true（刷新失败 ⇒ 标「待刷新」）")
 	}
 	if view.CreditsTerm != "魔粒" {
 		t.Errorf("credits_term=%q，期望「魔粒」（面板文案术语）", view.CreditsTerm)
