@@ -285,6 +285,15 @@ func (a *App) healRaccoonProtocol() {
 	_ = raccoon.ClearCallback(dir)
 }
 
+// closing 报告是否已进入关闭流程。closed 由 refreshMu 保护；判定与后续写入
+// 不在同一把锁里会留下「刚判完就被 Close 置位」的窗口，故只用于「整段工作都不该做」的场景
+// （写入本身必须在 refreshMu 之下重判，见 savePricingCache）。
+func (a *App) closing() bool {
+	a.refreshMu.Lock()
+	defer a.refreshMu.Unlock()
+	return a.closed
+}
+
 // waitRefresh 等在跑的 RefreshAll 收尾（没有在跑就立即返回）。
 //
 // 为什么必须等：刷新链路会往回写 pool 快照 / ledger / stats，并在写的过程中
@@ -5345,6 +5354,12 @@ func (a *App) staticModelFallback() map[provider.Kind][]provider.ModelInfo {
 // RefreshPricing 从所有已接入渠道拉取最新定价并更新缓存。
 // 并发调用会被丢弃（已有一次在跑）——启动刷新与面板「刷新」可能重叠。
 func (a *App) RefreshPricing() {
+	// 关闭流程中不再发起刷新：所有触发点都是 `go` 出去的，Close 之后才被调度到的那一个
+	// 会做无谓的上游请求并落盘，与退出/测试目录清理抢文件（R112b 同源纪律：
+	// 异步刷新不得跑过 Close）。
+	if a.closing() {
+		return
+	}
 	a.pricingMu.Lock()
 	if a.pricingBusy {
 		a.pricingMu.Unlock()
@@ -5462,6 +5477,13 @@ func (a *App) savePricingCache() {
 	a.pricingMu.Unlock()
 	raw, err := json.MarshalIndent(cache, "", "  ")
 	if err != nil {
+		return
+	}
+	// 判定与写入必须同在 refreshMu 之下：先判后放锁会留下「刚判完就被 Close 置位」的窗口，
+	// 而 Close 之后写文件就是「与退出/测试目录清理抢文件」的根因（见 waitRefresh 的说明）。
+	a.refreshMu.Lock()
+	defer a.refreshMu.Unlock()
+	if a.closed {
 		return
 	}
 	_ = os.WriteFile(a.pricingFP, raw, 0o644)
