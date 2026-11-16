@@ -853,7 +853,7 @@ function varyColor(hex, i) {
 // Loomy 同样已实现签到（宠物每日打工奖励，见 internal/loomy/checkin.go），故也在名单外。
 // 注意：Loomy 的奖励判据是「当日有效对话轮次」（上游算），未在官方客户端用过该账号时
 // 领取结果会是「未达档位」——那是如实状态，不是按钮坏了。
-const NO_EXPLICIT_CHECKIN = new Set(["workbuddyai", "qwenwork", "oczen", "kilo", "zcode", "gemini", "cline", "comate", "modelscope", "modelscopeai"]);
+const NO_EXPLICIT_CHECKIN = new Set(["workbuddyai", "qwenwork", "oczen", "kilo", "zcode", "gemini", "cline", "comate"]);
 const noExplicitCheckin = (g) => NO_EXPLICIT_CHECKIN.has(g) || isCustomGroup(g); // 自定义渠道无签到活动（R66）
 // isCustomGroup 该分组是否为用户自定义 OpenAI 兼容渠道（R66）。
 // 以 state.custom_channels（后端 /api/state 下发，保存即热更新）为准，勿在前端另维护一份。
@@ -890,9 +890,6 @@ const NO_CHECKIN_TAG = {
   gemini: "不支持",
   cline: "无签到",
   comate: "无签到",
-  // ModelScope 两区：上游无签到活动，调度器连签到任务都没有（D14）。
-  modelscope: "无签到",
-  modelscopeai: "无签到",
 };
 const noCheckinText = (g) => NO_CHECKIN_TAG[g] || "无签到";
 // 无积分概念的渠道（匿名通道）：积分区域显示「不适用」，并隐藏刷新积分/明细入口。
@@ -1292,6 +1289,25 @@ function bindAcctListFilter() {
     if (e.key === "Enter" || e.key === " ") { e.preventDefault(); pick(e.target); }
   });
 }
+// checkinPending 后端如实的「上游尚未发放」形态（CheckinNoCampaign）：调度器已跑过领取，
+// 只是上游这天没有可领的东西（ModelScope：「上游还没有发放」）。它不是失败（R150）——
+// 卡片必须显示中性文案，绝不能报红「签到失败」。
+const CHECKIN_PENDING_RE = /上游还没有发放|无可用签到活动|无领取活动/;
+// checkinStatusTag 有签到活动渠道的签到状态徽标：
+//   成功 → 显示后端如实文案（含金额，如「领到 200 魔粒」），缺失时退回「签到成功」；
+//   待发放 → 中性文案（title 带完整原因）；其余失败 → 红标（原因放 title）。
+function checkinStatusTag(a) {
+  const msg = String(a.last_checkin_msg || "").trim();
+  if (a.last_checkin_ok) {
+    const ok = msg && msg !== "ok" ? msg : "签到成功";
+    return `<span class="tag ok" title="${esc(msg || "签到成功")}">${esc(ok)}</span>`;
+  }
+  if (CHECKIN_PENDING_RE.test(msg)) {
+    return `<span class="tag neutral" title="${esc(msg)}">${esc(msg)}</span>`;
+  }
+  return `<span class="tag bad" title="${esc(msg || "签到失败")}">签到失败</span>`;
+}
+
 // acctParts 单个账号在**两种视图下共用**的展示片段（昵称 / 状态徽标 / 操作按钮）。
 // 卡片与列表行都必须消费它：两处各推导一遍状态徽标，必然出现「停用原因只挂在卡片上、
 // 列表里悄悄丢了」这类漂移；同时卡片模板的输出也因此逐字未变（票 02 的锚点要求）。
@@ -1309,7 +1325,7 @@ function acctParts(a) {
     const checkinTag = noCheckin
       ? `<span class="tag neutral" title="${esc(noCheckinTitle)}">${noCheckinText(a.group)}</span>`
       : a.last_checkin_at
-        ? `<span class="tag ${a.last_checkin_ok ? "ok" : "bad"}">${a.last_checkin_ok ? "签到成功" : "签到失败"}</span>`
+        ? checkinStatusTag(a)
         : '<span class="tag neutral">未签到</span>';
 
     const disableIcon = a.disabled ? "▶" : "⏸";
@@ -1974,9 +1990,15 @@ async function checkin(uid) {
     if (CHECKIN_NO_ELIGIBILITY_RE.test(r.msg || "")) {
       toast(`无领取资格：${r.msg}`);
     } else if (!r.ok && r.retryable) {
-      // 未达成且可重试（活动尚未创建/上游瞬时故障）：说明会在签到窗口内自动重试，
-      // 避免用户看到「无可用签到活动」误以为失败。
-      toast(`暂未领到：${r.msg}（10:00–12:00 窗口内会自动重试）`);
+      // 未达成且可重试（活动尚未创建/上游瞬时故障）：说明会自动重试，避免用户看到
+      // 「无可用签到活动」误以为失败。⚠️ 重试窗口不是全渠道都有：只有 Qoder 双区配了
+      // `CheckinRetryUntil`（10:00–12:00 每分钟重试，见 main.go），其余渠道（含 ModelScope）
+      // 只能在下一个签到时段重跑——对它们承诺「窗口内每分钟重试」是假话。
+      const acc = (state.accounts || []).find((x) => x.uid === r.uid) || {};
+      const hint = acc.group === "qodercn" || acc.group === "qodercom"
+        ? "10:00–12:00 窗口内会自动重试"
+        : "将在下一个签到时段重试";
+      toast(`暂未领到：${r.msg}（${hint}）`);
     } else {
       toast(checkinToast(r));
     }

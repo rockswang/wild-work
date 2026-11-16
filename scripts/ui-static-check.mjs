@@ -1388,10 +1388,45 @@ const regexOk = (re) => re.test(raw);
     /const RELOGIN_CHANNELS = new Set\(\[[^\]]*"modelscope"[^\]]*"modelscopeai"/.test(raw)
     && /if \(isModelScopeCh\(channel\)\) return promptLogin\(channel\);/.test(raw));
 
-  // ⑬ 无签到文案齐备（R150：漏写会落兜底「无签到」，把「上游无活动」说错）
-  check("两区在无签到名单内且有专属状态文案",
-    /const NO_EXPLICIT_CHECKIN = new Set\(\[[^\]]*"modelscope"[^\]]*"modelscopeai"/.test(raw)
-    && /modelscope: "无签到"/.test(raw) && /modelscopeai: "无签到"/.test(raw));
+  // ⑬ 两区现在**有**签到（票 04：领取动作 = 幂等 `login/info`）：必须移出「无签到」名单，
+  //    卡片显示后端如实文案（含金额 / 三态），且「上游还没有发放」不得渲染成红色失败（R150）。
+  check("两区已移出无签到名单（它们现在有每日魔粒领取）",
+    !/const NO_EXPLICIT_CHECKIN = new Set\(\[[^\]]*"modelscope"/.test(raw)
+    && !/modelscope: "无签到"/.test(raw) && !/modelscopeai: "无签到"/.test(raw));
+  {
+    T.__pushAccount({
+      uid: "mst-0000000000000002", group: "modelscope", nickname: "领到魔粒的号",
+      credits: 550, expiring_credits: 0, unusable_credits: 0, credits_na: false,
+      credits_term: "魔粒", cooling: false, until: "", reason: "", disabled: false,
+      last_checkin_at: "2026-11-16 09:00", last_checkin_ok: true, last_checkin_msg: "领到 200 魔粒",
+    });
+    T.renderAccounts();
+    const cardOk96 = document.getElementById("acctList").innerHTML
+      .split('<div class="acct-card').find((s) => s.includes("领到魔粒的号")) || "";
+    check("两区签到成功显示后端如实文案（含金额）",
+      /tag ok"[^>]*>领到 200 魔粒</.test(cardOk96), cardOk96.slice(0, 320));
+    T.__popAccount();
+    // no_campaign：上游还没发放 ⇒ 中性文案，绝不是红「签到失败」（R150）。
+    T.__pushAccount({
+      uid: "mst-0000000000000003", group: "modelscope", nickname: "还没发放的号",
+      credits: 0, expiring_credits: 0, unusable_credits: 0, credits_na: false,
+      credits_term: "魔粒", cooling: false, until: "", reason: "", disabled: false,
+      last_checkin_at: "2026-11-16 09:00", last_checkin_ok: false,
+      last_checkin_msg: "上游还没有发放（今日暂无魔粒活动）",
+    });
+    T.renderAccounts();
+    const cardPending96 = document.getElementById("acctList").innerHTML
+      .split('<div class="acct-card').find((s) => s.includes("还没发放的号")) || "";
+    check("两区 no_campaign 显示中性「上游还没有发放」而非红「签到失败」",
+      cardPending96.includes("上游还没有发放") && !/tag bad"[^>]*>签到失败</.test(cardPending96),
+      cardPending96.slice(0, 320));
+    T.__popAccount();
+    T.renderAccounts();
+  }
+  // 晋级：手动签到的「可重试」提示不得对没有窗口重试的渠道承诺 10:00–12:00。
+  check("重试提示按渠道区分（只有 Qoder 双区有 10:00–12:00 窗口）",
+    /acc\.group === "qodercn" \|\| acc\.group === "qodercom"/.test(raw)
+    && /将在下一个签到时段重试/.test(raw));
 
   // ⑭ 渠道级术语「魔粒」必须来自后端单一来源，且**不得**发明计量单位（D6）。
   check("魔粒术语由后端 credits_term 下发（前端不维护渠道名单）",

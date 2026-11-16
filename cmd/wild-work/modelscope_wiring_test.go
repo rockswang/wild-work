@@ -37,14 +37,15 @@ func blockAfter(t *testing.T, src, marker string) string {
 	return ""
 }
 
-// TestModelscopeWiringSchedulers 两个渠道的调度器必须「起得来」且**没有任何定时任务**：
+// TestModelscopeWiringSchedulers 两个渠道的调度器必须「起得来」且有**每日魔粒领取**任务：
 //
 //   - `go msSch.Run(sctx)` / `go msaiSch.Run(sctx)` 漏了不报错（R34），只表现为
-//     「将来给它加任务时静默不跑」；
-//   - CheckinMinutes/KeepaliveHours 必须是**显式空切片**（R39）：传 nil 会被
-//     scheduler.New 补成默认 9:00/21:00 签到与 22:00 保活，每天空跑必然失败的调用
-//     并把面板染成「签到失败」（R150）；
-//   - **不得**声明 FollowGlobalCheckin：那会让面板改一次签到时间就把任务塞回来。
+//     「签到任务静默不跑」；
+//   - 票 04 起两区**有签到**（领取动作 = 幂等 login/info）：CheckinMinutes 必须取全局
+//     配置且**必须**同时声明 FollowGlobalCheckin: true——漏任一项 checkin_times_wiring_test
+//     会红（R150：改了签到时间却不跟随 = 静默失效）；
+//   - KeepaliveHours 必须是**显式空切片**（R39）：`ms-` token 无 refresh 端点，传 nil 会被
+//     scheduler.New 补成默认 22:00 保活，每天空跑必然失败的调用。
 func TestModelscopeWiringSchedulers(t *testing.T) {
 	src, err := os.ReadFile("main.go")
 	if err != nil {
@@ -66,14 +67,14 @@ func TestModelscopeWiringSchedulers(t *testing.T) {
 		if !strings.Contains(blk, `Name: "`+tc.kind+`"`) {
 			t.Errorf("%s 调度器 Name 应为 %q，实际块：%s", tc.name, tc.kind, blk)
 		}
-		if !strings.Contains(blk, "CheckinMinutes: []int{}") {
-			t.Errorf("%s 调度器 CheckinMinutes 必须是显式空切片（R39，传 nil 会被补成默认签到）", tc.name)
+		if !strings.Contains(blk, "CheckinMinutes: checkinMinutes") {
+			t.Errorf("%s 调度器 CheckinMinutes 必须取全局配置（票 04：有每日魔粒领取）", tc.name)
+		}
+		if !strings.Contains(blk, "FollowGlobalCheckin: true") {
+			t.Errorf("%s 必须声明 FollowGlobalCheckin: true（否则改签到时间后不跟随，R150）", tc.name)
 		}
 		if !strings.Contains(blk, "KeepaliveHours: []int{}") {
 			t.Errorf("%s 调度器 KeepaliveHours 必须是显式空切片（R39，传 nil 会被补成默认保活）", tc.name)
-		}
-		if strings.Contains(blk, "FollowGlobalCheckin") {
-			t.Errorf("%s 不得声明 FollowGlobalCheckin（无签到渠道，改面板签到时间会塞回任务）", tc.name)
 		}
 	}
 }

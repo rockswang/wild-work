@@ -612,15 +612,18 @@ func main() {
 	// 签到时刻用全局配置（上游按天去重、无活动上线延迟，不设 CheckinRetryUntil）。
 	lxSch := scheduler.New(scheduler.Config{Pool: lxPool, Upstream: lxUp, Name: "lingxi", FollowGlobalCheckin: true,
 		CheckinMinutes: checkinMinutes, KeepaliveHours: []int{}, Ledger: lg})
-	// ModelScope 两区：**无签到、无保活**（`ms-` token 无 refresh 端点，上游也无签到活动）。
+	// ModelScope 两区：**有每日魔粒领取**（领取动作 = 幂等 `GET /api/v1/users/login/info`，
+	// 见 internal/modelscope/checkin.go），但 `ms-` token 无 refresh 端点 ⇒ 不开保活。
 	//
-	// 定时任务全关时**必须传显式空切片 []int{}**（R39）：传 nil 会被 scheduler.New 的零值
-	// 兜底补上默认 9:00/21:00 签到与 22:00 保活，每天空跑必然失败的调用并把面板染红（R150）。
-	// 也**不得**声明 FollowGlobalCheckin —— 那会让面板改签到时间时把任务塞回这两个渠道。
-	msSch := scheduler.New(scheduler.Config{Pool: msPool, Upstream: msUp, Name: "modelscope",
-		CheckinMinutes: []int{}, KeepaliveHours: []int{}, Ledger: lg})
-	msaiSch := scheduler.New(scheduler.Config{Pool: msaiPool, Upstream: msaiUp, Name: "modelscopeai",
-		CheckinMinutes: []int{}, KeepaliveHours: []int{}, Ledger: lg})
+	// KeepaliveHours 必须传显式空切片 []int{}（R39）：传 nil 会被 scheduler.New 的零值兜底
+	// 补上默认 22:00 保活，每天空跑必然失败的 refresh。
+	// 签到时刻跟随面板全局配置（上游按天去重、无活动上线延迟，不设 CheckinRetryUntil），
+	// 且**必须**同时声明 FollowGlobalCheckin: true——否则面板改签到时间后两区不跟随，
+	// checkin_times_wiring_test 会红（R150）。
+	msSch := scheduler.New(scheduler.Config{Pool: msPool, Upstream: msUp, Name: "modelscope", FollowGlobalCheckin: true,
+		CheckinMinutes: checkinMinutes, KeepaliveHours: []int{}, Ledger: lg})
+	msaiSch := scheduler.New(scheduler.Config{Pool: msaiPool, Upstream: msaiUp, Name: "modelscopeai", FollowGlobalCheckin: true,
+		CheckinMinutes: checkinMinutes, KeepaliveHours: []int{}, Ledger: lg})
 	// OfficeAce：有每日签到（bonus/claim）但要先有临时凭据（V11 签名），保活用于续期。
 	// CheckinMinutes 用全局签到时间；KeepaliveHours 用配置保活时段（临时凭据约 2h 到期）。
 	oaSch := scheduler.New(scheduler.Config{Pool: oaPool, Upstream: oaUp, Name: "officeace", FollowGlobalCheckin: true,
@@ -936,8 +939,8 @@ func main() {
 	go gemSch.Run(sctx)
 	// CodeArts 的 Run 不可漏（R34）：本渠道有签到与保活两条定时任务。
 	go caSch.Run(sctx)
-	// ModelScope 两区的 Run 同样不可漏（R34）：当前无任何定时任务，Run 只会阻塞等
-	// ctx/配置变更；但漏了它，将来给这两条渠道加任务就会静默不跑。
+	// ModelScope 两区的 Run 同样不可漏（R34）：本渠道有每日魔粒领取任务，
+	// 漏了它签到就静默不跑（面板永远停在「未签到」）。
 	go msSch.Run(sctx)
 	go msaiSch.Run(sctx)
 

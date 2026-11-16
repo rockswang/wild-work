@@ -124,8 +124,17 @@ func TestE2E_US14_SingleSourceOfTruth(t *testing.T) {
 		if !strings.Contains(js, "credits_term") {
 			t.Error("app.js 未消费 credits_term（面板不会显示「可用魔粒 / 魔粒明细」）")
 		}
-		if !strings.Contains(js, `modelscope: "无签到"`) || !strings.Contains(js, `modelscopeai: "无签到"`) {
-			t.Error("NO_CHECKIN_TAG 缺两 kinds 的「无签到」文案（灰标会退回兜底文案，R150）")
+		// 票 04 反转：两区现在**有**每日魔粒领取（领取动作 = 幂等 login/info）⇒ 必须移出
+		// 「无签到」名单（留在里面会把「领到 200 魔粒」说成「无签到」）；卡片改为显示后端
+		// 如实的三态/金额文案，且 no_campaign 不得报红（R150）。
+		if strings.Contains(js, `modelscope: "无签到"`) || strings.Contains(js, `modelscopeai: "无签到"`) {
+			t.Error("NO_CHECKIN_TAG 仍含两区（它们现在有签到，面板会错显示「无签到」）")
+		}
+		if !strings.Contains(js, "checkinStatusTag") {
+			t.Error("app.js 缺 checkinStatusTag（两区的三态/金额文案无处渲染）")
+		}
+		if !strings.Contains(js, "CHECKIN_PENDING_RE") {
+			t.Error("app.js 缺 CHECKIN_PENDING_RE（no_campaign 会被渲染成红「签到失败」，R150）")
 		}
 	})
 

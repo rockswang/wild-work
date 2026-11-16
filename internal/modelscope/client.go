@@ -107,5 +107,4 @@ func (c *Client) FetchModelPricing(_ *auth.Auth) ([]provider.ModelPricing, error
 // RefreshToken 空实现：`ms-` token 无 refresh 端点（失效表现为 401，需人工换 token）。
 func (c *Client) RefreshToken(_ *auth.Auth) error { return nil }
 
-// DailyCheckin 本渠道无签到活动（调度器以 CheckinMinutes: []int{} 关闭，R39/R150）。
-func (c *Client) DailyCheckin(_ *auth.Auth) error { return nil }
+// DailyCheckin / DailyCheckinReport 见 checkin.go（每日魔粒领取，票 04）。

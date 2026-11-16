@@ -104,7 +104,7 @@ func TestMainGoFollowGlobalCheckinWiring(t *testing.T) {
 		}
 	}
 	// 有签到活动的渠道必须跟随（漏了就静默失效）。
-	for _, name := range []string{"workbuddy", "traework", "monkeycode", "raccoon", "loomy", "lingxi", "codearts", "glm"} {
+	for _, name := range []string{"workbuddy", "traework", "monkeycode", "raccoon", "loomy", "lingxi", "codearts", "glm", "modelscope", "modelscopeai"} {
 		found := false
 		for _, b := range blocks {
 			if !strings.Contains(b, `Name: "`+name+`"`) {

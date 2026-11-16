@@ -93,17 +93,14 @@ func TestStaticModelsMinimalCatalog(t *testing.T) {
 	}
 }
 
-// TestEmptyCapabilitiesAreInert 本渠道的「没有这个动作」的空实现必须是**惰性**的：
-// RefreshToken（`ms-` token 无 refresh 端点）、DailyCheckin（无签到活动）、
-// FetchModelPricing（上游不声明价格 ⇒ 不编造 1x）。
-// 额度面（魔粒）已接入，见 credits_test.go。
+// TestEmptyCapabilitiesAreInert 本渠道「没有这个动作」的空实现必须是**惰性**的：
+// RefreshToken（`ms-` token 无 refresh 端点）、FetchModelPricing（上游不声明价格
+// ⇒ 不编造 1x）。额度面（魔粒）已接入见 credits_test.go；每日领取见 checkin_test.go
+// ——DailyCheckin 不再是空实现（票 04：领取动作 = 幂等 login/info）。
 func TestEmptyCapabilitiesAreInert(t *testing.T) {
 	c := New(provider.ModelScope)
 	if err := c.RefreshToken(nil); err != nil {
 		t.Errorf("RefreshToken 应为空实现，得到 %v", err)
-	}
-	if err := c.DailyCheckin(nil); err != nil {
-		t.Errorf("DailyCheckin 应为空实现，得到 %v", err)
 	}
 	if pricing, err := c.FetchModelPricing(nil); pricing != nil || err != nil {
 		t.Errorf("FetchModelPricing = (%v, %v)，期望 (nil, nil)", pricing, err)
