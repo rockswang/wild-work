@@ -31,7 +31,7 @@ func TestE2E_US1_TokenPutsChannelOnline(t *testing.T) {
 	cn := newMSFake(t, tinyPNG(t))
 	env := newE2EEnv(t, e2eOptions{CN: cn, CNTokens: []string{"ms-e2e-token-aaa1"}})
 
-	t.Run("账号进池且面板显示不适用", func(t *testing.T) {
+	t.Run("账号进池且面板显示魔粒口径", func(t *testing.T) {
 		accts := env.accounts(providerGroupModelScope)
 		if len(accts) != 1 {
 			t.Fatalf("面板账号数 = %d，want 1：%v", len(accts), accts)
@@ -382,14 +382,19 @@ func TestE2E_US3_RegionsAreSeparatePools(t *testing.T) {
 	})
 }
 
-// TestE2E_US5_CreditsNotApplicable 用户故事 5：
-// 「积分列显示『不适用』而不是 0」——两个 kind 都必须如此，且不得编造计量单位。
-func TestE2E_US5_CreditsNotApplicable(t *testing.T) {
+// TestE2E_US5_CreditsAreMagicubes 用户故事 5（2026-11-16 反转）：
+// 两区的额度列不再是「不适用」——魔粒余额端点在**主站**（票 01 探针实测），
+// 面板走真实积分口径并要求渠道级术语「魔粒」（仍是积分、并入合计、不引入 token 单位）。
+//
+// 数字级口径（available / total / frozen / 今日用量）在 internal/modelscope 的 httptest
+// 用例与 internal/app/modelscope_credits_test.go 里断言；本 E2E 只锁「面板口径不再是 NA」
+// 这条外部行为——harness 的假上游只实现对话面，不提供魔粒端点，故此处不产生真实数字。
+func TestE2E_US5_CreditsAreMagicubes(t *testing.T) {
 	cn := newMSFake(t, tinyPNG(t))
 	ai := newMSFake(t, tinyPNG(t))
 	env := newE2EEnv(t, e2eOptions{
 		CN: cn, AI: ai,
-		CNTokens: []string{"ms-e2e-na-0001"}, AITokens: []string{"ms-e2e-na-0002"},
+		CNTokens: []string{"ms-e2e-mg-0001"}, AITokens: []string{"ms-e2e-mg-0002"},
 	})
 
 	for _, group := range []string{providerGroupModelScope, providerGroupModelScopeAI} {
@@ -398,21 +403,16 @@ func TestE2E_US5_CreditsNotApplicable(t *testing.T) {
 			t.Fatalf("%s 账号数 = %d，want 1", group, len(accts))
 		}
 		a := accts[0]
-		if na, _ := a["credits_na"].(bool); !na {
-			t.Errorf("%s 的 credits_na = false（应为『不适用』）", group)
+		if na, _ := a["credits_na"].(bool); na {
+			t.Errorf("%s 的 credits_na = true；两区已有真实魔粒余额端点（主站 magicubes/balance），不得再标「不适用」", group)
 		}
-		if got := asFloat(a["credits"]); got != 0 {
-			t.Errorf("%s 的 credits = %v，want 0（不编造数字）", group, got)
+		if term := asString(a["credits_term"]); term != "魔粒" {
+			t.Errorf("%s 的 credits_term = %q，want「魔粒」（面板文案对齐官网）", group, term)
 		}
-		// 「不适用」不等于「用 Token 计数」：credits_unit 不得被写成 token/次数。
+		// 「魔粒」只是文案：计量口径仍是积分（并入积分合计与折线图）。
 		if unit := asString(a["credits_unit"]); unit != "" {
-			t.Errorf("%s 的 credits_unit = %q，want 空（本渠道没有额度单位）", group, unit)
+			t.Errorf("%s 的 credits_unit = %q，want 空（不得改成 token/次数口径）", group, unit)
 		}
-	}
-
-	// 平台表整体：不适用渠道不该被算进「积分合计」。
-	if snap := env.statsSnapshot(); asFloat(snap["total_credits"]) != 0 {
-		t.Errorf("total_credits = %v，want 0（无余额端点渠道不参与积分合计）", snap["total_credits"])
 	}
 }
 

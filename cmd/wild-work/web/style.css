@@ -222,6 +222,8 @@ body {
 .cs-exp { color: var(--danger); font-weight: 600; font-size: 11px; }
 /* Token 计量渠道的量纲标签（与积分的「分」区分开，明示单位是 token） */
 .cs-tok { color: var(--primary); font-size: 11px; font-weight: 600; margin-left: 2px; }
+/* 渠道级显示术语（ModelScope 的「魔粒」）：只改文案，不进计量口径 */
+.cs-term { color: var(--primary); font-size: 11px; font-weight: 600; margin-left: 2px; }
 .cs-unu { color: var(--muted); font-size: 11px; }
 .cs-stale { color: var(--warn); font-size: 11px; }
 .cs-total { background: #eef4ff; border-color: #c7d9ff; }

@@ -117,19 +117,29 @@ func TestComateNicknameFor(t *testing.T) {
 	}
 }
 
-// TestCreditsNAModelscope 守门魔搭两渠道的额度口径（D5）：上游没有余额/积分端点，
-// 面板必须显示「不适用」而不是 0（标成 0 会被用户读成「额度已用光」）。
+// TestCreditsNAModelscope 守门魔搭两渠道的额度口径（2026-11-16 反转 D5）。
 //
-// creditsUnit 保持空串：本渠道**不加**「次数」单位（D5 明确否掉了「剩余次数」展示）——
-// token 与请求数照常进 stats/ledger 的 tokens/请求数口径，与积分体系无关。
+// 旧结论「上游没有余额/积分端点」是**把端点名猜错**了（只试了对话基址），票 01 的
+// 只读探针实测主站 `/openapi/v1/magicubes/balance` 用同一枚 `ms-` token 直接可读
+// ⇒ 必须走真实积分口径：不标 credits_na、不给 creditsUnit 发明「次数」单位，
+// 但必须有渠道级显示术语「魔粒」（面板文案对齐官网，仍是积分、并入合计）。
 func TestCreditsNAModelscope(t *testing.T) {
 	a := &App{cfg: &config.Config{}}
 	for _, k := range []provider.Kind{provider.ModelScope, provider.ModelScopeAI} {
-		if !a.creditsNAKind(k.String()) {
-			t.Errorf("%s 应标 credits_na（上游无余额端点，D5）", k)
+		if a.creditsNAKind(k.String()) {
+			t.Errorf("%s 有真实魔粒余额端点（主站 magicubes/balance），不得标 credits_na", k)
 		}
 		if got := a.creditsUnit(k.String()); got != "" {
-			t.Errorf("%s creditsUnit = %q，期望空串（不得引入「次数」单位）", k, got)
+			t.Errorf("%s creditsUnit = %q，期望空串（魔粒仍是积分，不得引入 token/次数口径）", k, got)
+		}
+		if got := a.creditsTerm(k.String()); got != "魔粒" {
+			t.Errorf("%s creditsTerm = %q，期望「魔粒」", k, got)
+		}
+	}
+	// 渠道级术语不得满天下发：普通渠道继续用默认的「积分」。
+	for _, k := range []provider.Kind{provider.WorkBuddy, provider.ZCode, provider.Comate} {
+		if got := a.creditsTerm(k.String()); got != "" {
+			t.Errorf("%s creditsTerm = %q，期望空串（默认「积分」）", k, got)
 		}
 	}
 }

@@ -102,18 +102,27 @@ func TestE2E_US14_SingleSourceOfTruth(t *testing.T) {
 		}
 	})
 
-	t.Run("无积分口径与「无签到」文案同源", func(t *testing.T) {
+	t.Run("魔粒口径与「无签到」文案同源", func(t *testing.T) {
 		js := repoFile(t, "cmd/wild-work/web/app.js")
-		// 「不适用」集合：两 kind 在其中；虚拟账号集合（默认收起/不可删）不含它们。
+		// 2026-11-16 反转：两区已有真实魔粒余额端点 ⇒ **不得**再进 NO_CREDITS_BUILTIN
+		// （进了面板会显示「不适用」、也没有「刷新积分」入口）；虚拟账号集合同样不含它们
+		// （无积分 ≠ 不可删，token 池必须可删可停，R130/R131）。
 		noCredits := jsSet(t, js, "NO_CREDITS_BUILTIN")
 		virtual := jsSet(t, js, "VIRTUAL_ACCOUNTS")
 		for _, k := range []string{"modelscope", "modelscopeai"} {
-			if !noCredits[k] {
-				t.Errorf("NO_CREDITS_BUILTIN 缺 %s（面板会显示「0」而不是「不适用」）", k)
+			if noCredits[k] {
+				t.Errorf("NO_CREDITS_BUILTIN 含 %s（会让面板显示「不适用」，而魔粒余额端点实测可用）", k)
 			}
 			if virtual[k] {
 				t.Errorf("VIRTUAL_ACCOUNTS 含 %s（无积分 ≠ 不可删：token 池必须可删可停，R130/R131）", k)
 			}
+		}
+		// 渠道级显示术语「魔粒」必须同源：后端 creditsTerm 定义、前端 credits_term 消费。
+		if app := repoFile(t, "internal/app/app.go"); !strings.Contains(app, `return "魔粒"`) {
+			t.Error("app.go creditsTerm 未定义「魔粒」术语（面板文案无处可来）")
+		}
+		if !strings.Contains(js, "credits_term") {
+			t.Error("app.js 未消费 credits_term（面板不会显示「可用魔粒 / 魔粒明细」）")
 		}
 		if !strings.Contains(js, `modelscope: "无签到"`) || !strings.Contains(js, `modelscopeai: "无签到"`) {
 			t.Error("NO_CHECKIN_TAG 缺两 kinds 的「无签到」文案（灰标会退回兜底文案，R150）")

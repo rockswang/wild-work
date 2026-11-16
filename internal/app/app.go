@@ -463,8 +463,11 @@ func sortChannelsByOrder[T any](items []T, kindOf func(T) provider.Kind) {
 //   - cline：上游**确无余额端点**（/credits /usage /billing /quota /me 等 12 个候选实测全 404），
 //     属于「查不到」。把这种情况显示成 0 会被误读成「额度已用光」，故同样走 NA。
 //   - 自定义渠道（R66）：无积分与额度接口，同样走 NA。
-//   - modelscope / modelscopeai（D5）：上游没有余额/积分端点（只有 token 用量），
-//     不编造「剩余次数」；token 与请求数照常进 stats/ledger，**不**把数字标成 0。
+//
+// ⚠️ modelscope / modelscopeai **不在此列**（2026-11-16 起）：票 01 的只读探针实测
+// 魔粒余额端点在**主站** `/openapi/v1/magicubes/balance`（同一枚 `ms-` token 直接可读），
+// 当初「上游没有余额/积分端点（只有 token 用量）」只试了对话基址，是**错的** ——
+// 现已接入真实魔粒（见 internal/modelscope/credits.go），面板显示可用余额。
 //
 // ⚠️ comate **不在此列**（R136 起）：R130 曾据「/credits /userinfo /me 全 404」
 // 判成 NA，但真实额度端点是 `/llmproxy/v1/user/token-usage`（每日额度
@@ -476,8 +479,7 @@ func sortChannelsByOrder[T any](items []T, kindOf func(T) provider.Kind) {
 // 走 creditsUnit="token" 的「Token 计数」面板，而不是「不适用」（见 creditsUnit）。
 func (a *App) creditsNAKind(group string) bool {
 	if group == provider.Oczen.String() || group == provider.Kilo.String() ||
-		group == provider.Cline.String() ||
-		group == provider.ModelScope.String() || group == provider.ModelScopeAI.String() {
+		group == provider.Cline.String() {
 		return true
 	}
 	return a.isCustomChannel(group)
@@ -496,6 +498,19 @@ func (a *App) creditsUnit(group string) string {
 		return "token"
 	}
 	return "" // 积分（credits）
+}
+
+// creditsTerm 该渠道额度的**显示术语**（空串 = 用默认的「积分」）。
+//
+// 为什么需要与 creditsUnit 并列的第二个字段：ModelScope 站内把积分叫「魔粒」
+// （magicubes），面板上写「可用积分」会让用户对不上官网；但它**仍是积分**（并入
+// 积分合计与积分折线图），所以**不得**改 creditsUnit —— 改单位会被前端当成 token
+// 口径踢出合计。单一来源在后端：前端只渲染 credits_term，不维护渠道名单。
+func (a *App) creditsTerm(group string) string {
+	if group == provider.ModelScope.String() || group == provider.ModelScopeAI.String() {
+		return "魔粒"
+	}
+	return ""
 }
 
 // isCustomChannel 报告该分组名是否是自定义渠道。先查运行时表（热更新后的权威态），
@@ -3963,6 +3978,9 @@ type AccountView struct {
 	// 前端据此把它渲染成「Token 计数」面板（文案/单位/合计口径都随之切换），
 	// 且**不并入积分合计**——即「与积分分开统计和显示」（用户 2026-10-17 的要求）。
 	CreditsUnit string `json:"credits_unit,omitempty"`
+	// CreditsTerm 渠道级**显示术语**（空 = 「积分」）：ModelScope 站内叫「魔粒」。
+	// 只改文案，不改计量口径（仍是积分，并入合计）；与 credits_unit 并列的单一来源。
+	CreditsTerm string `json:"credits_term,omitempty"`
 	Cooling     bool   `json:"cooling"`
 	Until       string `json:"until"`
 	// UntilTS 解冻时刻的 unix 秒（0 = 无）。面板用它实时算「剩 X 时 X 分」——
@@ -4134,6 +4152,7 @@ func (a *App) accountViews() []AccountView {
 			// 匿名与自定义渠道无积分：前端据此显示「不适用」
 			CreditsNA:                 a.creditsNAKind(group),
 			CreditsUnit:               a.creditsUnit(group),
+			CreditsTerm:               a.creditsTerm(group),
 			Cooling:                   s.Cooling,
 			Until:                     fmtTime(s.Until),
 			UntilTS:                   unixOrZero(s.Until),

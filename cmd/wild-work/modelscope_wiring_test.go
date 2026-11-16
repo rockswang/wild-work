@@ -130,15 +130,18 @@ func TestModelscopeWiringAuthAndPools(t *testing.T) {
 	}
 }
 
-// TestModelscopeNotInCreditRefresh 无余额端点的渠道不得进积分自动刷新 kinds，
-// 否则每 10 分钟刷出一个无意义的 0（D5/D14）。
-func TestModelscopeNotInCreditRefresh(t *testing.T) {
+// TestModelscopeInCreditRefresh 两区的魔粒余额端点在主站（见 internal/modelscope/credits.go）：
+// **必须**进积分自动刷新 kinds（10 分钟），否则对话消耗后面板数字永远停在首次校验时的旧值。
+// （2026-11-16 票 01 探针推翻了「上游无余额端点」的旧结论，此前的反向断言已反转。）
+func TestModelscopeInCreditRefresh(t *testing.T) {
 	src, err := os.ReadFile("main.go")
 	if err != nil {
 		t.Fatal(err)
 	}
 	blk := blockAfter(t, string(src), "appInst.StartCreditAutoRefresh(sctx, []provider.Kind{")
-	if strings.Contains(blk, "provider.ModelScope") {
-		t.Error("ModelScope 上游无余额/积分端点，不得进 StartCreditAutoRefresh（D5/D14）")
+	for _, k := range []string{"provider.ModelScope,", "provider.ModelScopeAI,"} {
+		if !strings.Contains(blk, k) {
+			t.Errorf("main.go 积分刷新白名单缺 %s（纳入后每 10 分钟刷新真实魔粒余额）", k)
+		}
 	}
 }

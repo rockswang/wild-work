@@ -1316,16 +1316,17 @@ const regexOk = (re) => re.test(raw);
   check("两区相关规则体内没有写死 hex（白字除外）",
     !/\.(?:badge|btn\.primary\.alt)\.(?:modelscope|modelscopeai)\b[^{]*\{[^}]*#(?!fff)[0-9a-fA-F]{3,6}/.test(css96));
 
-  // ⑥⑦ 无积分 ≠ 虚拟账号（R130/R131 的两个维度必须分开）
-  check("NO_CREDITS_BUILTIN 含两区（积分列「不适用」而不是 0）",
-    /const NO_CREDITS_BUILTIN = new Set\(\[[^\]]*"modelscope"[^\]]*"modelscopeai"/.test(raw));
+  // ⑥ 魔粒 ≠ 无积分（2026-11-16 反转 D5）：两区已有真实魔粒余额端点 ⇒ 移出「不适用」集合。
+  check("NO_CREDITS_BUILTIN 不含两区（有真实魔粒余额端点，显示真实数字）",
+    !/const NO_CREDITS_BUILTIN = new Set\(\[[^\]]*"modelscope"/.test(raw));
   check("VIRTUAL_ACCOUNTS 不含两区（真多 token 池：可删/可停/可改名，默认可见）",
     !/const VIRTUAL_ACCOUNTS = new Set\(\[[^\]]*"modelscope/.test(raw));
 
-  // ⑧⑨ 真实渲染：无积分账号显示「不适用」且默认不收起
+  // ⑦⑧ 真实渲染：真实魔粒数字 + 冻结进「不可用」+ 默认不收起 + 可删可停 + 刷新积分入口
   T.__pushAccount({
     uid: "mst-0000000000000001", group: "modelscope", nickname: "ModelScope 0001",
-    credits: 0, expiring_credits: 0, unusable_credits: 0, credits_na: true,
+    credits: 350, expiring_credits: 0, unusable_credits: 50, credits_na: false,
+    credits_term: "魔粒",
     cooling: false, until: "", reason: "", disabled: false, last_checkin_at: "", last_checkin_ok: false,
   });
   T.renderAccounts();
@@ -1333,17 +1334,27 @@ const regexOk = (re) => re.test(raw);
     const seg = document.getElementById("acctList").innerHTML
       .split('<div class="acct-card').find((s) => s.includes("ModelScope 0001")) || "";
     const head = seg.slice(0, seg.indexOf(">"));
-    check("ModelScope 账号积分列显示「不适用」而不是 0",
-      seg !== "" && seg.includes("不适用") && !/credit-num">0</.test(seg), seg.slice(0, 240));
+    check("ModelScope 账号积分列显示真实魔粒而非「不适用」",
+      seg !== "" && /credit-num">350</.test(seg) && seg.includes("可用魔粒") && !seg.includes("不适用"), seg.slice(0, 240));
+    check("冻结魔粒进「不可用」角标（不并入可用数字）",
+      /credit-unusable"> \(不可用50\)</.test(seg), seg.slice(0, 240));
     check("ModelScope 账号默认不收起（data-na=0 且无 hidden）",
       seg !== "" && !head.includes("hidden") && head.includes('data-na="0"'), head.slice(0, 160));
     check("ModelScope 账号可删可停（不是固定账号）",
       /onclick="removeAcct\('mst-/.test(seg) && /onclick="toggleDisable\('mst-/.test(seg));
-    check("ModelScope 账号不给「刷新积分」入口（没有余额端点，点了只会报错）",
-      !seg.includes("refreshOne('mst-"));
+    check("ModelScope 账号恢复「刷新积分」入口（余额可刷）", seg.includes("refreshOne('mst-"));
+
+    // ⑨ 汇总条 chip 恢复：带真实数字与渠道术语「魔粒」（不再是「不适用」）。
+    T.renderSummary();
+    const sum96 = document.getElementById("creditSummary").innerHTML;
+    const chip96 = sum96.split('<span class="cs-chip').find((s) => s.includes('data-wg="modelscope"')) || "";
+    check("汇总条恢复 modelscope 渠道 chip", chip96 !== "", sum96.slice(0, 300));
+    check("汇总条 chip 带真实数字与「魔粒」术语",
+      /cs-num">350</.test(chip96) && /cs-term"[^>]*>魔粒</.test(chip96) && !chip96.includes("不适用"), chip96.slice(0, 260));
   }
   T.__popAccount();
   T.renderAccounts();
+  T.renderSummary();
 
   // ⑩⑪ 弹层：只有 token 一个输入；没有任何自动登录/扫码动作
   {
@@ -1382,8 +1393,10 @@ const regexOk = (re) => re.test(raw);
     /const NO_EXPLICIT_CHECKIN = new Set\(\[[^\]]*"modelscope"[^\]]*"modelscopeai"/.test(raw)
     && /modelscope: "无签到"/.test(raw) && /modelscopeai: "无签到"/.test(raw));
 
-  // ⑭ 不给「没有积分概念」的渠道发明「次数」单位（D5：不编造剩余次数）
-  check("未给两区发明「次数」计量单位（creditsUnit 未改、前端无次数单位函数）",
+  // ⑭ 渠道级术语「魔粒」必须来自后端单一来源，且**不得**发明计量单位（D6）。
+  check("魔粒术语由后端 credits_term 下发（前端不维护渠道名单）",
+    /credits_term/.test(raw) && /const creditTermOf = \(a\) => \(a && a\.credits_term\)/.test(raw));
+  check("未给两区发明计量单位（Go creditsUnit 不涉 modelscope、前端无次数单位函数）",
     !/creditsUnit/.test(raw) && !/modelscope/i.test(
       (readFileSync(new URL("../internal/app/app.go", import.meta.url), "utf8")
         .match(/func \(a \*App\) creditsUnit\(group string\) string \{[\s\S]{0,200}?\n\}/) || [""])[0]));

@@ -971,8 +971,10 @@ func main() {
 		// Lingxi 有 credits/balance 余额端点（智点）：不纳入就只在每日签到时刷一次，
 		// 对话消耗后面板数字最长滞后一个签到周期（2026-10-29 审查 W2 补登）。
 		provider.Lingxi,
-		// ModelScope 两区**不**纳入（D5/D14）：上游没有余额/积分端点，纳入只会每 10 分钟
-		// 刷出一个无意义的 0（面板已由 credits_na 显示「不适用」）。
+		// ModelScope 两区的魔粒余额端点在**主站**（modelscope.cn / .ai，见
+		// internal/modelscope/credits.go）：不纳入就只在首次验证 token 时刷一次，
+		// 对话消耗后面板数字永远停在旧值。两区各自独立、互不兜底。
+		provider.ModelScope, provider.ModelScopeAI,
 	}, app.CreditRefreshInterval)
 
 	// 启动即刷新「模型列表 + 费率」，之后每 30 分钟。

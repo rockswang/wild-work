@@ -636,7 +636,10 @@ function renderCreditDetail() {
   // 用户看到的就是「点积分数字什么都不出现」（发布级回归，由 scripts/ui-static-check.mjs 锁死）。
   const detailAcct = (state.accounts || []).find((x) => x.uid === detailState.uid);
   const detailIsToken = !!(detailAcct && detailAcct.credits_unit === "token");
-  html += `<span class="detail-title">${detailIsToken ? "Token 额度明细" : "积分明细"}</span>`;
+  // 标题随计量单位与渠道术语切换：token 渠道不叫「积分明细」（避免把 token 数当积分读）；
+  // ModelScope 站内叫「魔粒」，标题也跟它（credits_term 是后端唯一真源）。
+  const detailTitle = detailIsToken ? "Token 额度明细" : `${creditTermWord(creditTermOf(detailAcct))}明细`;
+  html += `<span class="detail-title">${detailTitle}</span>`;
   // 关闭按钮：桌面与触屏共用同一入口（触屏没有 hover，只能靠显式按钮）
   html += `<button type="button" class="detail-close" data-close-credit-tip="1" title="关闭" aria-label="关闭积分明细">✕</button>`;
   html += `</div>`;
@@ -895,9 +898,10 @@ const noCheckinText = (g) => NO_CHECKIN_TAG[g] || "无签到";
 // 无积分概念的渠道（匿名通道）：积分区域显示「不适用」，并隐藏刷新积分/明细入口。
 // 内建名单只有 oczen/kilo/cline；自定义渠道（R66）同样无积分，但渠道名是用户配置的、
 // 运行期可增删，故运行时以后端下发的 custom_channels 动态判定（isCustomGroup）。
-// ModelScope 两区（D5）：上游只有 token 用量、没有余额/积分端点 ⇒ 同属「不适用」，
-// 但它们是**真多 token 池**（可删可停可改名），故只进本集合、**不进** VIRTUAL_ACCOUNTS。
-const NO_CREDITS_BUILTIN = new Set(["oczen", "kilo", "cline", "modelscope", "modelscopeai"]);
+// ⚠️ ModelScope 两区**已移出**：票 01 的探针实测魔粒余额在主站
+// （/openapi/v1/magicubes/balance，同一枚 ms- token 直接可读），
+// 「上游只有 token 用量、没有余额端点」已被推翻 ⇒ 两区显示真实魔粒。
+const NO_CREDITS_BUILTIN = new Set(["oczen", "kilo", "cline"]);
 // 虚拟账号渠道：没有账号概念（oczen 匿名通道 / kilo 免费池），卡片只留 🔒 静态指示，
 // 不可停用/删除/改名（后端 RemoveAccount/DisableAccount 也硬拒）。
 // 与 NO_CREDITS_BUILTIN 是**两个维度**：cline 属「无积分但可删可停」，
@@ -938,6 +942,13 @@ function fmtTokens(n) {
   return n.toLocaleString("zh-CN");
 }
 
+// creditTermOf / creditTerm 渠道级**显示术语**（后端 credits_term 是唯一真源）：
+// ModelScope 站内把积分叫「魔粒」，面板文案需要跟着它，但计量口径仍是积分
+// （credits_unit 保持空串、并入积分合计与折线图）。**不在前端维护渠道名单**。
+const creditTermOf = (a) => (a && a.credits_term) || "";
+const creditTerm = (g) => creditTermOf((state.accounts || []).find((x) => (x.group || "workbuddy") === g));
+const creditTermWord = (t) => t || "积分";
+
 // creditParts 积分文案的**语义分解**（卡片 / 列表共用的唯一判据来源）：
 // 五条触发条件（不适用 / 待刷新 / token / 数字 / 临期 / 不可用）只在这里判一次，
 // 两种视图各自拼装自己的 DOM 结构（卡片单行、列表两行，票 03），避免各写一份判据漂移。
@@ -950,6 +961,7 @@ function creditParts(a) {
   return {
     kind: "num",
     isToken,
+    term: creditTermOf(a),
     num: isToken ? fmtTokens(a.credits) : a.credits,
     expiring: (a.expiring_credits || 0) > 0
       ? (isToken ? fmtTokens(a.expiring_credits) : a.expiring_credits) : 0,
@@ -972,7 +984,7 @@ function creditsText(a) {
     if (p.expiring) html += `<span class="credit-expiring"> (临期${p.expiring})</span>`;
     return html;
   }
-  let html = `<span class="credit-num">${p.num}</span><span>可用积分</span>`;
+  let html = `<span class="credit-num">${p.num}</span><span>可用${creditTermWord(p.term)}</span>`;
   if (p.expiring) html += `<span class="credit-expiring"> (临期${p.expiring})</span>`;
   if (p.unusable) html += `<span class="credit-unusable"> (不可用${p.unusable})</span>`;
   return html;
@@ -992,7 +1004,7 @@ function creditsTextRow(a) {
   }
   const unit = p.isToken
     ? `<span class="cr-unit" title="本渠道额度以 token 计量，与积分分开统计">tokens</span>`
-    : `<span class="cr-unit">可用积分</span>`;
+    : `<span class="cr-unit">可用${creditTermWord(p.term)}</span>`;
   const main = `<div class="cr-main has-unit"><span class="cr-num-box"><span class="credit-num">${p.num}</span></span>${unit}</div>`;
   let badges = "";
   if (p.expiring) badges += `<span class="credit-expiring"> (临期${p.expiring})</span>`;
@@ -1023,8 +1035,9 @@ function channelSummaries(accounts) {
   for (const a of accounts) {
     const g = a.group || "workbuddy";
     let c = byCh[g];
-    if (!c) { c = byCh[g] = { n: 0, credits: 0, expiring: 0, unusable: 0, stale: 0, na: false, isToken: false, tokens: 0 }; }
+    if (!c) { c = byCh[g] = { n: 0, credits: 0, expiring: 0, unusable: 0, stale: 0, na: false, isToken: false, tokens: 0, term: "" }; }
     c.n++;
+    if (!c.term) c.term = a.credits_term || "";
     if (a.credits_na) { c.na = true; continue; }
     // Token 计量渠道单列：只累加 token 数，**不并入**积分合计（与积分分开统计）。
     if (a.credits_unit === "token") { c.isToken = true; c.tokens += a.credits || 0; c.expiring += a.expiring_credits || 0; continue; }
@@ -1046,6 +1059,7 @@ function channelSummaries(accounts) {
       c.body = `<span class="credit-stale">待刷新</span>`;
     } else {
       c.body = `<span class="cs-num">${fmt(c.credits)}</span>`
+        + (c.term ? `<span class="cs-term" title="本渠道的积分在站内叫「${esc(c.term)}」，仍计入积分合计">${esc(c.term)}</span>` : "")
         + (c.expiring > 0 ? `<span class="cs-exp" title="${esc(expiringLabel(EXPIRING_DAYS))}，选号时优先消耗">临期${fmt(c.expiring)}</span>` : "")
         + (c.unusable > 0 ? `<span class="cs-unu" title="账号名下、本工具不可消耗的额度（不计入合计）">不可用${fmt(c.unusable)}</span>` : "")
         + (c.stale > 0 ? `<span class="cs-stale" title="部分账号余额待刷新">${c.stale} 待刷新</span>` : "");
