@@ -45,7 +45,7 @@
 
 ---
 
-## 1. 决议项索引（R1–R163）
+## 1. 决议项索引（R1–R164）
 
 **全文（含证据链、反例、已知限制）见 [`docs/决议项.md`](docs/决议项.md)** —— 改动相关代码前必读对应条目。
 
@@ -196,6 +196,7 @@
 | R161 | **ModelScope 两区额度从「不适用」变真实魔粒：主站 `/openapi/v1/magicubes/*`（余额 + 逐笔流水）+ 逐笔到期 FIFO + 幂等每日领取**（2026-11-16，票 01 只读探针 + 票 02/03/04 落地；**更正 R159 的 D5/D14 两节**） | 端点与字段为**实测**（7 次只读 GET，§0.1 单发定性）：`balance` → `total_balance` / `available_balance` / `frozen_amount`（字段名带 `_balance`，spec D2 写 `total`/`available` 是笔误）；`transactions` → `EARN` **逐笔带 `expire_at`**，格式 `"YYYY-MM-DD HH:MM:SS"` + **UTC+8 墙钟（非 RFC3339）**；`rate-limit` / `login/info` 走 `Cookie: m_session_id`（旧式大写信封，必须与 balance 的小写 `success/data` 分开解析）；无需 csrf。`Remain = available_balance`（只含可消耗）、`frozen_amount` 进「不可用」单列（不变量 17）、`Used` 负夹 0（**未实证**）；`credits_term="魔粒"` 而 `credits_unit` 保持空串 ⇒ **仍是积分**（进合计与折线，非 token 口径）；两区移出 `creditsNAKind`、纳入 10 分钟自动刷新，`VIRTUAL_ACCOUNTS` 仍不含（真多 token 池：可删可停可改名）。EARN 按到期升序 FIFO 扣 `SPEND_CONFIRM`、拆分条目**共用同一 `Name` 且不设 `Key`**（R107 同款 ⇒ `ledger` 零假流水、到期清零不再记成「消耗」）；领取 = 幂等 `GET /api/v1/users/login/info` + 借道 `transactions` 判三态（`already_claimed`/`claimed`/`no_campaign`），金额只进 `CheckinReport.Msg`、`Amount` 恒 0（否则与账本差分重复记 earn），`FollowGlobalCheckin: true` + `KeepaliveHours: []int{}`（token 无 refresh 端点）。401/403 → `ErrSessionDead`（不 Disable / 不冷却）；网络/5xx 保留旧快照标「待刷新」，**不写 0、不写「不适用」**。**未实证**：国际站是否有真实魔粒（无 AI token）、`frozen_amount` 语义、`currentUsagePerDay` 单位、`count>1` 聚合行的多到期时刻。详见 [`docs/决议项.md`](docs/决议项.md) R161 |
 | R162 | **账号页列表模式：五列拆列（平台 / 账号 / 积分 / 状态 / 操作）+ 平台列独立成渠道徽标列 + 分组行整体删除 —— R157 的局部修订（表头仍全表唯一一行，按 R123 顺延取 R162）**（2026-11-16，owner 指派 task#9 + 闸 1 三轮修订 + 票 02 落地）：平台格**只有** `chBadge()` 一枚徽标（自带渠道名、格内无第二个显示名节点、与卡片徽章逐字同源 R99）、账号格独占「昵称（可点改名）+ `UID: <短 uid>`」（**UID 不挪进平台格**）、积分格沿用 `acct-credits`、状态/操作原样搬列；分组行（渠道标题 / N 号 / 小计）**全撤**，渠道合计只住汇总条、表格渲染路径**零渠道级求和**（硬性反向护栏）；筛选入口收口到 `bindSummaryFilter`（删 `bindAcctListFilter` 与 `applyAcctFilter` 的分组行高亮）；**R157 其余不变量全部保留**（单表 + 唯一 `thead`、每渠道分段容器、R142 序 + 组内原序、可见性统一且不用 `:has()`、卡片零改动、`credits_na` 与默认收起正交、功能按钮条、`acct-view` 偏好、窄屏横滚不裁列、表头不粘性）；术语「面板语境『平台』= 渠道（上游服务）」两处登记（本条 + 接口参考），不新建 GLOSSARY/ADR/docs 文件。回归：场景 1.95 原地改写（4→5 列）+ 新增场景 1.97（12 断言），变异 6 处全部确认变红；已知限制：`min-width` 仍四列时代的 560px（待实测重定）、长渠道名占宽与三档真机截图属闸 2 未做。详见 [`docs/决议项.md`](docs/决议项.md) R162 |
 | R163 | **新增内建渠道豆包（`doubao/*`，第 26 条）；流式纪律四缺口合并后补修**（2026-11-16，PR #225）：工作模式 `/chat/completion` + 9 真模型 + 扫码登录 + 签到/窗口限额额度 + 工具调用文本协议（R49：不宣告能力）+ 随聊随删会话焚化；合并后补修 4 个真机探针复现的阻塞项（tool 末条被跳过且消息重复 / gate 前缀重复下发 / 空闲看门狗缺失 / 流内错误未分类）及装配层杂项（err 覆盖、注释错位、randDigits panic、取消态、rawStr 测试掩蔽）。详见 [`docs/决议项.md`](docs/决议项.md) R163 |
+| R164 | **loomy 上游瞬时失败（502/503 + 快速传输层抖动）在渠道客户端内部原地重试，耗尽才原样透传**（2026-11-16，owner task#11；票 01 prefactor + 02 重试循环 + 03 登记，**票 03 仅登记、不改代码**，按 R123 顺延取 **R164**）：判据单点函数 `chatRetryable`——可重试 `502`/`503` + **快速**传输层瞬态（ECONNRESET/ECONNREFUSED/EPIPE/EOF），**排除** `500`（确定性形态）/`504` 与「等响应头超时」（可能已生成 ⇒ 双扣分）/`429`/其它 `4xx`；**逐次独立判定**（序列中间改口 429/400/504 立即返回）；预算 = 首次 + 最多 3 重试（共 4 次）+ `1s/2s/4s`±25% 抖动 + **10s 死线自首次起算** + **退避前置检查**（越线不睡不重试）；**固定同号、不计错、不轮换、不降级**（R109 口径不变，handler/挑号/粘性路由/账号惩罚面零改动）；只在**响应头阶段**（下游零字节）重试且**复用同一 `traceparent`**；两行可检索日志（retry / retry-exhausted）、零凭据、不加计数器；只改 loomy 包（`retry.go` + `chatStreamOnce`），**不抽公共包、不新增配置项**；**显式不进 §2**（单渠道细节，等第二复用方再升级）；证据分层：116×502 多日分布 / 8 次传输层错误 / 19 次 27 秒连发为**实测**，`traceparent` 去重属**推断**；已知限制：残留双扣分风险、`traceparent` 复用假设、故障期重试放大 ~4×、502 host/账号归因不可辨。详见 [`docs/决议项.md`](docs/决议项.md) R164 |
 
 > ⚠️ **R71 附带的实测纪律**（也是 §0.1 的来源）：上游校验的是**头族齐全**而非单点
 > （只补 `X-Conversation-ID` 仍被拒）；且 `X-Conversation-ID` 的**取值形态不被校验**
@@ -498,7 +499,7 @@ bash scripts/probe-dump.sh summarize                # 汇总各渠道 usage 字�
 | [README.md](README.md) | 用户文档 |
 | [DEVELOPMENT.md](DEVELOPMENT.md) | 开发者文档（面向 AI Agent） |
 | [AGENTS.md](AGENTS.md) | **本文件**：纪律 + 决议索引 + 关键不变量 + 构建发版 |
-| [docs/决议项.md](docs/决议项.md) | **R1–R163 决议全文**（证据链、反例、已知限制） |
+| [docs/决议项.md](docs/决议项.md) | **R1–R164 决议全文**（证据链、反例、已知限制） |
 | [docs/渠道接入备忘.md](docs/渠道接入备忘.md) | 各渠道协议要点、凭据模型、已知限制与踩坑 |
 | [docs/接口参考.md](docs/接口参考.md) | 面板区块规划 + 管理 API 全量清单 |
 | [docs/模型降级链定义.md](docs/模型降级链定义.md) | **模型降级链的唯一权威定义**：三维归因、错误类型全量归属、两条触发路径、三条硬规则、已知限制（R94） |
