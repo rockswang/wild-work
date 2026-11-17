@@ -69,8 +69,10 @@ var stsURL = codearts.STSTokenURL
 // Result 登录成功后拿到的凭据与账号信息。
 //
 // AccessToken 承载 **AK**（与渠道包/落盘约定一致：本渠道没有 Bearer token）。
-// ⚠️ 但 **AK 不是账号唯一标识** —— 它是每次交换**新签发**的临时凭据；而上游又不下发任何身份字段，
-// 所以「账号身份」只能由用户填的 Label 决定（留空时退回复用已有 UID），见 Label 与 SaveAuth。
+// ⚠️ **AK 不是账号唯一标识** —— 它是每次交换**新签发**的临时凭据（续期还会换）。
+// 账号身份来自 refresh_token 的 JWS payload（codearts.ParseRefreshClaims）：
+// account_id / principal_id 是**华为云账号级常量**，同账号的多套会话共用同一值。
+// 优先级见 SaveAuth；Label 仍是最高的手工覆盖手段。
 // 其余渠道专有字段在 SaveAuth 里进 auth.Auth.Extra。
 type Result struct {
 	AccessToken  string
@@ -83,12 +85,17 @@ type Result struct {
 	Nickname  string
 	// Label 用户指定的「账号标识」（可选，由调用方在保存前填入）。
 	//
-	// 为什么需要它：上游不提供任何稳定身份字段（2026-10-17 实测：STS 响应与
-	// statistics/plugin 的字段全集里都没有 user_id/domain_id），UID 只能落到临时 AK
-	// ⇒ 既无法区分多个华为账号，重复登录又会被写成新条目。用户填的标识是唯一可靠的区分手段：
-	// **填同一标识 = 同一账号（覆盖）；填不同标识 = 多个账号（并存）**。
-	// 留空则退回「复用该渠道已有账号的 UID」（见 SaveAuth）。
+	// 语义：**填同一标识 = 同一账号（覆盖同一文件）；填不同标识 = 多个账号（并存）**。
+	// 它是最高优先级的手工覆盖手段：想让「同一账号的两套会话」分别成条时，填不同 Label 即可。
+	// 留空不再退化成「复用已有账号的 UID」（那是覆盖别人的根因，R159），
+	// 而是用下面的 AccountID 判同。
 	Label string
+
+	// AccountID / PrincipalID / AccountName 账号级身份（从 refresh_token 的 user_profile 解出）。
+	// 空串 = 上游这次没给（老凭据形态 / JWS 变了），此时退回 UserID → DomainID → UID(AK)。
+	AccountID   string
+	PrincipalID string
+	AccountName string
 
 	// 签名三件套 + 续期材料（SaveAuth 落 Extra）。
 	AccessKeyID     string
@@ -247,30 +254,55 @@ func Shutdown() {
 // auth.Auth.SaveAtomic()，保证落盘字节形态与 auth.Parse / auth.LoadCodeArtsDir /
 // 续期回写**完全同源**（不变量 3，Extra 键名也只有一个来源）。
 func SaveAuth(authDir string, r Result) (string, error) {
-	if strings.TrimSpace(r.UID) == "" && strings.TrimSpace(r.Label) == "" {
+	if strings.TrimSpace(r.UID) == "" && strings.TrimSpace(r.Label) == "" && strings.TrimSpace(r.AccountID) == "" {
 		return "", errors.New("missing uid in result")
 	}
-	// ── UID 优先级（2026-10-17 起）──────────────────────────────────────────────
-	//   1. **用户指定的 Label**（最可靠：直接表达「这是哪个账号」，也是多账号的唯一手段）；
-	//   2. 上游稳定身份字段（当前上游不下发，留着以备将来）；
-	//   3. **复用该渠道已有账号的 UID**（= 同一账号重新登录，覆盖同一文件）；
-	//   4. 兜底 r.UID（= 临时 AK；仅当目录为空且未填 Label 时才会走到）。
+	// ── UID 优先级（2026-11-17 修订，R159）──────────────────────────────────────
+	//   1. **用户指定的 Label** —— 手工覆盖；想给「同一账号的两套会话」各建一条就用它；
+	//   2. **refresh_token 里的 account_id**（账号级稳定身份，见 claims.go）：
+	//      目录里已有同 account_id 的条目 ⇒ 复用它的 UID（同一账号重登 = 覆盖自己那条）；
+	//      否则以 account_id 作为新 UID（新账号 = 新文件）；
+	//   3. 上游 UserID / DomainID（当前不下发，留着以备将来）；
+	//   4. 兜底 r.UID（= 本次临时 AK；只有身份完全拿不到时才会走到）。
 	//
-	// 背景：上游 STS 只回 `credentials.*` + `refresh_token`，**不含任何身份字段**（协议 §2.7；
-	// 2026-10-17 抓包核对 statistics/plugin 的字段全集，亦无 user_id/domain_id）⇒ 直接用 AK
-	// 会导致「点一次新增就多一个账号」（用户实测报告）；而**单纯**复用已有 UID 又让第二个华为账号
-	// 无处安放（用户随后实测报告）。故引入 Label 由用户显式区分。
-	if label := strings.TrimSpace(r.Label); label != "" {
-		r.UID = label
-	} else if strings.TrimSpace(r.UserID) == "" && strings.TrimSpace(r.DomainID) == "" {
-		if uid := firstExistingUID(authDir); uid != "" {
-			r.UID = uid
+	// ⚠️ 为什么删掉旧的「复用该渠道**第一个**已存在账号的 UID」（2026-10-17 的方案 B）：
+	// 上游确实不在 STS 响应体里给身份字段，但身份在 **refresh_token 的 JWS payload** 里
+	// （user_profile.account_id，2026-11-17 实测）。旧方案在只有一个账号时看起来无害，
+	// 一旦有第二个账号，无论你登的是哪个号都会被写进「第一个账号的文件」——
+	// 表现就是「登录成功、账号数不变、余额却变成了新号的」（真机事故：老号 3620 变 4500，
+	// 老号凭据被覆盖后彻底失效，因为 refresh_token 是单次轮转票据、过期代数不可兑）。
+	uid := strings.TrimSpace(r.UID)
+	switch {
+	case strings.TrimSpace(r.Label) != "":
+		uid = strings.TrimSpace(r.Label)
+	case strings.TrimSpace(r.AccountID) != "":
+		if existing := findExistingUIDByAccountID(authDir, r.AccountID); existing != "" {
+			uid = existing
+		} else {
+			uid = strings.TrimSpace(r.AccountID)
 		}
+	case strings.TrimSpace(r.UserID) != "":
+		uid = strings.TrimSpace(r.UserID)
+	case strings.TrimSpace(r.DomainID) != "":
+		uid = strings.TrimSpace(r.DomainID)
 	}
+	r.UID = uid
 	if strings.TrimSpace(r.AccessKeyID) == "" || strings.TrimSpace(r.SecretAccessKey) == "" {
 		// 防御：exchange 已硬校验，这里再挡一次——半成品凭据落盘后不可用且污染账号池。
 		return "", errors.New("missing access_key_id/secret_access_key in result")
 	}
+	// ── 跨账号覆盖护栏（R159 的止血带）────────────────────────────────────────
+	// uid 已由 Label / account_id 决定，理论上不会撞到别的账号；但 Label 是用户输入，
+	// 手滑填成「另一个账号已有的标识」就会静默覆盖别人的凭据（且旧凭据是单次轮转票据，
+	// 被覆盖后再也兑不回来）。这里在落盘前最后挡一次：目标文件属于**另一个**账号就拒绝。
+	// 目标文件没有 account_id（老凭据形态）时无从判断，按旧行为允许覆盖。
+	dest := filepath.Join(authDir, "codearts-"+codearts.SanitizeFileID(r.UID)+".json")
+	if want := strings.TrimSpace(r.AccountID); want != "" {
+		if got := accountIDOfFile(dest); got != "" && got != want {
+			return "", fmt.Errorf("拒绝覆盖 %s：它属于账号 %s，本次登录的是 %s", filepath.Base(dest), got, want)
+		}
+	}
+
 	cred := codearts.Credential{
 		AccessKeyID:     r.AccessKeyID,
 		SecretAccessKey: r.SecretAccessKey,
@@ -280,6 +312,9 @@ func SaveAuth(authDir string, r Result) (string, error) {
 		DomainID:        r.DomainID,
 		UserID:          r.UserID,
 		UserName:        r.UserName,
+		AccountID:       r.AccountID,
+		PrincipalID:     r.PrincipalID,
+		AccountName:     r.AccountName,
 	}
 	ac := codearts.AccountFromCredential(r.UID, r.Nickname, cred, r.CodeVerifier, r.DPoPPrivateJWK)
 	ac.ProjectID = r.ProjectID
@@ -287,23 +322,62 @@ func SaveAuth(authDir string, r Result) (string, error) {
 	return codearts.WriteAuthFile(authDir, ac)
 }
 
-// firstExistingUID 返回该渠道**已落盘账号的第一个 UID**（按文件名序，确定性）。
+// findExistingUIDByAccountID 在已落盘账号里找 **account_id 相同**的那条，返回它的 UID。
 //
-// 无账号 / 读取失败 / UID 全空时返回空串——调用方退回新 UID（与旧行为一致，不会因此失败）。
-// 用途见 SaveAuth 的「方案 B」注释：上游没有稳定身份字段时用它避免重复条目。
-func firstExistingUID(authDir string) string {
+// 用途：同一账号重新登录必须覆盖**它自己**那条（而不是第一条），这样「覆盖」与
+// 「多账号并存」两种语义都成立，且不依赖文件名顺序。找不到 / 读取失败返回空串。
+//
+// 判据读两处：新文件在 Extra 里就有 account_id；老文件没有，就从它的 refresh_token 现解
+// （同一个账号即使换过 refresh_token，account_id 也不变）。
+func findExistingUIDByAccountID(authDir, accountID string) string {
+	accountID = strings.TrimSpace(accountID)
+	if accountID == "" {
+		return ""
+	}
 	auths, err := auth.LoadCodeArtsDir(authDir)
 	if err != nil {
 		return ""
 	}
 	for _, a := range auths {
-		if a != nil {
-			if uid := strings.TrimSpace(a.UID); uid != "" {
-				return uid
-			}
+		if a == nil {
+			continue
+		}
+		if accountIDOfAuth(a) != accountID {
+			continue
+		}
+		if uid := strings.TrimSpace(a.UID); uid != "" {
+			return uid
 		}
 	}
 	return ""
+}
+
+// accountIDOfAuth 取一条已解析账号的身份键（Extra 优先，老文件回退解 refresh_token）。
+func accountIDOfAuth(a *auth.Auth) string {
+	if a == nil {
+		return ""
+	}
+	a.RLock()
+	got := strings.TrimSpace(a.Extra[codearts.ExtraAccountID])
+	rt := a.RefreshToken
+	a.RUnlock()
+	if got != "" {
+		return got
+	}
+	return codearts.ParseRefreshClaims(rt).AccountKey()
+}
+
+// accountIDOfFile 取单个 auth 文件的身份键；文件不存在或解析失败返回空串。
+func accountIDOfFile(path string) string {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	a, err := auth.Parse(raw)
+	if err != nil {
+		return ""
+	}
+	return accountIDOfAuth(a)
 }
 
 // ---------------------------------------------------------------------------
@@ -340,7 +414,14 @@ func exchange(client *http.Client, st state, code string) (Result, error) {
 		Domain:          "codearts.huaweicloud.com",
 		ApiHost:         codearts.APIBase,
 	}
-	res.UID = firstNonEmpty(res.UserID, res.DomainID, res.AccessKeyID)
+	// 账号级身份：只存在于 refresh_token 的 JWS payload 里（STS 响应体不含）。
+	// 解不出来就留空 —— SaveAuth 会退回旧口径，登录照常成功。
+	if claims := codearts.ParseRefreshClaims(cred.RefreshToken); claims.OK {
+		res.AccountID = claims.AccountID
+		res.PrincipalID = claims.PrincipalID
+		res.AccountName = claims.AccountName
+	}
+	res.UID = firstNonEmpty(res.AccountID, res.UserID, res.DomainID, res.AccessKeyID)
 	res.Nickname = firstNonEmpty(res.UserName, shortLabel(res.AccessKeyID))
 	return res, nil
 }
