@@ -42,9 +42,12 @@ type imageMock struct {
 	convText string
 
 	// 下载侧
-	downloadIDs   []string
+	downloadIDs []string
+	// noDownloadURL 让下载接口不返回 download_url（第一步就失败）。
 	noDownloadURL bool
-	products      map[string][]byte
+	// brokenSignedURL 让签名直链取字节返回 500（第二步失败，但直链本身已给出）。
+	brokenSignedURL bool
+	products        map[string][]byte
 
 	// srvBase 是本假上游自己的地址（伪造 upload_url / download_url 用）。
 	srvBase string
@@ -105,7 +108,12 @@ func (m *imageMock) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		id := strings.TrimPrefix(r.URL.Path, "/estuary/")
 		m.mu.Lock()
 		body := m.products[id]
+		broken := m.brokenSignedURL
 		m.mu.Unlock()
+		if broken {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
 		w.Header().Set("content-type", "image/png")
 		_, _ = w.Write(body)
 	case r.URL.Path == PathFConversationPrepare:
