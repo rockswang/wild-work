@@ -34,6 +34,23 @@ func TestClassifyFullTable(t *testing.T) {
 	}
 }
 
+// TestSessionDeadIsRotatableNotPunished 票 01 验收：登录态失效是**自愈标记**，
+// 不得归到需要停用/长期冷却的类别（换号 + 重登后自动清除）。
+func TestSessionDeadIsRotatableNotPunished(t *testing.T) {
+	k := Classify(401, `{"detail":"not login"}`)
+	if k != provider.ErrSessionDead {
+		t.Fatalf("401 分类 = %v，期望 session_dead", k)
+	}
+	if !k.Rotatable() {
+		t.Error("session_dead 必须可轮换（否则单号 401 会把整渠道钉死在冷却里）")
+	}
+	for _, bad := range []provider.ErrKind{provider.ErrHardCredit, provider.ErrAccountFault, provider.ErrClient, provider.ErrServer} {
+		if k == bad {
+			t.Errorf("401 不得归为 %v", bad)
+		}
+	}
+}
+
 // TestClassify429BeatsHardMarkers 不变量 15：限流报文高频带余额/额度字样，
 // 429 必须优先于任何文案判定（否则限流被当成余额耗尽 → 长冷却）。
 func TestClassify429BeatsHardMarkers(t *testing.T) {
