@@ -18,6 +18,7 @@
 package chatgpt
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -30,6 +31,7 @@ import (
 	"time"
 
 	"wild-work/internal/auth"
+	"wild-work/internal/idle"
 	"wild-work/internal/provider"
 )
 
@@ -181,7 +183,6 @@ func (c *Client) runImages(a *auth.Auth, req provider.ImageRequest, refs []refIn
 		return nil, badParams("n=%d 超过本渠道单次上限 %d", n, maxImages)
 	}
 	// 尺寸/比例：接受但忽略（上游不收 size）——不报错、也不假装生效。
-	_ = req.Size
 
 	// 预检先跑：上传是带设备指纹的高敏感调用（且消耗 file_upload 配额），
 	// 挑战未过就先别碰它；拿到的 token 直接给第一轮用（一次性，别浪费）。
@@ -193,12 +194,21 @@ func (c *Client) runImages(a *auth.Auth, req provider.ImageRequest, refs []refIn
 	if err != nil {
 		return nil, err
 	}
+	got, err := c.collectImages(a, prompt, atts, n, sen)
+	if err != nil {
+		return nil, err
+	}
+	return c.downloadProducts(a, got)
+}
 
+// collectImages 跑 n 轮对话收集产物指针（n>1 靠多轮请求凑；上游一次只出 1~2 张）。
+func (c *Client) collectImages(a *auth.Auth, prompt string, atts []attachment, n int, sen *Sentinel) ([]capturedImage, error) {
 	convID, parentID := "", ""
 	var got []capturedImage
 	for i := 0; i < n; i++ {
 		if i > 0 {
 			// sentinel token 一次性：每轮都要一张新的（缓存里没有就跑完整链路）。
+			var err error
 			if sen, err = c.EnsureFresh(a); err != nil {
 				return nil, err
 			}
@@ -225,7 +235,11 @@ func (c *Client) runImages(a *auth.Auth, req provider.ImageRequest, refs []refIn
 			convID, parentID = "", ""
 		}
 	}
+	return got, nil
+}
 
+// downloadProducts 把产物指针逐个换成真地址 + 字节（两步，签名短命、不缓存）。
+func (c *Client) downloadProducts(a *auth.Auth, got []capturedImage) ([]provider.ImageResult, error) {
 	out := make([]provider.ImageResult, 0, len(got))
 	for _, g := range got {
 		body, _, signed, err := c.DownloadImage(a, g.ref.FileID, g.convID)
@@ -287,16 +301,21 @@ func (c *Client) imageTurn(a *auth.Auth, prompt string, atts []attachment, convI
 	if err != nil {
 		return nil, upstreamErr("生图对话请求体序列化失败: " + err.Error())
 	}
-	resp, err := c.OpenStream(a, PathFConversation, payload, conversationHeaders(traceID, conduit, sen))
+	// 流中空闲看门狗需要请求本身绑 ctx（只 cancel 一个游离 ctx 唤不醒卡住的 Read）。
+	ctx, cancel := context.WithCancel(context.Background())
+	resp, err := c.OpenStreamCtx(ctx, a, PathFConversation, payload, conversationHeaders(traceID, conduit, sen))
 	if err != nil {
+		cancel()
 		return nil, err // 传输层错误：不换号、不计账号错误
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		b, _ := io.ReadAll(io.LimitReader(resp.Body, maxErrBody))
+		cancel()
 		return nil, StatusError("POST", PathFConversation, resp.StatusCode, b)
 	}
-	st, _, err := consumeTurn(resp.Body, func(string, string) error { return nil })
+	// 空闲看门狗与对话同口径：拿到响应头之后彻底卡死，多等不会变好（R58）。
+	st, _, err := consumeTurn(idle.Monitor(resp.Body, c.IdleTimeout(), cancel), func(string, string) error { return nil })
 	if err != nil {
 		return nil, asProviderError(err)
 	}

@@ -93,41 +93,10 @@ func (c *Client) UploadImage(a *auth.Auth, data []byte, name, mime string) (*att
 		name = "ref" + extByMime(mime)
 	}
 
-	// ① 预占（老账号可能没有 reservation 资格，失败不影响主流程）。
-	resUploadURL := c.reserveUploadSlot(a)
-
-	// ② 登记元数据，拿 file_id 与 upload_url。
-	reg := map[string]any{
-		"entry_surface":                   uploadEntrySurface,
-		"file_name":                       name,
-		"file_size":                       len(data),
-		"client_resolved_mime_type":       mime,
-		"mime_resolution_source":          "filename_extension",
-		"mime_type":                       mime,
-		"reset_rate_limits":               false,
-		"supports_direct_azure_multipart": true,
-		"timezone_offset_min":             defaultTimezoneOffsetMin,
-		"use_case":                        uploadUseCaseImage,
-		"store_in_library":                true,
-		"library_persistence_mode":        uploadLibMode,
-	}
-	st, m, raw, err := c.DoJSON(a, "POST", PathFiles, reg, map[string]string{"content-type": "application/json"})
+	// ①② 预占 + 登记元数据（拿 file_id 与上传直链）。
+	fileID, uploadURL, err := c.registerUpload(a, len(data), name, mime)
 	if err != nil {
-		return nil, err // 传输层错误原样返回：与账号健康无关
-	}
-	if st != http.StatusOK {
-		return nil, StatusError("POST", PathFiles, st, raw)
-	}
-	fileID := str(m["file_id"])
-	uploadURL := str(m["upload_url"])
-	if fileID == "" {
-		return nil, upstreamErr("POST /files 未返回 file_id: " + truncate(string(raw), 400))
-	}
-	if uploadURL == "" {
-		uploadURL = resUploadURL
-	}
-	if uploadURL == "" {
-		return nil, upstreamErr("POST /files 未返回 upload_url（且预占也没拿到）")
+		return nil, err
 	}
 
 	// ③ 直传对象存储（**不带 Authorization**，SAS 在 URL 里）。
@@ -141,6 +110,48 @@ func (c *Client) UploadImage(a *auth.Auth, data []byte, name, mime string) (*att
 	}
 	w, h := imageSize(data)
 	return &attachment{FileID: fileID, Name: name, MimeType: mime, SizeBytes: int64(len(data)), Width: w, Height: h}, nil
+}
+
+// registerUpload 走上传的前两步：预占（可失败，非致命）+ 登记元数据。
+// 返回 file_id 与上传直链；任一形状缺失都归 ErrUpstream（不换号、不罚账号）。
+func (c *Client) registerUpload(a *auth.Auth, size int, name, mime string) (string, string, error) {
+	// ① 预占（老账号可能没有 reservation 资格，失败不影响主流程）。
+	resUploadURL := c.reserveUploadSlot(a)
+
+	// ② 登记元数据，拿 file_id 与 upload_url。
+	reg := map[string]any{
+		"entry_surface":                   uploadEntrySurface,
+		"file_name":                       name,
+		"file_size":                       size,
+		"client_resolved_mime_type":       mime,
+		"mime_resolution_source":          "filename_extension",
+		"mime_type":                       mime,
+		"reset_rate_limits":               false,
+		"supports_direct_azure_multipart": true,
+		"timezone_offset_min":             defaultTimezoneOffsetMin,
+		"use_case":                        uploadUseCaseImage,
+		"store_in_library":                true,
+		"library_persistence_mode":        uploadLibMode,
+	}
+	st, m, raw, err := c.DoJSON(a, "POST", PathFiles, reg, map[string]string{"content-type": "application/json"})
+	if err != nil {
+		return "", "", err // 传输层错误原样返回：与账号健康无关
+	}
+	if st != http.StatusOK {
+		return "", "", StatusError("POST", PathFiles, st, raw)
+	}
+	fileID := str(m["file_id"])
+	uploadURL := str(m["upload_url"])
+	if fileID == "" {
+		return "", "", upstreamErr("POST /files 未返回 file_id: " + truncate(string(raw), 400))
+	}
+	if uploadURL == "" {
+		uploadURL = resUploadURL
+	}
+	if uploadURL == "" {
+		return "", "", upstreamErr("POST /files 未返回 upload_url（且预占也没拿到）")
+	}
+	return fileID, uploadURL, nil
 }
 
 // reserveUploadSlot 预占一次上传槽，返回它的 upload_url（拿不到返回空串）。
