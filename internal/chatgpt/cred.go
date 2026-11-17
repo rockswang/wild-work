@@ -90,7 +90,7 @@ func ParseCookieString(s string) map[string]string {
 //
 // 容忍三种常见粘贴形态：裸值、带 `Cookie:` 前缀（复制整行请求头）、带引号。
 // **不做宽松兜底**：解析不出条目就是错，让调用方如实回报，而不是产出一个空 Cookie 账号
-//（空 Cookie 的账号「看起来加上了」，每次请求都 403，是本渠道最难排障的失败形态）。
+// （空 Cookie 的账号「看起来加上了」，每次请求都 403，是本渠道最难排障的失败形态）。
 func ParseCookieHeader(raw string) (map[string]string, error) {
 	s := strings.TrimSpace(raw)
 	// 复制整行请求头时会带 `Cookie:` 前缀（大小写不敏感）。

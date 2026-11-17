@@ -67,6 +67,19 @@ func (a *App) SubmitChatGPTAuth(cookieRaw, authRaw string) (string, string, erro
 	}
 
 	prev := a.chatgptPrevNickname(uid)
+	warn, err := a.persistChatGPTAccount(uid, token, cookies, probe.DeviceID, me, prev)
+	if err != nil {
+		return "", "", err
+	}
+	return uid, warn, nil
+
+}
+
+// persistChatGPTAccount 是 chatgpt 账号入库的**唯一路径**：同 uid 告警 → 落盘 → 重载池 → 重拉模型。
+//
+// 拆出来是为了让 SubmitChatGPTAuth 只管「输入规整 + 零配额校验」，不被落盘细节撑过一屏。
+func (a *App) persistChatGPTAccount(uid, token string, cookies map[string]string, deviceID string,
+	me *chatgpt.UserInfo, prev chatgptPrev) (string, error) {
 	warn := ""
 	if prev.seen {
 		warn = fmt.Sprintf("这个 ChatGPT 账号（%s）已经添加过了，本次会用新凭据覆盖它。", chatgptUIDTail(uid))
@@ -78,7 +91,7 @@ func (a *App) SubmitChatGPTAuth(cookieRaw, authRaw string) (string, string, erro
 		Nickname:    chatgptNickname(me, token, uid, prev.nickname),
 		AccessToken: token,
 		Cookies:     cookies,
-		DeviceID:    probe.DeviceID,
+		DeviceID:    deviceID,
 		// 真实到期时刻：解 access token 的 JWT exp。解不出来留 0（未知，不臆造、不写远期）——
 		// 0 会让下一次续期（RefreshToken）补上真实值（不变量 21 的反面：写远期会让 90 天后静默死掉）。
 		ExpiresAt: chatgpt.JWTExp(token),
@@ -87,17 +100,17 @@ func (a *App) SubmitChatGPTAuth(cookieRaw, authRaw string) (string, string, erro
 	}
 
 	if err := os.MkdirAll(a.cfg.AuthDir, 0o755); err != nil {
-		return "", "", fmt.Errorf("创建凭据目录失败：%w", err)
+		return "", fmt.Errorf("创建凭据目录失败：%w", err)
 	}
 	if err := aa.SaveAtomic(); err != nil {
-		return "", "", fmt.Errorf("保存 ChatGPT 凭据失败：%w", err)
+		return "", fmt.Errorf("保存 ChatGPT 凭据失败：%w", err)
 	}
 	// 日志零 token（不变量 2）：只打 uid 与「是否覆盖」。
 	log.Printf("chatgpt 账号已添加（面板粘贴凭据）uid=%s 覆盖已有=%v", uid, prev.seen)
 	a.reloadAccounts()
 	// 模型目录立刻重拉 + 费率异步刷新（否则用户要等下一次 ticker 才在面板看到模型）。
 	a.afterAccountAdded(provider.ChatGPT)
-	return uid, warn, nil
+	return warn, nil
 }
 
 // chatgptAuthError 把校验失败的上游错误翻成可行动的文案。
@@ -227,4 +240,3 @@ func (a *App) chatgptPrevNickname(uid string) chatgptPrev {
 	}
 	return chatgptPrev{}
 }
-

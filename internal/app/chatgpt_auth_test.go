@@ -365,6 +365,7 @@ func TestChatGPTAuthErrorPassthrough(t *testing.T) {
 		t.Errorf("传输层失败也要提示代理，得到 %v", e)
 	}
 }
+
 // TestRouteChatGPTAuthPaste 端到端：面板 POST /api/login/chatgpt_auth 成功即入池，
 // 且 /api/state 只回昵称与 uid —— **不回显任何凭据明文**（票 05 验收第 3 条）。
 func TestRouteChatGPTAuthPaste(t *testing.T) {
