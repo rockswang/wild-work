@@ -182,8 +182,8 @@ func (c *Client) Prefetch(a *auth.Auth) {
 //
 // 返回的 chan 在完成时关闭（nil = 未启用预取：没有 dataDir）。
 func (c *Client) PrefetchAsync(a *auth.Auth) <-chan struct{} {
-	if c.cachePath("") == "" {
-		return nil
+	if c.dataDirValue() == "" {
+		return nil // 未启用磁盘缓存（无数据目录）
 	}
 	done := make(chan struct{})
 	go func() {
