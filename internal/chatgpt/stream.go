@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"strings"
 	"time"
 
 	"wild-work/internal/provider"
@@ -25,6 +24,12 @@ import (
 
 // errTurnFinished 是「收到 [DONE]」的内部信号，不外泄。
 var errTurnFinished = errors.New("chatgpt: turn finished")
+
+// truncatedErr 标记「流被截断」这一**来源**（与信封业务错误区分）：
+// 出口据此选 error 帧的 code，不靠嗅探错误文案。
+type truncatedErr struct{ msg string }
+
+func (e *truncatedErr) Error() string { return e.msg }
 
 // streamDelta 是一条增量回调（正文增量 + 思考增量，各自可能为空）。
 type streamDelta func(text, reason string) error
@@ -67,11 +72,11 @@ func consumeTurn(r io.Reader, onDelta streamDelta) (*turnState, int, error) {
 		if _, ok := err.(*provider.Error); ok {
 			return st, frames, err
 		}
-		return st, frames, upstreamErr("上游流被截断: " + err.Error())
+		return st, frames, &truncatedErr{msg: "上游流被截断: " + err.Error()}
 	}
 	if !sawDone {
 		// 读到 EOF 却没有 [DONE]：上游中途断连，内容不可信 ⇒ 报截断（不补收尾）。
-		return st, frames, upstreamErr("上游流被截断（上游未发 [DONE] 就断连）")
+		return st, frames, &truncatedErr{msg: "上游流被截断（上游未发 [DONE] 就断连）"}
 	}
 	return st, frames, nil
 }
@@ -208,7 +213,12 @@ func (c *Client) Stream(w http.ResponseWriter, r io.Reader, model string) (map[s
 	})
 	if err != nil {
 		pe := asProviderError(err)
-		sw.fail(errorCodeOf(pe), pe.Msg)
+		code := "upstream_error"
+		var te *truncatedErr
+		if errors.As(err, &te) {
+			code = "upstream_truncated"
+		}
+		sw.fail(code, pe.Msg)
 		return nil, provider.AsClassified(pe)
 	}
 	if frames == 0 {
@@ -265,16 +275,12 @@ func upstreamErr(msg string) *provider.Error {
 	return &provider.Error{Kind: provider.ErrUpstream, Status: http.StatusBadGateway, Msg: msg}
 }
 
-// errorCodeOf 给错误帧选 code：截断与业务错误对客户端的意义不同。
-func errorCodeOf(pe *provider.Error) string {
-	if strings.HasPrefix(pe.Msg, "上游错误") {
-		return "upstream_error"
-	}
-	return "upstream_truncated"
-}
-
 // asProviderError 保证错误一定是 *provider.Error（截断/形状失败都已类型化）。
 func asProviderError(err error) *provider.Error {
+	var te *truncatedErr
+	if errors.As(err, &te) {
+		return upstreamErr(te.msg)
+	}
 	var pe *provider.Error
 	if errors.As(err, &pe) {
 		return pe
