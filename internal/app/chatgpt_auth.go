@@ -160,6 +160,10 @@ func chatgptNickname(me *chatgpt.UserInfo, token, uid, prev string) string {
 	if n := chatgpt.JWTName(token); n != "" {
 		return n
 	}
+	// 网页 JWT 常只带 email（profile.name 不一定有）—— 用它比「uid 尾号」更能认出是谁的号。
+	if email, _, _, _, _ := chatgpt.JWTInfo(token); email != "" {
+		return email
+	}
 	return def
 }
 
