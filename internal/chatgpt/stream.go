@@ -67,13 +67,11 @@ func consumeTurn(r io.Reader, onDelta streamDelta) (*turnState, int, error) {
 		if _, ok := err.(*provider.Error); ok {
 			return st, frames, err
 		}
-		return st, frames, &provider.Error{Kind: provider.ErrUpstream, Status: http.StatusBadGateway,
-			Msg: "上游流被截断: " + err.Error()}
+		return st, frames, upstreamErr("上游流被截断: " + err.Error())
 	}
 	if !sawDone {
 		// 读到 EOF 却没有 [DONE]：上游中途断连，内容不可信 ⇒ 报截断（不补收尾）。
-		return st, frames, &provider.Error{Kind: provider.ErrUpstream, Status: http.StatusBadGateway,
-			Msg: "上游流被截断（上游未发 [DONE] 就断连）"}
+		return st, frames, upstreamErr("上游流被截断（上游未发 [DONE] 就断连）")
 	}
 	return st, frames, nil
 }
@@ -214,8 +212,7 @@ func (c *Client) Stream(w http.ResponseWriter, r io.Reader, model string) (map[s
 		return nil, provider.AsClassified(pe)
 	}
 	if frames == 0 {
-		pe := &provider.Error{Kind: provider.ErrUpstream, Status: http.StatusBadGateway,
-			Msg: "上游未产出任何内容（无语义帧）"}
+		pe := upstreamErr("上游未产出任何内容（无语义帧）")
 		sw.fail("upstream_empty", pe.Msg)
 		return nil, provider.AsClassified(pe)
 	}
@@ -247,8 +244,7 @@ func (c *Client) Aggregate(r io.Reader, model string) (map[string]any, error) {
 	text += textF.Flush()
 	reason += reasonF.Flush()
 	if frames == 0 && text == "" && reason == "" {
-		return nil, provider.AsClassified(&provider.Error{Kind: provider.ErrUpstream, Status: http.StatusBadGateway,
-			Msg: "上游未产出任何内容（无语义帧）"})
+		return nil, provider.AsClassified(upstreamErr("上游未产出任何内容（无语义帧）"))
 	}
 	msg := map[string]any{"role": "assistant", "content": text}
 	if reason != "" {
@@ -262,6 +258,11 @@ func (c *Client) Aggregate(r io.Reader, model string) (map[string]any, error) {
 		"choices": []any{map[string]any{"index": 0, "message": msg, "finish_reason": "stop"}},
 		// 刻意不给 usage：上游不报 token 数，编 0 会让面板把「未上报」显示成 0。
 	}, nil
+}
+
+// upstreamErr 统一「上游错误」形状：502 + 不可换号分类（唯一的构造点）。
+func upstreamErr(msg string) *provider.Error {
+	return &provider.Error{Kind: provider.ErrUpstream, Status: http.StatusBadGateway, Msg: msg}
 }
 
 // errorCodeOf 给错误帧选 code：截断与业务错误对客户端的意义不同。
@@ -278,5 +279,5 @@ func asProviderError(err error) *provider.Error {
 	if errors.As(err, &pe) {
 		return pe
 	}
-	return &provider.Error{Kind: provider.ErrUpstream, Status: http.StatusBadGateway, Msg: err.Error()}
+	return upstreamErr(err.Error())
 }
