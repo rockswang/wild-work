@@ -2933,6 +2933,7 @@ function openChatGPTPasteDialog() {
   $("cgptCookieInput").value = "";
   $("cgptAuthInput").value = "";
   $("cgptErr").textContent = "";
+  $("cgptImportResult").textContent = "";
   $("chatgptOverlay").classList.remove("hidden");
   setTimeout(() => $("cgptCookieInput").focus(), 30);
 }
@@ -2941,6 +2942,7 @@ function closeChatGPTPasteDialog() {
   $("cgptCookieInput").value = "";
   $("cgptAuthInput").value = "";
   $("cgptErr").textContent = "";
+  $("cgptImportResult").textContent = "";
   $("chatgptOverlay").classList.add("hidden");
 }
 // submitChatGPTAuth 提交两段凭据：后端先打一次零配额 /backend-api/me 校验，
@@ -2967,6 +2969,38 @@ async function submitChatGPTAuth() {
   } catch (e) {
     // 失败：错误留在弹层里（不关、不清），用户只需改其中一段
     $("cgptErr").textContent = e.message || "验证失败";
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+// importChatGPTFromDir 从 ww3 客户端数据目录批量导入存量凭据（票 08）。
+// 后端逐个文件解析（复用同一份解析器）→ 一次零费用 /backend-api/me 校验 → 不覆盖已存在账号，
+// 并把**每个文件**的结果回传（file / 短 uid / status / reason），前端逐条展示。
+// 路径层错误（目录不存在、目录里没有凭据文件）走 cgptErr —— 用户要能看出「路径不对」。
+async function importChatGPTFromDir() {
+  const dir = ($("cgptImportDir").value || "").trim();
+  if (!dir) { $("cgptErr").textContent = "请填写 ww3 客户端的数据目录（含 auths/ 子目录）"; return; }
+  const btn = $("btnCgptImport");
+  btn.disabled = true;
+  $("cgptErr").textContent = "";
+  $("cgptImportResult").textContent = "扫描并逐个校验中…";
+  try {
+    const r = await api("/api/account/import_local", { channel: "chatgpt", dir });
+    const items = r.accounts || [];
+    const LABEL = { imported: "已导入", duplicate: "已存在，已跳过", invalid: "文件无效", failed: "校验失败" };
+    $("cgptImportResult").innerHTML = items.map((it) =>
+      `<div><code>${esc(it.file)}</code>`
+      + (it.uid ? ` · <code>${esc(it.uid)}</code>` : "")
+      + ` · ${esc(LABEL[it.status] || it.status)}`
+      + (it.reason ? ` —— ${esc(it.reason)}` : "") + `</div>`).join("");
+    if (r.note) toast(`${chLabel("chatgpt")}：${r.note}`, 8000);
+    else toast(`已导入 ${r.imported || 0} 个 ${chLabel("chatgpt")} 账号`);
+    if (r.imported > 0) { $("cgptImportDir").value = ""; await loadState(); refreshFees(); }
+  } catch (e) {
+    // 路径不对：留在弹层里、不清结果，用户改路径再试
+    $("cgptImportResult").textContent = "";
+    $("cgptErr").textContent = e.message || "导入失败";
   } finally {
     btn.disabled = false;
   }
@@ -4286,6 +4320,7 @@ function bind() {
   $("btnAddChatGPT").onclick = () => promptLogin("chatgpt");
   $("btnMsSubmit").onclick = submitMsToken;
   $("btnCgptSubmit").onclick = submitChatGPTAuth;
+  $("btnCgptImport").onclick = importChatGPTFromDir;
   $("btnCgptCancel").onclick = closeChatGPTPasteDialog;
   $("btnMsCancel").onclick = closeMsDialog;
   $("btnAddOfficeAce").onclick = () => promptLogin("officeace");

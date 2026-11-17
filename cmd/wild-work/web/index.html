@@ -616,7 +616,7 @@
 
 <!-- ChatGPT Web（网页逆向通道）：粘贴**两段**凭据 —— Cookie 头 + Authorization 头。
      ⚠️ 两段缺一不可：本渠道凭据是整组网页会话，只贴其中一段会得到「校验也过、每次请求
-     都 403」的账号（本渠道最难排障的失败形态）。所以弹层刻意**两个**输入框，且没有任何
+     都 403」的账号（本渠道最难排障的失败形态）。所以弹层刻意**两个凭据**输入框（第三个是票 08 的 ww3 数据目录），且没有任何
      「浏览器自动登录 / 扫码」入口（CDP 只能拉起网关机上的浏览器，对远程 dashboard 无用）。 -->
 <div class="overlay hidden" id="chatgptOverlay">
   <div class="modal modal-wide">
@@ -640,6 +640,23 @@
         <div class="hint" style="margin-top:6px">
           <button class="btn small primary" id="btnCgptSubmit">验证并添加</button>
         </div>
+      </div>
+
+      <div class="cfg-section">
+        <div class="cfg-heading">或者：从 ww3 客户端导入</div>
+        <div class="hint">
+          这个号已经在 ww3 客户端里登录过？不用手抄凭据：填那个客户端的<b>数据目录</b>
+          （其中含 <code>auths/</code> 子目录），本工具会逐个文件做一次零费用校验后导入；
+          已存在的账号<b>只告警、不覆盖</b>。
+        </div>
+        <input id="cgptImportDir" class="input grow" spellcheck="false" autocomplete="off"
+               placeholder="ww3 客户端数据目录，例如 ~/ww3 或 C:\Users\你\AppData\Roaming\ww3"
+               style="width:100%;font-family:ui-monospace,monospace;margin-bottom:8px">
+        <div class="hint" style="margin-top:6px">
+          <button class="btn small" id="btnCgptImport">从客户端导入</button>
+          <span class="hint">每个凭据文件都会单独回传结果（试过哪个文件、上游回什么）</span>
+        </div>
+        <div class="hint" id="cgptImportResult" style="margin-top:6px"></div>
       </div>
 
       <div class="glm-warn">

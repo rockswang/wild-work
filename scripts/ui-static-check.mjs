@@ -1629,14 +1629,16 @@ const regexOk = (re) => re.test(raw);
     const modal98 = start98 >= 0 && end98 > start98 ? html98.slice(start98, end98) : "";
     check("存在 ChatGPT 粘贴弹层（id=chatgptOverlay）", modal98 !== "");
     const inputs98 = [...modal98.matchAll(/<input\b[^>]*id="(\w+)"/g)].map((m) => m[1]);
-    check("弹层恰好两个输入框：Cookie 头 + Authorization 头（只贴一段 = 看着成功、每次 403）",
-      inputs98.length === 2 && inputs98.includes("cgptCookieInput") && inputs98.includes("cgptAuthInput"),
+    check("弹层三个输入框：Cookie 头 + Authorization 头 + ww3 数据目录（票 08 导入入口）",
+      inputs98.length === 3 && inputs98.includes("cgptCookieInput") && inputs98.includes("cgptAuthInput")
+      && inputs98.includes("cgptImportDir"),
       inputs98.join(","));
-    check("两个输入都不是 hidden（用户得看得见自己在粘什么）",
+    check("粘贴两格都不是 hidden（用户得看得见自己在粘什么）",
       !/id="cgpt(?:Cookie|Auth)Input"[^>]*type="hidden"/.test(modal98));
     const btnIds98 = [...modal98.matchAll(/<button[^>]*id="(btn\w+)"/g)].map((m) => m[1]);
-    check("弹层按钮只有「验证并添加」与「关闭」（无自动登录/扫码）",
-      btnIds98.length === 2 && btnIds98.includes("btnCgptSubmit") && btnIds98.includes("btnCgptCancel"),
+    check("弹层按钮：验证并添加 / 从客户端导入 / 关闭（无自动登录、无扫码）",
+      btnIds98.length === 3 && btnIds98.includes("btnCgptSubmit") && btnIds98.includes("btnCgptImport")
+      && btnIds98.includes("btnCgptCancel"),
       btnIds98.join(","));
     check("弹层不出现浏览器登录/扫码入口（CDP 只能拉起网关机浏览器，R104）",
       !/浏览器登录|扫码|自动登录/.test(modal98));
@@ -1652,6 +1654,15 @@ const regexOk = (re) => re.test(raw);
     && /function closeChatGPTPasteDialog\(\)[\s\S]{0,240}\$\("cgptCookieInput"\)\.value = ""/.test(raw));
   check("失败不关弹层（错误留在 cgptErr，用户只需改其中一段）",
     /catch \(e\)[\s\S]{0,160}\$\("cgptErr"\)\.textContent = e\.message/.test(raw));
+
+  // ⑦ ww3 客户端目录导入（票 08）：入口就在同一个弹层，回包逐文件展示
+  check("导入按钮走 POST /api/account/import_local 并同时带 channel 与 dir",
+    /api\("\/api\/account\/import_local", \{ channel: "chatgpt", dir \}\)/.test(raw));
+  check("逐文件展示结果（file / uid / status / reason 四项都在）",
+    /items\.map\(\(it\) =>[\s\S]{0,400}it\.file[\s\S]{0,200}it\.uid[\s\S]{0,200}it\.status[\s\S]{0,200}it\.reason/.test(raw));
+  check("路径层错误留在弹层里（cgptErr）而不是被吞成「导入 0 个」",
+    /function importChatGPTFromDir\([\s\S]{0,2000}catch \(e\)[\s\S]{0,200}\$\("cgptErr"\)\.textContent = e\.message/.test(raw));
+  check("导入按钮已绑定（不是死按钮）", /\$\("btnCgptImport"\)\.onclick = importChatGPTFromDir;/.test(raw));
   check("粘贴型渠道纳入重登入口（⟳ 不落到 unknown login provider）",
     /const RELOGIN_CHANNELS = new Set\(\[[^\]]*"chatgpt"/.test(raw)
     && /if \(channel === "chatgpt"\) return promptLogin\(channel\);/.test(raw));
