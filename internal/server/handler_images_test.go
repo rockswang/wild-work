@@ -383,6 +383,8 @@ type fakeImageGen struct {
 	editCalls int
 	lastReq   provider.ImageRequest
 	err       error
+	// b64 非空时渠道自己把字节取回（provider.ImageResult.B64JSON），handler 不得再下载。
+	b64 string
 }
 
 func (f *fakeImageGen) GenerateImage(_ *auth.Auth, req provider.ImageRequest) ([]provider.ImageResult, error) {
@@ -390,11 +392,12 @@ func (f *fakeImageGen) GenerateImage(_ *auth.Auth, req provider.ImageRequest) ([
 	f.genCalls++
 	f.lastReq = req
 	err := f.err
+	b64 := f.b64
 	f.mu.Unlock()
 	if err != nil {
 		return nil, err
 	}
-	return []provider.ImageResult{{URL: "https://example.invalid/gen.png", RevisedPrompt: req.Prompt}}, nil
+	return []provider.ImageResult{{URL: "https://example.invalid/gen.png", RevisedPrompt: req.Prompt, B64JSON: b64}}, nil
 }
 
 func (f *fakeImageGen) EditImage(_ *auth.Auth, req provider.ImageRequest) ([]provider.ImageResult, error) {
@@ -402,11 +405,12 @@ func (f *fakeImageGen) EditImage(_ *auth.Auth, req provider.ImageRequest) ([]pro
 	f.editCalls++
 	f.lastReq = req
 	err := f.err
+	b64 := f.b64
 	f.mu.Unlock()
 	if err != nil {
 		return nil, err
 	}
-	return []provider.ImageResult{{URL: "https://example.invalid/edit.png"}}, nil
+	return []provider.ImageResult{{URL: "https://example.invalid/edit.png", B64JSON: b64}}, nil
 }
 
 // addImageRuntime 给 runtime 表补一个「会画图」的渠道（账号池 + 假上游），返回账号池。
@@ -603,5 +607,57 @@ func TestImagesModelCooldownKeyedByRequestedModel(t *testing.T) {
 	}
 	if st.Cooling {
 		t.Error("账号不应整冷（模型级冷却才对）")
+	}
+}
+
+// TestImagesChannelProvidedB64SkipsDownload 渠道自己把字节取回（B64JSON）时，
+// handler 必须**直接用**、不得再按 URL 下载：那条直链可能挂在指纹校验后面、
+// 或签名只剩几秒（chatgpt 的 estuary 直链）。用不可达 URL 证明没有二次下载。
+func TestImagesChannelProvidedB64SkipsDownload(t *testing.T) {
+	h, _, _ := newImagesHandler(t)
+	// base64("\x89PNG...") 的合法形状不重要，断言的是「原样透传渠道给的串」。
+	const want = "iVBORw0KGgoAAAANSUhEUg=="
+	fake := &fakeImageGen{b64: want}
+	addImageRuntime(t, h, provider.ModelScope, fake, "ms-b64")
+
+	// ① 文生图默认 b64_json
+	rec := postImages(h, "/v1/images/generations",
+		[]byte(`{"model":"modelscope/Qwen/Qwen-Image","prompt":"雪山"}`), "application/json")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d: %s", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		Data []struct {
+			B64 string `json:"b64_json"`
+			URL string `json:"url"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("响应非 JSON: %v", err)
+	}
+	if len(resp.Data) != 1 || resp.Data[0].B64 != want {
+		t.Fatalf("data = %+v，want b64 原样透传（不得二次下载）", resp.Data)
+	}
+	if resp.Data[0].URL != "" {
+		t.Errorf("b64 形态不得同时给 url: %+v", resp.Data[0])
+	}
+
+	// ② 改图同样直接用渠道字节
+	rec2 := postImages(h, "/v1/images/edits",
+		[]byte(`{"model":"modelscope/Qwen/Qwen-Image","prompt":"换背景","image":["https://example.invalid/ref.png"]}`), "application/json")
+	if rec2.Code != http.StatusOK {
+		t.Fatalf("edits status = %d: %s", rec2.Code, rec2.Body.String())
+	}
+	var resp2 struct {
+		Data []struct {
+			B64 string `json:"b64_json"`
+			URL string `json:"url"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(rec2.Body.Bytes(), &resp2); err != nil {
+		t.Fatalf("改图响应非 JSON: %v", err)
+	}
+	if len(resp2.Data) != 1 || resp2.Data[0].B64 != want {
+		t.Fatalf("改图 data = %+v，want b64 原样透传", resp2.Data)
 	}
 }

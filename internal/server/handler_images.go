@@ -156,8 +156,11 @@ func (h *Handler) imagesGenerations(w http.ResponseWriter, r *http.Request) {
 	for _, im := range imgs {
 		item := map[string]any{"revised_prompt": im.RevisedPrompt}
 		if wantB64 {
-			b64, err := fetchImageB64(imageCDNURL(im.URL, req.OutputFormat))
-			if err != nil {
+			// 渠道已把字节取回（B64JSON）就**不再下载**：直链可能挂在指纹校验后面，
+			// 或者签名只剩几秒（chatgpt 的 estuary），二次下载是多余的失败来源。
+			if b64 := strings.TrimSpace(im.B64JSON); b64 != "" {
+				item["b64_json"] = b64
+			} else if b64, err := fetchImageB64(imageCDNURL(im.URL, req.OutputFormat)); err != nil {
 				// 单图下载失败不拖垮整批：降级为 url 让客户端自行拉取
 				log.Printf("images: 产物下载失败（降级为 url）url=%s err=%v", im.URL, err)
 				item["url"] = im.URL
@@ -210,16 +213,22 @@ func (h *Handler) imagesEdits(w http.ResponseWriter, r *http.Request) {
 
 // editDataItems 把改图产物转成响应 data[]：「上游给几张就返几张」（不与 n 对齐），
 // 下载失败的那张**降级为 url**（日志留痕，不拖垮整批）。
+// 渠道已回填 B64JSON 时直接用（见 provider.ImageResult.B64JSON）。
 func editDataItems(results []provider.ImageResult, outputFormat string) []map[string]any {
 	data := make([]map[string]any, 0, len(results))
 	for _, res := range results {
 		url := strings.TrimSpace(res.URL)
-		if url == "" {
+		b64 := strings.TrimSpace(res.B64JSON)
+		if url == "" && b64 == "" {
+			continue
+		}
+		if b64 != "" {
+			data = append(data, map[string]any{"b64_json": b64})
 			continue
 		}
 		item := map[string]any{"url": url}
-		if b64, err := fetchImageB64(imageCDNURL(url, outputFormat)); err == nil {
-			item = map[string]any{"b64_json": b64}
+		if got, err := fetchImageB64(imageCDNURL(url, outputFormat)); err == nil {
+			item = map[string]any{"b64_json": got}
 		} else {
 			log.Printf("images: 改图产物下载失败（降级为 url）url=%s err=%v", url, err)
 		}

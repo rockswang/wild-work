@@ -610,6 +610,14 @@ type ImageRequest struct {
 type ImageResult struct {
 	// URL 产物引用（上游 CDN 直链，会过期：调用方按需立刻下载/转换）。
 	URL string
+	// B64JSON 是渠道**已经取回**的产物字节（base64）。
+	//
+	// 为什么需要它：产物直链有时必须用渠道自己的出站通道才能取（chatgpt 的 estuary
+	// 直链挂在受 Cloudflare 保护的上游域名上，且签名只有几分钟寿命）。这类渠道在内部
+	// 完成「指针 → 下载地址 → 字节」两步后把字节放这里，handler 直接转 b64_json，
+	// 省掉一次用裸 net/http 的二次下载（那一次多半会被指纹校验拦掉或撞上签名过期）。
+	// 留空的渠道行为不变（handler 仍按 URL 现下）。
+	B64JSON string
 	// RevisedPrompt 上游润色后的实际 prompt（部分渠道/路径没有该字段，留空）。
 	RevisedPrompt string
 }
