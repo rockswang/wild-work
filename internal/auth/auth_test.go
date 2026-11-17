@@ -134,3 +134,91 @@ func TestAdoptJWTExpiry(t *testing.T) {
 		t.Fatalf("expiresAt = %d, want 5（非 JWT 不应改动）", c.ExpiresAt)
 	}
 }
+
+// TestParseCookiesBothForms 锁住 chatgpt 渠道新加的一等字段：
+// 嵌套形（ww3 客户端 `auths/*.json`）与扁平形都必须把整组网页会话 Cookie 读出来。
+func TestParseCookiesBothForms(t *testing.T) {
+	nested := []byte(`{"auth":{"accessToken":"at","expiresAt":1753600000,"deviceId":"dev-1","cookies":{"__Secure-next-auth.session-token.0":"tok0","__Secure-next-auth.session-token.1":"tok1"}},"account":{"uid":"u-1"}}`)
+	a, err := Parse(nested)
+	if err != nil {
+		t.Fatalf("nested parse: %v", err)
+	}
+	if a.DeviceID != "dev-1" {
+		t.Errorf("deviceId = %q，期望 dev-1", a.DeviceID)
+	}
+	if len(a.Cookies) != 2 || a.Cookies["__Secure-next-auth.session-token.0"] != "tok0" {
+		t.Errorf("cookies 未零转换读出: %+v", a.Cookies)
+	}
+
+	flat := []byte(`{"accessToken":"at","cookies":{"a":"1"},"uid":"u-2"}`)
+	b, err := Parse(flat)
+	if err != nil {
+		t.Fatalf("flat parse: %v", err)
+	}
+	if len(b.Cookies) != 1 || b.Cookies["a"] != "1" {
+		t.Errorf("扁平形 cookies 未读出: %+v", b.Cookies)
+	}
+
+	// 旧文件没有 cookies 字段 ⇒ nil，不得报错（向后兼容，不变量 5）。
+	c, err := Parse([]byte(`{"auth":{"accessToken":"at","expiresAt":1},"account":{"uid":"u-3"}}`))
+	if err != nil {
+		t.Fatalf("legacy parse: %v", err)
+	}
+	if c.Cookies != nil {
+		t.Errorf("旧文件 cookies 应为 nil，得到 %+v", c.Cookies)
+	}
+}
+
+// TestSaveAtomicRoundtripCookies cookies 必须经 SaveAtomic 写盘并被重新读出，
+// 否则续期拿到的 session token 下次启动就丢了（不变量 20 的同族）。
+func TestSaveAtomicRoundtripCookies(t *testing.T) {
+	fp := filepath.Join(t.TempDir(), "chatgpt-u1.json")
+	a := &Auth{AccessToken: "at", ExpiresAt: 1753600000, DeviceID: "dev-1",
+		Cookies: map[string]string{"k0": "v0", "k1": "v1"}, UID: "u1", FilePath: fp}
+	if err := a.SaveAtomic(); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+	raw, err := os.ReadFile(fp)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	b, err := Parse(raw)
+	if err != nil {
+		t.Fatalf("reparse: %v", err)
+	}
+	if len(b.Cookies) != 2 || b.Cookies["k1"] != "v1" {
+		t.Fatalf("roundtrip cookies = %+v", b.Cookies)
+	}
+	if b.DeviceID != "dev-1" {
+		t.Fatalf("roundtrip deviceId = %q", b.DeviceID)
+	}
+}
+
+// TestLoadChatGPTDirGlobBoundary chatgpt 前缀不得吞别的渠道，也不被吞。
+func TestLoadChatGPTDirGlobBoundary(t *testing.T) {
+	dir := t.TempDir()
+	files := map[string]string{
+		"chatgpt-abc.json": `{"auth":{"accessToken":"at","expiresAt":1,"cookies":{"c":"1"}},"account":{"uid":"cg1"}}`,
+		"chatgpt2-x.json":  `{"auth":{"accessToken":"other","expiresAt":1},"account":{"uid":"cg2"}}`,
+		"cline-x.json":     `{"auth":{"accessToken":"cline","expiresAt":1},"account":{"uid":"cl"}}`,
+		"chatgpt-bad.json": `{`,
+	}
+	for name, body := range files {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	list, err := LoadChatGPTDir(dir)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if len(list) != 1 || list[0].UID != "cg1" {
+		t.Fatalf("命中 %d 个（期望仅 chatgpt-abc.json）: %+v", len(list), list)
+	}
+	if list[0].Kind != "chatgpt" || list[0].FilePath == "" {
+		t.Errorf("Kind/FilePath 未回填: %+v", list[0])
+	}
+	if len(list[0].Cookies) != 1 {
+		t.Errorf("Loader 未读出 cookies: %+v", list[0].Cookies)
+	}
+}
