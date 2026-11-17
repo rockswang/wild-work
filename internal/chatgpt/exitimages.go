@@ -111,9 +111,11 @@ func isPublicImageURL(u string) bool {
 // exitImageBlock 把图片块拼成一段 markdown（多张按上游顺序换行排列）。
 func exitImageBlock(blocks []string) string { return strings.Join(blocks, "\n") }
 
-// exitImageDelta 是流式路径的图片增量：分隔符必须与非流式拼接的形态一致
-// （同一轮同一份正文，流式拼起来 == 非流式 content）。
-func exitImageDelta(text, block string) string {
+// exitImageSuffix 返回要追加到正文末尾的片段，**流式与非流式共用同一条规则**：
+// 流式把它作为一条 delta 下发，非流式直接拼到 content ⇒ 两条出口拼出的正文逐字一致。
+//
+// 无块时返回空串（零字节改动：无图轮不得多出空行/占位）。
+func exitImageSuffix(text, block string) string {
 	if block == "" {
 		return ""
 	}
@@ -121,14 +123,6 @@ func exitImageDelta(text, block string) string {
 		return block
 	}
 	return exitImageSeparator + block
-}
-
-// exitImageContent 是非流式路径的等价拼接（无块时**原样返回**，零字节改动）。
-func exitImageContent(text, block string) string {
-	if block == "" {
-		return text
-	}
-	return text + exitImageDelta(text, block)
 }
 
 // encodeImageB64 是给 convCapture 的共用编码（与 downloadProducts 同一口径）。

@@ -240,7 +240,7 @@ func (c *Client) Stream(w http.ResponseWriter, r io.Reader, model string) (map[s
 	// 图片在正文之后（票 07.5）：OpenAI chat 形状没有图字段，只能以 markdown 追加进 content。
 	// 前缀链记录**不含**图片（ticket 第 4 条）：delivered 保持纯文本，recordTurnOf 用它的现值。
 	if block := exitImageBlock(exitImageBlocks(r, st, model)); block != "" {
-		_ = sw.delta(exitImageDelta(delivered.String(), block), "")
+		_ = sw.delta(exitImageSuffix(delivered.String(), block), "")
 	}
 	sw.finish()
 	// 只有正常收尾才记续接点：截断的回复不能在下一轮被当成会话锚点。
@@ -270,7 +270,7 @@ func (c *Client) Aggregate(r io.Reader, model string) (map[string]any, error) {
 	}
 	recordTurnOf(r, st, text, true)
 	// 图片追加在正文之后（票 07.5）；没有图时 content 逐字节不变。
-	content := exitImageContent(text, exitImageBlock(exitImageBlocks(r, st, model)))
+	content := text + exitImageSuffix(text, exitImageBlock(exitImageBlocks(r, st, model)))
 	msg := map[string]any{"role": "assistant", "content": content}
 	if reason != "" {
 		msg["reasoning_content"] = reason

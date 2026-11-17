@@ -3,6 +3,7 @@ package chatgpt
 import (
 	"encoding/base64"
 	"encoding/json"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -209,18 +210,18 @@ func TestChatExitImagesExcludedFromConvChain(t *testing.T) {
 	}
 }
 
-// TestExitImageContentNoBlockIsVerbatim 纯函数护栏：无块时零改动、有块时纯文本在前。
-func TestExitImageContentNoBlockIsVerbatim(t *testing.T) {
-	if got := exitImageContent("abc\n", ""); got != "abc\n" {
-		t.Errorf("无块拼接 = %q，必须原样返回", got)
+// TestExitImageSuffixNoBlockIsVerbatim 纯函数护栏：无块时零改动、有块时纯文本在前。
+func TestExitImageSuffixNoBlockIsVerbatim(t *testing.T) {
+	if got := exitImageSuffix("abc\n", ""); got != "" {
+		t.Errorf("无块后缀 = %q，必须为空（不得改动正文）", got)
 	}
-	if got := exitImageContent("abc", "![图](u)"); got != "abc\n\n![图](u)" {
+	if got := "abc" + exitImageSuffix("abc", "![图](u)"); got != "abc\n\n![图](u)" {
 		t.Errorf("有块拼接 = %q", got)
 	}
-	if got := exitImageContent("", "![图](u)"); got != "![图](u)" {
+	if got := "" + exitImageSuffix("", "![图](u)"); got != "![图](u)" {
 		t.Errorf("空正文拼接 = %q", got)
 	}
-	if got := exitImageDelta("abc", "![图](u)"); got != "\n\n![图](u)" {
+	if got := exitImageSuffix("abc", "![图](u)"); got != "\n\n![图](u)" {
 		t.Errorf("流式增量 = %q", got)
 	}
 	if got := exitImageURL(provider.ImageResult{}, imageRef{}); got != "" {
@@ -231,6 +232,29 @@ func TestExitImageContentNoBlockIsVerbatim(t *testing.T) {
 	}
 	if got := exitImageURL(provider.ImageResult{B64JSON: "QUJD"}, imageRef{MimeType: "image/webp"}); got != "data:image/webp;base64,QUJD" {
 		t.Errorf("b64 兜底 = %q", got)
+	}
+}
+
+// TestChatExitImageLogsOneLine 票面第 5 条：出口带图打一行日志（uid/model/图数），零凭据。
+func TestChatExitImageLogsOneLine(t *testing.T) {
+	c, _, _ := imageProductMock(t)
+	var buf strings.Builder
+	old := log.Writer()
+	log.SetOutput(&buf)
+	defer log.SetOutput(old)
+
+	chatExitAggregate(t, c)
+	out := buf.String()
+	if !strings.Contains(out, "chatgpt exit images:") {
+		t.Fatalf("缺少带图日志: %q", out)
+	}
+	for _, want := range []string{"uid=uid:u1", "model=chatgpt/auto", "count=1"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("日志 %q 缺 %q", out, want)
+		}
+	}
+	if strings.Contains(out, "tok") || strings.Contains(out, "Authorization") {
+		t.Errorf("日志不得出现凭据: %q", out)
 	}
 }
 
