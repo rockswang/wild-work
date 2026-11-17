@@ -438,3 +438,24 @@ func TestRouteChatGPTAuthPaste(t *testing.T) {
 		t.Errorf("失败响应要回显可读原因，得到 %s", raw2)
 	}
 }
+
+// TestChatGPTLoginFlowDeclaresNoBrowserFlow 票 05 验收第 4 条：
+// 登录流程表里 ChatGPT 必须登记成「无浏览器登录流程，请粘贴或导入」——
+// 且**恰好一种**发起方式（Start / DisplayURL / noFlowReason 三选一，init 自检会 panic）。
+func TestChatGPTLoginFlowDeclaresNoBrowserFlow(t *testing.T) {
+	f, ok := loginFlows[provider.ChatGPT]
+	if !ok || f == nil {
+		t.Fatal("loginFlows 里没有 ChatGPT（前端「添加账号 / ⟳」会落到 unknown login provider）")
+	}
+	if f.Start != nil || f.Poll != nil {
+		t.Error("ChatGPT 没有浏览器登录编排（凭据只能粘贴/导入），不得登记 Start/Poll")
+	}
+	if f.noFlowReason == "" {
+		t.Fatal("必须写明 noFlowReason（三选一之一），否则 init 自检 panic")
+	}
+	for _, word := range []string{"粘贴", "无浏览器登录流程", "代理"} {
+		if !strings.Contains(f.noFlowReason, word) {
+			t.Errorf("说明文案应含 %q，得到 %q", word, f.noFlowReason)
+		}
+	}
+}

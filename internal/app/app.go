@@ -974,7 +974,8 @@ func init() {
 	// ChatGPT：凭据是浏览器里的网页 session（Cookie 族），本工具**不代登录**（网页登录有
 	// 人机验证与地区限制）；另：本渠道必须配代理才能接通上游。
 	loginFlows[provider.ChatGPT] = &loginFlow{
-		noFlowReason: "ChatGPT 凭据需从浏览器登录后粘贴（「＋ ChatGPT Web」入口），本工具不代登录；本渠道必须配置代理才能连通上游",
+		noFlowReason: "ChatGPT 无浏览器登录流程：凭据需从浏览器登录后粘贴（「＋ ChatGPT Web」入口，导入见后续），" +
+			"本工具不代登录；本渠道必须配置代理才能连通上游",
 	}
 
 	// 自检：每条记录必须恰好表达一种「发起方式」，防止将来加渠道时漏填。
