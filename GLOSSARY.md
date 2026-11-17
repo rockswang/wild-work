@@ -1,6 +1,6 @@
 # GLOSSARY
 
-本仓库的**领域词汇表**（single context，按 [`docs/agents/domain.md`](docs/agents/domain.md) 的约定）。
+本仓库的**领域词汇表**（single context，按 `docs/agents/domain.md`（本地约定，仓库不收录） 的约定）。
 写代码、提工单、写测试名时**使用这里的词**；不确定某个概念该叫什么时先查这里，缺了再加。
 
 只收录「含义不止字面」「容易叫错」「一处改动会牵连多列跨模块」的术语；通用的编程词不收录。
