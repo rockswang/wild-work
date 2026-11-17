@@ -31,6 +31,16 @@ import (
 //
 // 落盘是**独立文件**（spec §7：`<data>/chatgpt-convs.json`）：账号池状态文件由
 // `pool.saveLocked` 整文件覆写，把链塞进去会在下一次积分刷新时被抹掉（R143 血案）。
+//
+// 已知限制（判据层级如实标注：**实测** = 本仓单测/httptest 假上游；**推断** = 未打真机）：
+//   - 键里的「回复正文」必须与客户端下一轮重放的历史逐字一致。客户端若改写我们的
+//     回复（加前缀、重排分片）或丢掉 system 消息，就命不中 ⇒ 安静新建，**不报错**
+//     （这是 spec §9 认可的降级，不是缺陷）。
+//   - 一条链只在**同一个账号**内有效：换号后必未命中（会话 id 是账号级凭据）。
+//   - 「上游接受 conversation_id + parent_message_id 续接」目前是**推断**（snapshot
+//     自网页请求形状）；真实上游验证留给端到端票，单测只锁死「我们发出的形状」。
+//   - LRU 的 LastHit 只在下一轮落盘时一并持久化（命中只刷新内存），进程被杀可能
+//     丢掉最近几秒的命中时刻，最坏是先淘汰了「其实刚被用过」的条目——只影响淘汰顺序。
 
 const (
 	// convChainFileName 是前缀链的独立状态文件名。
@@ -62,9 +72,9 @@ type convChainFile struct {
 //
 // path 为空 ⇒ 纯内存（未配置 data 目录；单测/无盘场景），语义不变、只是重启会丢。
 type convChain struct {
-	mu       sync.Mutex
-	path     string
-	max      int
+	mu      sync.Mutex
+	path    string
+	max     int
 	loaded  bool
 	dirty   bool
 	entries map[string]*convEntry
@@ -277,6 +287,7 @@ func recordTurnOf(r io.Reader, st *turnState, reply string, ok bool) {
 		rec.recordTurn(st, reply, ok)
 	}
 }
+
 // ── 客户端接线 ────────────────────────────────────────────────────────────
 
 // convChain 返回（必要时创建）前缀链。进程内单例：链是跨请求状态。

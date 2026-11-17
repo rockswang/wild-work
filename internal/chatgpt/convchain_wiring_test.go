@@ -28,8 +28,8 @@ func framesFor(convID, msgID, text string) string {
 	m, _ := json.Marshal(map[string]any{
 		"conversation_id": convID,
 		"message": map[string]any{
-			"id":     msgID,
-			"author": map[string]any{"role": "assistant"},
+			"id":      msgID,
+			"author":  map[string]any{"role": "assistant"},
 			"content": map[string]any{"content_type": "text", "parts": []string{text}},
 		},
 	})
@@ -366,7 +366,7 @@ func TestConvChainDoesNotTouchPoolStateFile(t *testing.T) {
 	}
 }
 
-// newChatMockClientAt 建客户端并把前缀链/缓存落在指定目录（重启恢复与护rail用例需要）。
+// newChatMockClientAt 建客户端并把前缀链/缓存落在指定目录（重启恢复与护栏用例需要）。
 func chatMockClientAt(t *testing.T, dir string) (*Client, *chatMock) {
 	t.Helper()
 	m := newChatMock()
