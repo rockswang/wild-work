@@ -112,7 +112,7 @@ func exitImageBlocks(r io.Reader, st *turnState, model string) []string {
 			}
 			continue
 		}
-		if got.B64 != "" {
+		if got.shape() == exitShapeB64 {
 			nB64++
 		} else {
 			nURL++
