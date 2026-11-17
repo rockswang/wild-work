@@ -491,9 +491,13 @@ func sortChannelsByOrder[T any](items []T, kindOf func(T) provider.Kind) {
 //
 // 注意：**ZCode 不走这里**（尽管它的额度也不是积分）——它有真实的 token 桶要展示，
 // 走 creditsUnit="token" 的「Token 计数」面板，而不是「不适用」（见 creditsUnit）。
+//
+// ⚠️ ChatGPT 在此列（2026-11-17）：网页套餐的额度是窗口内的用量上限，**没有任何接口**
+// 能读出剩余数字（只在对话流的限流报文里体现）⇒ 只能说「不适用」。但「无积分」≠「虚拟账号」
+// （R130）：它能删 / 能停 / 能改名，飞行**不入** VIRTUAL_ACCOUNTS。
 func (a *App) creditsNAKind(group string) bool {
 	if group == provider.Oczen.String() || group == provider.Kilo.String() ||
-		group == provider.Cline.String() {
+		group == provider.Cline.String() || group == provider.ChatGPT.String() {
 		return true
 	}
 	return a.isCustomChannel(group)
@@ -587,8 +591,9 @@ func (a *App) SetCustomChannelsSyncer(fn func(channels []custom.ChannelConfig)) 
 // Kilo 免费池同为免密渠道：无账号、无签到、无积分。
 // 自定义渠道无签到活动（R66）；内建名单固定，故抽成无状态的包级函数（可脱离 App 断言），
 // 方法体仅补上「是否自定义渠道」这一动态判定。
+// ChatGPT 网页逆向通道：网页套餐无签到/领取动作，也无额度查询端点。
 func noExplicitCheckin(k provider.Kind) bool {
-	return k == provider.WorkBuddyAI || k == provider.QwenWork || k == provider.Oczen || k == provider.Kilo || k == provider.ZCode || k == provider.Gemini || k == provider.Cline || k == provider.Comate
+	return k == provider.WorkBuddyAI || k == provider.QwenWork || k == provider.Oczen || k == provider.Kilo || k == provider.ZCode || k == provider.Gemini || k == provider.Cline || k == provider.Comate || k == provider.ChatGPT
 }
 
 func (a *App) noExplicitCheckinKind(k provider.Kind) bool {
@@ -965,6 +970,11 @@ func init() {
 	}
 	loginFlows[provider.ModelScopeAI] = &loginFlow{
 		noFlowReason: "ModelScopeAI 凭据需在面板粘贴 ms- Access Token（「＋ ModelScopeAI」入口）；两区 token 不通用，本工具不代登录",
+	}
+	// ChatGPT：凭据是浏览器里的网页 session（Cookie 族），本工具**不代登录**（网页登录有
+	// 人机验证与地区限制）；另：本渠道必须配代理才能接通上游。
+	loginFlows[provider.ChatGPT] = &loginFlow{
+		noFlowReason: "ChatGPT 凭据需从浏览器登录后粘贴（「＋ ChatGPT Web」入口），本工具不代登录；本渠道必须配置代理才能连通上游",
 	}
 
 	// 自检：每条记录必须恰好表达一种「发起方式」，防止将来加渠道时漏填。
@@ -2870,6 +2880,16 @@ func (a *App) reloadAccounts() {
 		auths, err := auth.LoadModelscopeAIDir(a.cfg.AuthDir)
 		if err != nil {
 			log.Printf("reload modelscopeai accounts: %v", err)
+		} else {
+			rt.Pool.SyncToDir(auths)
+		}
+	}
+	// ChatGPT：凭据落在 auths/chatgpt-*.json（面板粘贴或从 ww3 客户端导入写入）。
+	// 缺本分支就是「导入说成功、面板就是没有账号」（doubao 同款事故）。
+	if rt := a.runtime(provider.ChatGPT); rt != nil && rt.Pool != nil {
+		auths, err := auth.LoadChatGPTDir(a.cfg.AuthDir)
+		if err != nil {
+			log.Printf("reload chatgpt accounts: %v", err)
 		} else {
 			rt.Pool.SyncToDir(auths)
 		}

@@ -753,8 +753,8 @@ function renderTopbar() {
 }
 
 // 渠道显示名与 CSS 短类名（后端 group / 费率 channel 均为 provider.Kind）。
-const CH_LABEL = { workbuddy: "WorkBuddyCN", workbuddyai: "WorkBuddyAI", traework: "TraeWork", traecode: "TraeCode", qoder: "Qoder", qodercn: "QoderCN", qodercom: "QoderCOM", qwenwork: "千问办公", glm: "智谱清言", monkeycode: "MonkeyCode", raccoon: "小浣熊", loomy: "Loomy", oczen: "OpenCodeZen", kilo: "Kilo", minimax: "MiniMax", lobsterai: "LobsterAI", zcode: "ZCode", gemini: "Gemini", codearts: "CodeArts", cline: "Cline", officeace: "OfficeAce", comate: "WPS Comate", lingxi: "WPS 灵犀", modelscope: "ModelScope", modelscopeai: "ModelScopeAI", doubao: "豆包" };
-const CH_CLASS = { workbuddy: "wb", workbuddyai: "wbai", traework: "trae", traecode: "traecode", qoder: "qoder", qodercn: "qodercn", qodercom: "qodercom", qwenwork: "qwenwork", glm: "glm", monkeycode: "monkeycode", raccoon: "raccoon", loomy: "loomy", oczen: "oczen", kilo: "kilo", minimax: "minimax", lobsterai: "lobsterai", zcode: "zcode", gemini: "gemini", codearts: "codearts", cline: "cline", officeace: "officeace", comate: "comate", lingxi: "lingxi", modelscope: "modelscope", modelscopeai: "modelscopeai", doubao: "doubao" };
+const CH_LABEL = { workbuddy: "WorkBuddyCN", workbuddyai: "WorkBuddyAI", traework: "TraeWork", traecode: "TraeCode", qoder: "Qoder", qodercn: "QoderCN", qodercom: "QoderCOM", qwenwork: "千问办公", glm: "智谱清言", monkeycode: "MonkeyCode", raccoon: "小浣熊", loomy: "Loomy", oczen: "OpenCodeZen", kilo: "Kilo", minimax: "MiniMax", lobsterai: "LobsterAI", zcode: "ZCode", gemini: "Gemini", codearts: "CodeArts", cline: "Cline", officeace: "OfficeAce", comate: "WPS Comate", lingxi: "WPS 灵犀", modelscope: "ModelScope", modelscopeai: "ModelScopeAI", doubao: "豆包", chatgpt: "ChatGPT Web" };
+const CH_CLASS = { workbuddy: "wb", workbuddyai: "wbai", traework: "trae", traecode: "traecode", qoder: "qoder", qodercn: "qodercn", qodercom: "qodercom", qwenwork: "qwenwork", glm: "glm", monkeycode: "monkeycode", raccoon: "raccoon", loomy: "loomy", oczen: "oczen", kilo: "kilo", minimax: "minimax", lobsterai: "lobsterai", zcode: "zcode", gemini: "gemini", codearts: "codearts", cline: "cline", officeace: "officeace", comate: "comate", lingxi: "lingxi", modelscope: "modelscope", modelscopeai: "modelscopeai", doubao: "doubao", chatgpt: "chatgpt" };
 const chLabel = (k) => CH_LABEL[k] || k;
 const chClass = (k) => CH_CLASS[k] || "custom";
 // ---------- 图表配色：与徽章同源，但保证同图任意两条线颜色可辨 ----------
@@ -853,7 +853,7 @@ function varyColor(hex, i) {
 // Loomy 同样已实现签到（宠物每日打工奖励，见 internal/loomy/checkin.go），故也在名单外。
 // 注意：Loomy 的奖励判据是「当日有效对话轮次」（上游算），未在官方客户端用过该账号时
 // 领取结果会是「未达档位」——那是如实状态，不是按钮坏了。
-const NO_EXPLICIT_CHECKIN = new Set(["workbuddyai", "qwenwork", "oczen", "kilo", "zcode", "gemini", "cline", "comate"]);
+const NO_EXPLICIT_CHECKIN = new Set(["workbuddyai", "qwenwork", "oczen", "kilo", "zcode", "gemini", "cline", "comate", "chatgpt"]);
 const noExplicitCheckin = (g) => NO_EXPLICIT_CHECKIN.has(g) || isCustomGroup(g); // 自定义渠道无签到活动（R66）
 // isCustomGroup 该分组是否为用户自定义 OpenAI 兼容渠道（R66）。
 // 以 state.custom_channels（后端 /api/state 下发，保存即热更新）为准，勿在前端另维护一份。
@@ -890,6 +890,7 @@ const NO_CHECKIN_TAG = {
   gemini: "不支持",
   cline: "无签到",
   comate: "无签到",
+  chatgpt: "无签到",
 };
 const noCheckinText = (g) => NO_CHECKIN_TAG[g] || "无签到";
 // 无积分概念的渠道（匿名通道）：积分区域显示「不适用」，并隐藏刷新积分/明细入口。
@@ -898,7 +899,7 @@ const noCheckinText = (g) => NO_CHECKIN_TAG[g] || "无签到";
 // ⚠️ ModelScope 两区**已移出**：票 01 的探针实测魔粒余额在主站
 // （/openapi/v1/magicubes/balance，同一枚 ms- token 直接可读），
 // 「上游只有 token 用量、没有余额端点」已被推翻 ⇒ 两区显示真实魔粒。
-const NO_CREDITS_BUILTIN = new Set(["oczen", "kilo", "cline"]);
+const NO_CREDITS_BUILTIN = new Set(["oczen", "kilo", "cline", "chatgpt"]);
 // 虚拟账号渠道：没有账号概念（oczen 匿名通道 / kilo 免费池），卡片只留 🔒 静态指示，
 // 不可停用/删除/改名（后端 RemoveAccount/DisableAccount 也硬拒）。
 // 与 NO_CREDITS_BUILTIN 是**两个维度**：cline 属「无积分但可删可停」，
@@ -3197,6 +3198,7 @@ const RESERVED_CHANNEL_NAMES = new Set([
   "zcode", "gemini", "codearts", "glm", "cline", "officeace", "comate", "lingxi",
   "modelscope", "modelscopeai",
   "doubao", // 豆包（扫码/Cookie 渠道）
+  "chatgpt", // ChatGPT 网页逆向通道
   "cline-free", // ModelNamespaces：上游 ID 自带命名空间，自定义渠道不得占用
 ]);
 let editCustomChannels = [];
@@ -4222,6 +4224,7 @@ function bind() {
   $("btnLingxiCancel").onclick = () => $("lingxiOverlay").classList.add("hidden");
   $("btnAddModelScope").onclick = () => promptLogin("modelscope");
   $("btnAddModelScopeAI").onclick = () => promptLogin("modelscopeai");
+  $("btnAddChatGPT").onclick = () => promptLogin("chatgpt");
   $("btnMsSubmit").onclick = submitMsToken;
   $("btnMsCancel").onclick = closeMsDialog;
   $("btnAddOfficeAce").onclick = () => promptLogin("officeace");

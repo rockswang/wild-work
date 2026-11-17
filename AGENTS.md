@@ -379,7 +379,7 @@
 
 **面板区块与 API 全量清单**见 [`docs/接口参考.md`](docs/接口参考.md)。
 
-### 渠道清单（26 条内建，其中旧 Qoder 仅保留路由 + 自定义）
+### 渠道清单（27 条内建，其中旧 Qoder 仅保留路由 + 自定义）
 
 WorkBuddyCN（`workbuddy/*`）、WorkBuddyAI（`workbuddyai/*`）、TraeWork（`traework/*`）、
 TraeCode（`traecode/*`）、QoderCN（`qodercn/*`）、QoderCOM（`qodercom/*`）、
@@ -391,9 +391,10 @@ Gemini（`gemini/*`，本机回调授权）、CodeArts（`codearts/*`，PKCE 授
 Cline（`cline-free/*`）、华为云果办 OfficeAce（`officeace/*`）、WPS Comate（`comate/*`，CDP 自动捕获 `wps_sid`、手工粘贴兜底）、
 WPS 灵犀（`lingxi/*`，扫码/`wps_sid` 粘贴 + CDP 捕获，与 comate 共用 Cookie 但 uid 前缀 `lxsid-`）、
 ModelScopeAI（`modelscopeai/*`，国际站；与国内站**token 不通用**、独立池、互不兜底；魔粒端点在 AI 站**未实证**）、
-豆包（`doubao/*`，扫码/粘贴 Cookie，工作模式 `/chat/completion` + 工具调用文本协议 + 会话焚化，R163）；
+豆包（`doubao/*`，扫码/粘贴 Cookie，工作模式 `/chat/completion` + 工具调用文本协议 + 会话焚化，R163）、
+ChatGPT Web（`chatgpt/*`，网页逆向通道：粘贴/导入网页 session Cookie，浏览器 TLS 指纹，**必须走代理**；纯文本 + 生图、无工具调用、无签到、无额度端点 ⇒ 积分「不适用」；决议条目随文档票 R165 登记）；
 另有用户自定义 OpenAI 兼容渠道（`custom_channels`，R66）。
-旧 Qoder（`qoder/*`）已从界面下线，路由保留（`provider.BuiltinKinds()` 仍计入 ⇒ 26 条内建、可添加 25 条）。
+旧 Qoder（`qoder/*`）已从界面下线，路由保留（`provider.BuiltinKinds()` 仍计入 ⇒ 27 条内建、可添加 26 条）。
 
 **新增渠道步骤**：① `internal/<channel>/` 实现 `provider.Upstream`；
 ② `internal/auth` 加 `Load<Channel>Dir()`（注意 glob 边界：`qoder*.json` 会吞 `qodercn-`/`qodercom-`）；

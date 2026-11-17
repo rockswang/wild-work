@@ -31,6 +31,7 @@ import (
 
 	"wild-work/internal/app"
 	"wild-work/internal/auth"
+	"wild-work/internal/chatgpt"
 	"wild-work/internal/cline"
 	"wild-work/internal/codearts"
 	"wild-work/internal/comate"
@@ -212,6 +213,14 @@ func main() {
 	if err != nil {
 		fatal("读取 Comate 账号目录失败：%v", err)
 	}
+	// ChatGPT：网页逆向通道，凭据是网页 session 的 Cookie 族（面板粘贴 / 从 ww3 客户端导入），
+	// 文件名 chatgpt-*.json。**无 refresh 端点**（会话靠 90 天滑动续期，失效只能重登）⇒ 无保活；
+	// 网页套餐无签到、无额度查询端点 ⇒ 积分「不适用」。
+	// ⚠️ 本渠道必须走代理（chatgpt.com 境内不可达），见下方 cgUp 注释。
+	cgAuths, err := auth.LoadChatGPTDir(cfg.AuthDir)
+	if err != nil {
+		fatal("读取 ChatGPT 账号目录失败：%v", err)
+	}
 	// Lingxi：粘贴型渠道，凭据同为 WPS 账号的 wps_sid Cookie（灵犀侧门禁独立，须灵犀已开通），
 	// 由面板「粘贴 wps_sid」写入 auths/lingxi-*.json。Cookie 不轮换 ⇒ 无 refresh/保活；
 	// 但有每日签到（领智点），由调度器按 checkinMinutes 执行。
@@ -266,8 +275,8 @@ func main() {
 	if err != nil {
 		fatal("读取 CodeArts 账号目录失败：%v", err)
 	}
-	log.Printf("loaded accounts: workbuddy=%d %s, traework=%d, qoder=%d, qodercn=%d, qodercom=%d, workbuddyai=%d, qwenwork=%d, glm=%d, monkeycode=%d, raccoon=%d, loomy=%d, cline=%d, comate=%d, lingxi=%d, modelscope=%d, modelscopeai=%d, officeace=%d, oczen=%d(匿名), kilo=%d(匿名), minimax=%d, lobsterai=%d, zcode=%d, gemini=%d, codearts=%d, doubao=%d from %s",
-		len(wbAuths), cfg.Region, len(trAuths), len(qdAuths), len(qcnAuths), len(qcmAuths), len(wbaAuths), len(qwAuths), len(glmAuths), len(mcAuths), len(rcAuths), len(lmAuths), len(clAuths), len(cmAuths), len(lxAuths), len(msAuths), len(msaiAuths), len(oaAuths), len(ocAuths), len(kiAuths), len(mimAuths), len(lobAuths), len(zcdAuths), len(gemAuths), len(caAuths), len(dbAuths), cfg.AuthDir)
+	log.Printf("loaded accounts: workbuddy=%d %s, traework=%d, qoder=%d, qodercn=%d, qodercom=%d, workbuddyai=%d, qwenwork=%d, glm=%d, monkeycode=%d, raccoon=%d, loomy=%d, cline=%d, comate=%d, lingxi=%d, modelscope=%d, modelscopeai=%d, officeace=%d, oczen=%d(匿名), kilo=%d(匿名), minimax=%d, lobsterai=%d, zcode=%d, gemini=%d, codearts=%d, doubao=%d, chatgpt=%d from %s",
+		len(wbAuths), cfg.Region, len(trAuths), len(qdAuths), len(qcnAuths), len(qcmAuths), len(wbaAuths), len(qwAuths), len(glmAuths), len(mcAuths), len(rcAuths), len(lmAuths), len(clAuths), len(cmAuths), len(lxAuths), len(msAuths), len(msaiAuths), len(oaAuths), len(ocAuths), len(kiAuths), len(mimAuths), len(lobAuths), len(zcdAuths), len(gemAuths), len(caAuths), len(dbAuths), len(cgAuths), cfg.AuthDir)
 
 	wbPool := pool.New(filepath.Join(stateDir, "state-workbuddy.json"))
 	for _, a := range wbAuths {
@@ -333,6 +342,13 @@ func main() {
 	cmPool := pool.New(filepath.Join(stateDir, "state-comate.json"))
 	for _, a := range cmAuths {
 		cmPool.Add(a)
+	}
+	// ChatGPT：真多账号池（一份网页 session = 一个账号），**不置 SingleAccount**
+	// —— 账号级错误分类与同请求换号（R29）全量适用。无积分端点 ⇒ 面板「不适用」，
+	// 但**不是虚拟账号**（R130）：可删 / 可停 / 可改名。
+	cgPool := pool.New(filepath.Join(stateDir, "state-chatgpt.json"))
+	for _, a := range cgAuths {
+		cgPool.Add(a)
 	}
 	// Lingxi：真多账号池（一份 wps_sid = 一个 WPS 账号，灵犀侧开通），不置 SingleAccount。
 	lxPool := pool.New(filepath.Join(stateDir, "state-lingxi.json"))
@@ -436,6 +452,13 @@ func main() {
 	// Comate：与 cline 同款——非流式 client 保留总超时；StreamHTTP 不设 Timeout（R35）。
 	cmUp.HTTP.Timeout = time.Duration(cfg.Upstream.TimeoutSeconds) * time.Second
 	cmUp.StreamHTTP.Transport = cmUp.HTTP.Transport
+	// ChatGPT：出站必须复刻浏览器 TLS 指纹（stdlib 的 ClientHello 会被上游当成伪装 ⇒ 403/404），
+	// 指纹挂在 Transport 上 ⇒ 流式与非流式**必须共用同一个 Transport**，换掉等于换身份。
+	// 非流式 client 保留总超时；StreamHTTP 不设 Timeout（R35）。
+	// 代理：本包只认 HTTPS_PROXY / HTTP_PROXY（含 socks5://），本渠道是 v2 首个**必须走代理**的
+	// 渠道 —— 运维未配代理时表现为 502/403，属预期（不是本工具的 bug）。
+	cgUp := chatgpt.NewWithTimeout(time.Duration(cfg.Upstream.TimeoutSeconds) * time.Second)
+	cgUp.StreamHTTP.Transport = cgUp.HTTP.Transport
 	lxUp := lingxi.New()
 	// Lingxi：与 comate 同款——非流式 client 保留总超时；StreamHTTP 不设 Timeout（R35）。
 	lxUp.HTTP.Timeout = time.Duration(cfg.Upstream.TimeoutSeconds) * time.Second
@@ -542,7 +565,8 @@ func main() {
 		provider.ZCode.String():        {zcdUp.HTTP, zcdUp.StreamHTTP},
 		provider.Gemini.String():       {gemUp.HTTP, gemUp.StreamHTTP},
 		provider.CodeArts.String():     {caUp.HTTP, caUp.StreamHTTP},
-		provider.GLM.String():          {glmUp.HTTP, glmUp.StreamHTTP},	})
+		provider.GLM.String():          {glmUp.HTTP, glmUp.StreamHTTP},
+		provider.ChatGPT.String():      {cgUp.HTTP, cgUp.StreamHTTP}})
 	checkinMinutes, err := config.ParseClockTimes(cfg.Schedule.CheckinTimes)
 	if err != nil {
 		fatal("解析签到时间失败：%v", err)
@@ -627,6 +651,13 @@ func main() {
 	// 于是每天空跑一次必然失败的签到，并在面板渲染红色「签到失败」。
 	cmSch := scheduler.New(scheduler.Config{Pool: cmPool, Upstream: cmUp, Name: "comate",
 		CheckinMinutes: []int{}, KeepaliveHours: []int{}, Ledger: lg})
+	// ChatGPT：无签到活动（网页套餐没有领取动作）、无 refresh 端点（会话靠滑动续期，
+	// 失效只能重登）⇒ 定时任务全部关闭。
+	// 两个字段必须传**显式空切片 []int{}**（R39）：传 nil 会被 scheduler.New 的零值兜底
+	// 补上默认时间，于是每天空跑一次必然失败的签到/保活。并**不进** FollowGlobalCheckin
+	// （否则用户在面板改一次签到时刻，这里就又长出签到任务）。
+	cgSch := scheduler.New(scheduler.Config{Pool: cgPool, Upstream: cgUp, Name: "chatgpt",
+		CheckinMinutes: []int{}, KeepaliveHours: []int{}, Ledger: lg})
 	// Lingxi：有每日签到（daily_check_in 领智点，见 internal/lingxi/checkin.go），
 	// 但 wps_sid Cookie 不过期、无 refresh token ⇒ 只开签到、不开保活。
 	// 签到时刻用全局配置（上游按天去重、无活动上线延迟，不设 CheckinRetryUntil）。
@@ -707,8 +738,10 @@ func main() {
 		provider.GLM:        {Kind: provider.GLM, Pool: glmPool, Upstream: glmUp, StaticModels: glm.StaticModels()},
 		provider.Cline:      {Kind: provider.Cline, Pool: clPool, Upstream: clUp, StaticModels: cline.StaticModels()},
 		provider.Comate:     {Kind: provider.Comate, Pool: cmPool, Upstream: cmUp, StaticModels: comate.StaticModels()},
-		provider.Lingxi:     {Kind: provider.Lingxi, Pool: lxPool, Upstream: lxUp, StaticModels: lingxi.StaticModels()},
-		provider.OfficeAce:  {Kind: provider.OfficeAce, Pool: oaPool, Upstream: oaUp, StaticModels: officeace.StaticModels()},
+		// ChatGPT：真多账号渠道 ⇒ 不置 SingleAccount；无积分端点 ⇒ 静态兜底表只有 `auto`。
+		provider.ChatGPT:   {Kind: provider.ChatGPT, Pool: cgPool, Upstream: cgUp, StaticModels: chatgpt.StaticModels()},
+		provider.Lingxi:    {Kind: provider.Lingxi, Pool: lxPool, Upstream: lxUp, StaticModels: lingxi.StaticModels()},
+		provider.OfficeAce: {Kind: provider.OfficeAce, Pool: oaPool, Upstream: oaUp, StaticModels: officeace.StaticModels()},
 		// 注意：GLM **不**置 SingleAccount。
 		//
 		// 早期误判：以为「凭据轮换后不可人工恢复」就该按单账号处理。但
@@ -754,11 +787,12 @@ func main() {
 		provider.QwenWork:     {Kind: provider.QwenWork, Pool: qwPool, Upstream: qwUp, Scheduler: qwSch},
 		provider.MonkeyCode:   {Kind: provider.MonkeyCode, Pool: mcPool, Upstream: mcUp, Scheduler: mcSch},
 		provider.Raccoon:      {Kind: provider.Raccoon, Pool: rcPool, Upstream: rcUp, Scheduler: rcSch},
-		provider.Doubao:      {Kind: provider.Doubao, Pool: dbPool, Upstream: dbUp, Scheduler: dbSch},
+		provider.Doubao:       {Kind: provider.Doubao, Pool: dbPool, Upstream: dbUp, Scheduler: dbSch},
 		provider.Loomy:        {Kind: provider.Loomy, Pool: lmPool, Upstream: lmUp, Scheduler: lmSch},
 		provider.GLM:          {Kind: provider.GLM, Pool: glmPool, Upstream: glmUp, Scheduler: glmSch},
 		provider.Cline:        {Kind: provider.Cline, Pool: clPool, Upstream: clUp, Scheduler: clSch},
 		provider.Comate:       {Kind: provider.Comate, Pool: cmPool, Upstream: cmUp, Scheduler: cmSch},
+		provider.ChatGPT:      {Kind: provider.ChatGPT, Pool: cgPool, Upstream: cgUp, Scheduler: cgSch},
 		provider.Lingxi:       {Kind: provider.Lingxi, Pool: lxPool, Upstream: lxUp, Scheduler: lxSch},
 		provider.OfficeAce:    {Kind: provider.OfficeAce, Pool: oaPool, Upstream: oaUp, Scheduler: oaSch},
 		provider.Oczen:        {Kind: provider.Oczen, Pool: ocPool, Upstream: ocUp, Scheduler: ocSch},
@@ -947,6 +981,9 @@ func main() {
 	// Comate 的 Run 同样不可漏（R34）：本渠道当前无任何定时任务，Run 只会阻塞等
 	// ctx/配置变更；但漏了它，将来给它加任务就会静默不跑。
 	go cmSch.Run(sctx)
+	// ChatGPT 的 Run 同样不可漏（R34）：本渠道无任何定时任务，Run 只会阻塞等
+	// ctx/配置变更；但漏了它，将来给它加任务就会静默不跑。
+	go cgSch.Run(sctx)
 	// Lingxi 的 Run 不可漏（R34）：本渠道有每日签到任务。
 	go lxSch.Run(sctx)
 	// OfficeAce 的 Run 不可漏（R34）：本渠道有签到与保活。

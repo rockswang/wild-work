@@ -131,6 +131,8 @@ func identOf(k provider.Kind) string {
 		return "ModelScope"
 	case "modelscopeai":
 		return "ModelScopeAI"
+	case "chatgpt":
+		return "ChatGPT"
 	}
 	return ""
 }

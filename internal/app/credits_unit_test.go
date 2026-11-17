@@ -143,3 +143,34 @@ func TestCreditsNAModelscope(t *testing.T) {
 		}
 	}
 }
+
+// TestCreditsNAChatGPT：ChatGPT 网页套餐**没有**任何额度查询端点（余额只在限流报文里体现）
+// ⇒ 面板必须显示「不适用」，不能显示 0（0 会被读成「额度用光」）。
+// 但「无积分」≠「虚拟账号」（R130）：它必须仍可删 / 可停 / 可改名，故不参与 fixedAcct 判定。
+func TestCreditsNAChatGPT(t *testing.T) {
+	a := &App{cfg: &config.Config{}}
+	if !a.creditsNAKind(provider.ChatGPT.String()) {
+		t.Error("chatgpt 无额度端点，必须标 credits_na（否则面板显示 0，被读成额度用光）")
+	}
+	if got := a.creditsUnit(provider.ChatGPT.String()); got != "" {
+		t.Errorf("chatgpt creditsUnit = %q，期望空串（它没有任何额度口径，不能借 token/次数冒充）", got)
+	}
+	if got := a.creditsTerm(provider.ChatGPT.String()); got != "" {
+		t.Errorf("chatgpt creditsTerm = %q，期望空串（上游没有自己的额度术语，不得编造）", got)
+	}
+}
+
+// TestNoExplicitCheckinChatGPT：网页套餐没有签到/领取动作 ⇒ 必须在内建无签到名单里，
+// 否则批量签到会每天空跑一次必然失败的调用，并在面板渲染红色「签到失败」（R150）。
+// 同时它是**内建**名单项（不是靠 isCustomChannel 动态判出来的）。
+func TestNoExplicitCheckinChatGPT(t *testing.T) {
+	if !noExplicitCheckin(provider.ChatGPT) {
+		t.Fatal("chatgpt 无签到活动，必须列入 noExplicitCheckin（否则每天空跑失败签到）")
+	}
+	// 反向护栏：有真实签到的渠道不得被误列（名单是手工维护的，最容易多写一行）。
+	for _, k := range []provider.Kind{provider.MonkeyCode, provider.Loomy, provider.Raccoon, provider.Lingxi, provider.WorkBuddy} {
+		if noExplicitCheckin(k) {
+			t.Errorf("%s 有签到活动，不得列入 noExplicitCheckin", k)
+		}
+	}
+}

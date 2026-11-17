@@ -314,6 +314,13 @@ func TestChannelDisplayOrderSpotChecks(t *testing.T) {
 	if !(pos[Comate] < pos[Lingxi]) {
 		t.Errorf("WPS Comate 应在 WPS 灵犀 之前（'C' 0x43 < '灵' U+7075）")
 	}
+	// ChatGPT Web（"ChatGPT Web" vs "Cline"：'h' 0x68 < 'l' 0x6c）落在 C 组首位。
+	if !(pos[ChatGPT] < pos[Cline]) {
+		t.Errorf("ChatGPT Web 应在 Cline 之前（'Ch' < 'Cl'）")
+	}
+	if !(pos[ChatGPT] < pos[CodeArts]) {
+		t.Errorf("ChatGPT Web 应在 CodeArts 之前（'Ch' < 'Co'）")
+	}
 	if !(pos[Lingxi] < pos[ZCode]) {
 		t.Errorf("WPS 灵犀 应在 ZCode 之前（字节序里 'W' 前缀先于 'Z'）")
 	}

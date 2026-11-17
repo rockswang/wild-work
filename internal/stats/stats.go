@@ -774,6 +774,12 @@ var (
 		// 而工具本身不报任何错（R130 的教训）。
 		string(provider.ModelScope):   true,
 		string(provider.ModelScopeAI): true,
+		// doubao / lingxi / chatgpt 曾经漏登（前两个已线上存），后果是该渠道的 token 与
+		// 请求全不进平台概览表、而工具本身不报任何错。现有 TestChannelKindCoversBuiltins
+		// 逐内建渠道校验，新增渠道漏登即变红。
+		string(provider.Doubao):  true,
+		string(provider.Lingxi):  true,
+		string(provider.ChatGPT): true,
 	}
 )
 
