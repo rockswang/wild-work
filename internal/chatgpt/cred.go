@@ -86,6 +86,53 @@ func ParseCookieString(s string) map[string]string {
 	return out
 }
 
+// ParseCookieHeader 解析用户从 DevTools 复制的 Cookie 输入。
+//
+// 容忍三种常见粘贴形态：裸值、带 `Cookie:` 前缀（复制整行请求头）、带引号。
+// **不做宽松兜底**：解析不出条目就是错，让调用方如实回报，而不是产出一个空 Cookie 账号
+//（空 Cookie 的账号「看起来加上了」，每次请求都 403，是本渠道最难排障的失败形态）。
+func ParseCookieHeader(raw string) (map[string]string, error) {
+	s := strings.TrimSpace(raw)
+	// 复制整行请求头时会带 `Cookie:` 前缀（大小写不敏感）。
+	if i := strings.Index(s, ":"); i > 0 && strings.EqualFold(strings.TrimSpace(s[:i]), "cookie") {
+		s = s[i+1:]
+	}
+	ck := ParseCookieString(strings.Trim(s, "\"'"))
+	if allEmpty(ck) {
+		return nil, errors.New("Cookie 为空或格式不对：需要从已登录 chatgpt.com 的浏览器里复制**整条** Cookie 头（形如 `a=1; b=2; __Secure-next-auth.session-token.0=…`）")
+	}
+	return ck, nil
+}
+
+// ParseAuthorizationHeader 解析 `Authorization` 输入，返回裸 access token。
+//
+// 上游要的是 `Authorization: Bearer <token>`，而用户从 DevTools 复制的可能是
+// 整行（`authorization: Bearer eyJ…`）、带引号的值，或只有裸 token。
+func ParseAuthorizationHeader(raw string) (string, error) {
+	s := strings.TrimSpace(raw)
+	if i := strings.Index(s, ":"); i > 0 && strings.EqualFold(strings.TrimSpace(s[:i]), "authorization") {
+		s = s[i+1:]
+	}
+	s = strings.TrimSpace(strings.Trim(s, "\"'"))
+	// `Bearer` 也允许无空格/尾随空格（用户常连空格一起复制或只粘方案名）。
+	if len(s) >= 6 && strings.EqualFold(s[:6], "bearer") {
+		s = strings.TrimSpace(s[6:])
+	}
+	if s == "" {
+		return "", errors.New("Authorization 为空：需要从已登录 chatgpt.com 的浏览器里复制请求头 `Authorization: Bearer eyJ…`（只给 Cookie 会被上游判未登录）")
+	}
+	if strings.ContainsAny(s, " \t\r\n") {
+		return "", errors.New("Authorization 里含空白字符：请只粘贴 `Bearer` 后面的那串 token")
+	}
+	return s, nil
+}
+
+// NewDeviceID 生成一份网页身份设备号（uuid4 形态）。
+//
+// 上游只校验形状，不复用旧设备号即可（与 doubao「每次登录生成新指纹」同思路：
+// 复用别人的设备号只会把两边的风控记录串在一起）。
+func NewDeviceID() string { return newUUID() }
+
 // CookieString 把 map 还原成 Cookie 头（按 key 排序，保证可复现）。
 //
 // **不用于日常请求**：日常请求靠 tls-client 的 cookie jar 自动管理（手写 Cookie 头

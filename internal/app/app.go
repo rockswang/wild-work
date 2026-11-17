@@ -4781,6 +4781,24 @@ func (a *App) HandleAPI(mux *http.ServeMux) {
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "uid": uid, "warning": warn})
 	})
+	// ChatGPT 网页逆向通道：凭据是**整组网页会话**（Cookie 头 + Authorization 头），
+	// 两段缺一不可 —— 只给一段会得到「校验也过、每次请求都 403」的账号（票 05）。
+	mux.HandleFunc("POST /api/login/chatgpt_auth", func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Cookie        string `json:"cookie"`
+			Authorization string `json:"authorization"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			apiError(w, http.StatusBadRequest, "请求体解析失败")
+			return
+		}
+		uid, warn, err := a.SubmitChatGPTAuth(req.Cookie, req.Authorization)
+		if err != nil {
+			apiError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "uid": uid, "warning": warn})
+	})
 	// ModelScope 两区：粘贴 `ms-` Access Token（无 CDP、无 cookie 换取，D4）。
 	// 两个端点各自绑定一个 kind —— 区域写死在路由上，前端不可能把国际站 token 提交给国内站池。
 	modelscopeToken := func(w http.ResponseWriter, r *http.Request, kind provider.Kind) {
