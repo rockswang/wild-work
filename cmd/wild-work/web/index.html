@@ -614,6 +614,58 @@
   </div>
 </div>
 
+<!-- ChatGPT Web（网页逆向通道）：粘贴**两段**凭据 —— Cookie 头 + Authorization 头。
+     ⚠️ 两段缺一不可：本渠道凭据是整组网页会话，只贴其中一段会得到「校验也过、每次请求
+     都 403」的账号（本渠道最难排障的失败形态）。所以弹层刻意**两个**输入框，且没有任何
+     「浏览器自动登录 / 扫码」入口（CDP 只能拉起网关机上的浏览器，对远程 dashboard 无用）。 -->
+<div class="overlay hidden" id="chatgptOverlay">
+  <div class="modal modal-wide">
+    <div class="modal-title" id="chatgptTitle">添加 ChatGPT Web 账号</div>
+    <div class="modal-body settings-body">
+
+      <div class="cfg-section">
+        <div class="cfg-heading">从浏览器复制两段凭据</div>
+        <ol class="glm-steps">
+          <li>用浏览器打开 <a href="https://chatgpt.com/" target="_blank" rel="noopener noreferrer">chatgpt.com</a> 并确认<b>已登录</b>。</li>
+          <li>按 F12 打开 DevTools → Network 面板 → 随便发一句话 → 点任意一条 <code>chatgpt.com</code> 请求。</li>
+          <li>在 <b>Request Headers</b> 里复制 <code>Cookie</code> 的整段值，粘到下面第一格。</li>
+          <li>再复制 <code>Authorization</code> 的整段值（形如 <code>Bearer eyJ…</code>），粘到第二格。</li>
+        </ol>
+        <input id="cgptCookieInput" class="input grow" spellcheck="false" autocomplete="off"
+               placeholder="粘贴 Cookie 头（整段，形如 __Secure-next-auth.session-token=…; …）"
+               style="width:100%;font-family:ui-monospace,monospace;margin-bottom:8px">
+        <input id="cgptAuthInput" class="input grow" spellcheck="false" autocomplete="off"
+               placeholder="粘贴 Authorization 头（Bearer eyJ…）"
+               style="width:100%;font-family:ui-monospace,monospace">
+        <div class="hint" style="margin-top:6px">
+          <button class="btn small primary" id="btnCgptSubmit">验证并添加</button>
+        </div>
+      </div>
+
+      <div class="glm-warn">
+        <div class="glm-warn-title">⚠️ 两段都必须粘，且来自同一次登录</div>
+        <ol>
+          <li><b>只贴 Cookie</b> 或 <b>只贴 Authorization</b> 都会做出一个「看着加上了、每次请求都 403」的账号。</li>
+          <li>本工具会把两段存进 <code>auths/chatgpt-&lt;uid&gt;.json</code>（仅属主可读），<b>不会</b>回显在页面上。</li>
+          <li>提交后输入框会清空；列表只显示昵称与短 uid。</li>
+        </ol>
+      </div>
+
+      <div class="hint">
+        本渠道是网页逆向通道（不是官方 API），且<b>必须能连通 chatgpt.com</b> —— 境内网络需给本工具配
+        <code>HTTPS_PROXY</code> / <code>HTTP_PROXY</code>，否则校验会直接报 403 / 网络不可达。
+        网页套餐<b>没有额度查询接口</b>，故本渠道积分列显示「不适用」（不是额度用光）；
+        也不支持工具调用（客户端带了 <code>tools</code> 会被忽略照跑）。
+      </div>
+
+      <div class="hint" id="cgptErr" style="color:var(--danger)"></div>
+    </div>
+    <div class="modal-actions">
+      <button class="btn" id="btnCgptCancel">关闭</button>
+    </div>
+  </div>
+</div>
+
 <!-- 设置弹层（统一配置入口：监听/API-Key/模型路由/备用上游通道） -->
 <div class="overlay hidden" id="settingsOverlay">
   <div class="modal modal-wide">

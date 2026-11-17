@@ -917,7 +917,10 @@ const isVirtualCh = (g) => VIRTUAL_ACCOUNTS.has(String(g || "workbuddy"));
 // 这种**不能自愈**的形态（客户端导入只拿得到不过期的网关 Basic），此时同样只能重新登录
 // 才能恢复积分/签到 —— 徽标与 ⟳ 入口由同一处逻辑驱动（见 renderAccounts 的 needRelogin）。
 // Lingxi 纳入（灵犀登录态失效可 ⟳ 重登：CDP 自动登录流 login_lingxi）。
-const RELOGIN_CHANNELS = new Set(["workbuddy", "workbuddyai", "traework", "qoder", "qodercn", "qodercom", "qwenwork", "raccoon", "officeace", "lingxi", "modelscope", "modelscopeai"]);
+const RELOGIN_CHANNELS = new Set(["workbuddy", "workbuddyai", "traework", "qoder", "qodercn", "qodercom", "qwenwork", "raccoon", "officeace", "lingxi", "modelscope", "modelscopeai", "chatgpt"]);
+// ChatGPT Web：粘贴型渠道（Cookie 族 + Authorization），重登入口 = 同一个粘贴弹层。
+// 登录态失效（401 not_login）是**可自愈标记**（R76/R96），用户重贴凭据即可恢复 ——
+// 不放进 RELOGIN_CHANNELS 的话卡片上连 ⟳ 都不出现，账号就只有「删了重加」一条路。
 // ModelScope 两区：粘贴型渠道（"ms-" Access Token），登录入口 = 同一个 token 粘贴层。
 // 两区是**独立服务**、token 不通用 ⇒ 弹层按渠道切换区域文案与提交端点，绝不用一个池兼容两区。
 const MODEL_SCOPE_CHANNELS = new Set(["modelscope", "modelscopeai"]);
@@ -2104,6 +2107,13 @@ function promptLogin(channel) {
     return;
   }
 
+  // ChatGPT Web（票 05）：凭据 = 网页会话的 Cookie 族 + Authorization，两段都要粘。
+  // 没有 CDP / 扫码路径（CDP 只能拉起网关机上的浏览器），直接弹粘贴层。
+  if (channel === "chatgpt") {
+    openChatGPTPasteDialog();
+    return;
+  }
+
   // OfficeAce（华为云果办）：主按钮走自助 OAuth（打开华为云授权页），
   // 次按钮回退到「从本机 OfficeAce 客户端导入」。
   if (channel === "officeace") {
@@ -2279,9 +2289,10 @@ async function importLocal(channel) {
 }
 
 async function startLogin(channel, accountLabel) {
-  // 粘贴型渠道（ModelScope 两区）没有后端登录编排：直接用同一个 token 粘贴层，
+  // 粘贴型渠道（ModelScope 两区 / ChatGPT Web）没有后端登录编排：直接用同一个粘贴层，
   // 否则 ⟳ 会打 /api/login/start 并报 unknown login provider（死按钮）。
   if (isModelScopeCh(channel)) return promptLogin(channel);
+  if (channel === "chatgpt") return promptLogin(channel);
   // 渠道分派：OfficeAce 是**两步**流程（华为云授权码 + 云端轮询捕获），专属入口是
   // startOfficeAceWebLogin（→ POST /api/login/officeace_auto）。它与下面
   // `POST /api/login/start` 的形态不同——后者一次调用就返回 auth_url，且后端
@@ -2908,6 +2919,54 @@ async function submitMsToken() {
   } catch (e) {
     // 错误位留在弹层里（不要 close）：整段文案就是「下一步该做什么」
     $("msErr").textContent = e.message || "验证失败";
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+// ---------- ChatGPT Web：粘贴网页会话的两段凭据 ----------
+// 为什么是**两个**输入框：凭据是整组网页会话（Cookie 族 + Authorization），只贴一段会得到
+// 「校验也过、每次请求都 403」的账号（本渠道最难排障的失败形态）。没有扫码/CDP 入口：
+// CDP 只能拉起**网关那台机器**上的浏览器，对远程 dashboard + 无人值守网关无用（R104）。
+function openChatGPTPasteDialog() {
+  $("chatgptTitle").textContent = "添加 " + chLabel("chatgpt") + " 账号";
+  $("cgptCookieInput").value = "";
+  $("cgptAuthInput").value = "";
+  $("cgptErr").textContent = "";
+  $("chatgptOverlay").classList.remove("hidden");
+  setTimeout(() => $("cgptCookieInput").focus(), 30);
+}
+// closeChatGPTPasteDialog 关闭即清空两个输入：它们都是凭据，不得留在 DOM 里。
+function closeChatGPTPasteDialog() {
+  $("cgptCookieInput").value = "";
+  $("cgptAuthInput").value = "";
+  $("cgptErr").textContent = "";
+  $("chatgptOverlay").classList.add("hidden");
+}
+// submitChatGPTAuth 提交两段凭据：后端先打一次零配额 /backend-api/me 校验，
+// 通过才落盘并让账号立刻出现在账号页（前端只需 loadState）。
+async function submitChatGPTAuth() {
+  const cookie = ($("cgptCookieInput").value || "").trim();
+  const authorization = ($("cgptAuthInput").value || "").trim();
+  // 本地先点名缺哪一段（不打上游）：后端的同类报错也这么写，但少一次往返。
+  if (!cookie) { $("cgptErr").textContent = "请粘贴 Cookie 头（整段）"; return; }
+  if (!authorization) { $("cgptErr").textContent = "请粘贴 Authorization 头（Bearer eyJ…）"; return; }
+  const btn = $("btnCgptSubmit");
+  btn.disabled = true;
+  $("cgptErr").textContent = "验证中…";
+  try {
+    const r = await api("/api/login/chatgpt_auth", { cookie, authorization });
+    // 成功：**先清空输入框**再关弹层（凭据不得留在 DOM 里）
+    $("cgptCookieInput").value = "";
+    $("cgptAuthInput").value = "";
+    closeChatGPTPasteDialog();
+    if (r && r.warning) toast(r.warning, 8000);
+    toast(chLabel("chatgpt") + " 账号已添加");
+    await loadState();
+    refreshFees();
+  } catch (e) {
+    // 失败：错误留在弹层里（不关、不清），用户只需改其中一段
+    $("cgptErr").textContent = e.message || "验证失败";
   } finally {
     btn.disabled = false;
   }
@@ -4226,6 +4285,8 @@ function bind() {
   $("btnAddModelScopeAI").onclick = () => promptLogin("modelscopeai");
   $("btnAddChatGPT").onclick = () => promptLogin("chatgpt");
   $("btnMsSubmit").onclick = submitMsToken;
+  $("btnCgptSubmit").onclick = submitChatGPTAuth;
+  $("btnCgptCancel").onclick = closeChatGPTPasteDialog;
   $("btnMsCancel").onclick = closeMsDialog;
   $("btnAddOfficeAce").onclick = () => promptLogin("officeace");
   $("btnAddMiniMax").onclick = () => promptLogin("minimax");

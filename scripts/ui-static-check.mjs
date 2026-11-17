@@ -1568,6 +1568,126 @@ const regexOk = (re) => re.test(raw);
         .match(/func \(a \*App\) creditsUnit\(group string\) string \{[\s\S]{0,200}?\n\}/) || [""])[0]));
 }
 
+// ---- 场景 1.98：ChatGPT Web 渠道接入面板（票 05）----
+// 本场景锁的是一条**跨层**约束：面板能看得到这个渠道，且它只能靠「粘两段凭据」进来。
+//   - 显示名/短类名/配色/按钮摆位四处真源，漏一处就静默降级（R99/R142）；
+//   - 配色必须与 `docs/渠道配色规范.md` 逐值一致（改一处即红，R99 文档化）；
+//   - `NO_CREDITS_BUILTIN` 必须有它（无额度端点 ⇒ 「不适用」），
+//     但 `VIRTUAL_ACCOUNTS` **绝不能**有它（R131：用户亲手粘凭据的账号不得默认收起）；
+//   - 粘的是**两段**（Cookie 族 + Authorization），只贴一段 = 「看着成功、每次 403」的账号。
+{
+  const html98 = readFileSync(new URL("../cmd/wild-work/web/index.html", import.meta.url), "utf8");
+  const css98 = readFileSync(new URL("../cmd/wild-work/web/style.css", import.meta.url), "utf8");
+  const go98 = readFileSync(new URL("../internal/provider/provider.go", import.meta.url), "utf8");
+  const doc98 = readFileSync(new URL("../docs/渠道配色规范.md", import.meta.url), "utf8");
+  const label98 = new Function("return (" + (raw.match(/const CH_LABEL = (\{[^}]*\});/) || [])[1] + ")")();
+  const class98 = new Function("return (" + (raw.match(/const CH_CLASS = (\{[^}]*\});/) || [])[1] + ")")();
+
+  // ① 显示名与后端逐字一致（排序键就是它：改字会改变 R142 的按钮/汇总条顺序）
+  check("ChatGPT Web 显示名与后端 provider.DisplayNames 逐字一致",
+    label98.chatgpt === "ChatGPT Web" && /ChatGPT:\s*"ChatGPT Web"/.test(go98),
+    `js=${label98.chatgpt}`);
+  check("短类名进 CH_CLASS（缺则 chColor 回退 #6366f1，折线图与徽章撞色）",
+    class98.chatgpt === "chatgpt", `class=${class98.chatgpt}`);
+
+  // ② 配色三处同补，且一律 var(--ch-*)（不写死 hex）
+  {
+    const cssVal = (css98.match(/--ch-chatgpt:\s*(#[0-9a-fA-F]{6})/) || [])[1] || "";
+    const docVal = (doc98.match(/\|\s*27\s*\|\s*`chatgpt`[^\n]*?(#[0-9a-fA-F]{6})/) || [])[1] || "";
+    check(":root 有 --ch-chatgpt（6 位 hex）", cssVal !== "", cssVal);
+    check("配色规范文档的 chatgpt 行色值与 :root 逐值一致（改色必须同步文档）",
+      cssVal !== "" && docVal === cssVal, `css=${cssVal} doc=${docVal}`);
+    const badge98 = /\.badge\.chatgpt\s*\{[^}]*background:\s*var\(--ch-chatgpt\)/.test(css98);
+    const btn98 = /\.btn\.primary\.alt\.chatgpt\s*\{[^}]*background:\s*var\(--ch-chatgpt\)/.test(css98);
+    check("徽章与按钮规则都在且走 var(--ch-chatgpt)（不写死 hex）", badge98 && btn98,
+      `badge=${badge98} btn=${btn98}`);
+    check("该渠道规则体内没有写死 hex（白字除外）",
+      !/\.(?:badge|btn\.primary\.alt)\.chatgpt\b[^{]*\{[^}]*#(?!fff)[0-9a-fA-F]{3,6}/.test(css98));
+  }
+
+  // ③ 积分口径：在「不适用」集合，但**不在**虚拟账号集合（R131）
+  check("chatgpt 在 NO_CREDITS_BUILTIN（无额度端点 ⇒ 显示「不适用」而非 0）",
+    /const NO_CREDITS_BUILTIN = new Set\(\[[^\]]*"chatgpt"/.test(raw));
+  check("chatgpt **不在** VIRTUAL_ACCOUNTS（真凭据多账号池：可删/可停/可改名、默认可见）",
+    !/const VIRTUAL_ACCOUNTS = new Set\(\[[^\]]*"chatgpt/.test(raw));
+
+  // ④ 按钮摆位 = 显示名字节序（`ChatGPT Web` < `Cline`），且按钮带 alt 修饰类
+  {
+    const btns98 = [...html98.matchAll(/<button class="btn primary alt (\S+)" id="(btnAdd\w+)"/g)];
+    const idx = (id) => btns98.findIndex((m) => m[2] === id);
+    check("按钮存在且 DOM 序符合字节序：ChatGPT Web < Cline（R142）",
+      idx("btnAddChatGPT") >= 0 && idx("btnAddChatGPT") + 1 === idx("btnAddCline"),
+      btns98.map((m) => m[2]).slice(0, 4).join(","));
+    check("按钮带 alt chatgpt 修饰类（裸 btn primary 会落到 --primary 静默错色）",
+      btns98.some((m) => m[1] === "chatgpt" && m[2] === "btnAddChatGPT"));
+  }
+
+  // ⑤ 粘贴弹层：**两个**输入（Cookie + Authorization），无自动登录/扫码入口
+  {
+    const start98 = html98.indexOf('<div class="overlay hidden" id="chatgptOverlay">');
+    const end98 = html98.indexOf('<!-- 设置弹层');
+    const modal98 = start98 >= 0 && end98 > start98 ? html98.slice(start98, end98) : "";
+    check("存在 ChatGPT 粘贴弹层（id=chatgptOverlay）", modal98 !== "");
+    const inputs98 = [...modal98.matchAll(/<input\b[^>]*id="(\w+)"/g)].map((m) => m[1]);
+    check("弹层恰好两个输入框：Cookie 头 + Authorization 头（只贴一段 = 看着成功、每次 403）",
+      inputs98.length === 2 && inputs98.includes("cgptCookieInput") && inputs98.includes("cgptAuthInput"),
+      inputs98.join(","));
+    check("两个输入都不是 hidden（用户得看得见自己在粘什么）",
+      !/id="cgpt(?:Cookie|Auth)Input"[^>]*type="hidden"/.test(modal98));
+    const btnIds98 = [...modal98.matchAll(/<button[^>]*id="(btn\w+)"/g)].map((m) => m[1]);
+    check("弹层按钮只有「验证并添加」与「关闭」（无自动登录/扫码）",
+      btnIds98.length === 2 && btnIds98.includes("btnCgptSubmit") && btnIds98.includes("btnCgptCancel"),
+      btnIds98.join(","));
+    check("弹层不出现浏览器登录/扫码入口（CDP 只能拉起网关机浏览器，R104）",
+      !/浏览器登录|扫码|自动登录/.test(modal98));
+    check("弹层点明「两段都必须粘、来自同一次登录」与「必须配代理」",
+      /两段都必须粘/.test(modal98) && /HTTPS_PROXY/.test(modal98));
+  }
+
+  // ⑥ 提交与清空：成功先清空两格再关弹层；失败留在弹层里给原因
+  check("提交走 POST /api/login/chatgpt_auth 并同时带 cookie 与 authorization",
+    /api\("\/api\/login\/chatgpt_auth", \{ cookie, authorization \}\)/.test(raw));
+  check("成功后两个输入框都清空（凭据不得留在 DOM）",
+    /function submitChatGPTAuth\([\s\S]{0,1400}\$\("cgptCookieInput"\)\.value = ""[\s\S]{0,200}\$\("cgptAuthInput"\)\.value = ""/.test(raw)
+    && /function closeChatGPTPasteDialog\(\)[\s\S]{0,240}\$\("cgptCookieInput"\)\.value = ""/.test(raw));
+  check("失败不关弹层（错误留在 cgptErr，用户只需改其中一段）",
+    /catch \(e\)[\s\S]{0,160}\$\("cgptErr"\)\.textContent = e\.message/.test(raw));
+  check("粘贴型渠道纳入重登入口（⟳ 不落到 unknown login provider）",
+    /const RELOGIN_CHANNELS = new Set\(\[[^\]]*"chatgpt"/.test(raw)
+    && /if \(channel === "chatgpt"\) return promptLogin\(channel\);/.test(raw));
+  check("添加按钮打开的是粘贴弹层（不请求 /api/login/start）",
+    /function promptLogin[\s\S]{0,4000}channel === "chatgpt"[\s\S]{0,120}openChatGPTPasteDialog\(\)/.test(raw));
+
+  // ⑦ 真渲染：不适用积分进「不适用」列，但账号卡片**默认可见**、可删可停（R131）
+  T.__pushAccount({
+    uid: "user-abcdef123456", group: "chatgpt", nickname: "ChatGPT Web 123456",
+    credits: 0, expiring_credits: 0, unusable_credits: 0, credits_na: true,
+    cooling: false, until: "", reason: "", disabled: false,
+    last_checkin_at: "", last_checkin_ok: false,
+  });
+  T.renderAccounts();
+  {
+    const seg98 = document.getElementById("acctList").innerHTML
+      .split('<div class="acct-card').find((s) => s.includes("ChatGPT Web 123456")) || "";
+    const head98 = seg98.slice(0, seg98.indexOf(">"));
+    check("chatgpt 账号卡片可见（不因 credits_na 被默认收起）",
+      seg98 !== "" && !head98.includes("hidden") && head98.includes('data-na="0"'), head98.slice(0, 160));
+    check("chatgpt 积分列显示「不适用」而不是 0", seg98.includes("不适用"), seg98.slice(0, 240));
+    check("chatgpt 账号可删可停（不是虚拟账号）",
+      /onclick="removeAcct\('user-/.test(seg98) && /onclick="toggleDisable\('user-/.test(seg98));
+    check("chatgpt 不出「刷新积分」入口（无额度端点，刷了也不会有数字）",
+      !seg98.includes("refreshOne("));
+
+    T.renderSummary();
+    const sum98 = document.getElementById("creditSummary").innerHTML;
+    check("汇总条出现 chatgpt 渠道 chip（用户添加的无积分渠道 chip 常驻）",
+      /data-wg="chatgpt"/.test(sum98), sum98.slice(0, 240));
+  }
+  T.__popAccount();
+  T.renderAccounts();
+  T.renderSummary();
+}
+
 // ---- 输出 ----
 let failed = 0;
 for (const [name, pass, extra] of results) {
