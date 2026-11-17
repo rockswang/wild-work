@@ -49,6 +49,9 @@ type Config struct {
 	Profile string
 	// Identity 覆盖出站身份；空 = DefaultIdentity。
 	Identity string
+	// DataDir 是缓存目录根（v2 惯例的 `data/`）；空 = 禁用磁盘缓存（全走内存，测试友好）。
+	// 预取票与指纹基线落在 <DataDir>/cache/ 下（spec §8）。
+	DataDir string
 }
 
 // Client 是 chatgpt 渠道的多账号出站客户端。
@@ -72,6 +75,7 @@ type Client struct {
 	profile    string
 	identity   string
 	headerTime time.Duration
+	dataDir    string
 
 	rt       *accountRoundTripper
 	mu       sync.Mutex
@@ -117,6 +121,7 @@ func NewWithConfig(cfg Config) *Client {
 		profile:    cfg.Profile,
 		identity:   cfg.Identity,
 		headerTime: head,
+		dataDir:    strings.TrimRight(cfg.DataDir, "/"),
 		sessions:   map[string]*session{},
 	}
 	c.rt = &accountRoundTripper{c: c}
@@ -127,6 +132,21 @@ func NewWithConfig(cfg Config) *Client {
 
 // HeaderTimeout 返回实际生效的等响应头上限（测试/日志用）。
 func (c *Client) HeaderTimeout() time.Duration { return c.headerTime }
+
+// SetDataDir 设置缓存目录根（wiring 方便在构造之后注入 v2 的 `data/`）。
+// 传空串则禁用磁盘缓存（缓存与指纹退化为纯内存语义：每次都真跑预检）。
+func (c *Client) SetDataDir(dir string) {
+	c.mu.Lock()
+	c.dataDir = strings.TrimRight(dir, "/")
+	c.mu.Unlock()
+}
+
+// dataDirValue 锁内读缓存目录根。
+func (c *Client) dataDirValue() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.dataDir
+}
 
 // accountRoundTripper 把 stdlib 请求转交给「请求 context 里那个账号」的 session。
 type accountRoundTripper struct{ c *Client }
