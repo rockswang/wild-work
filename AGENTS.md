@@ -45,7 +45,7 @@
 
 ---
 
-## 1. 决议项索引（R1–R162）
+## 1. 决议项索引（R1–R163）
 
 **全文（含证据链、反例、已知限制）见 [`docs/决议项.md`](docs/决议项.md)** —— 改动相关代码前必读对应条目。
 
@@ -195,6 +195,7 @@
 | R160 | **灵犀正文帧变体 `ppt_outline_text` 必须按 content 增量承接**（2026-11-15，PR #223）:Kimi 长上下文可只用 `ppt_outline_text` 帧承载正文(R141 序列之外变体),只认 `text` 会把它全丢弃 ⇒ HTTP 200 + stop 但 `content` 空;流式与聚合双路径均补该帧类型,`ppt_outline_start/end` 仍忽略。详见 [`docs/决议项.md`](docs/决议项.md） R160 |
 | R161 | **ModelScope 两区额度从「不适用」变真实魔粒：主站 `/openapi/v1/magicubes/*`（余额 + 逐笔流水）+ 逐笔到期 FIFO + 幂等每日领取**（2026-11-16，票 01 只读探针 + 票 02/03/04 落地；**更正 R159 的 D5/D14 两节**） | 端点与字段为**实测**（7 次只读 GET，§0.1 单发定性）：`balance` → `total_balance` / `available_balance` / `frozen_amount`（字段名带 `_balance`，spec D2 写 `total`/`available` 是笔误）；`transactions` → `EARN` **逐笔带 `expire_at`**，格式 `"YYYY-MM-DD HH:MM:SS"` + **UTC+8 墙钟（非 RFC3339）**；`rate-limit` / `login/info` 走 `Cookie: m_session_id`（旧式大写信封，必须与 balance 的小写 `success/data` 分开解析）；无需 csrf。`Remain = available_balance`（只含可消耗）、`frozen_amount` 进「不可用」单列（不变量 17）、`Used` 负夹 0（**未实证**）；`credits_term="魔粒"` 而 `credits_unit` 保持空串 ⇒ **仍是积分**（进合计与折线，非 token 口径）；两区移出 `creditsNAKind`、纳入 10 分钟自动刷新，`VIRTUAL_ACCOUNTS` 仍不含（真多 token 池：可删可停可改名）。EARN 按到期升序 FIFO 扣 `SPEND_CONFIRM`、拆分条目**共用同一 `Name` 且不设 `Key`**（R107 同款 ⇒ `ledger` 零假流水、到期清零不再记成「消耗」）；领取 = 幂等 `GET /api/v1/users/login/info` + 借道 `transactions` 判三态（`already_claimed`/`claimed`/`no_campaign`），金额只进 `CheckinReport.Msg`、`Amount` 恒 0（否则与账本差分重复记 earn），`FollowGlobalCheckin: true` + `KeepaliveHours: []int{}`（token 无 refresh 端点）。401/403 → `ErrSessionDead`（不 Disable / 不冷却）；网络/5xx 保留旧快照标「待刷新」，**不写 0、不写「不适用」**。**未实证**：国际站是否有真实魔粒（无 AI token）、`frozen_amount` 语义、`currentUsagePerDay` 单位、`count>1` 聚合行的多到期时刻。详见 [`docs/决议项.md`](docs/决议项.md) R161 |
 | R162 | **账号页列表模式：五列拆列（平台 / 账号 / 积分 / 状态 / 操作）+ 平台列独立成渠道徽标列 + 分组行整体删除 —— R157 的局部修订（表头仍全表唯一一行，按 R123 顺延取 R162）**（2026-11-16，owner 指派 task#9 + 闸 1 三轮修订 + 票 02 落地）：平台格**只有** `chBadge()` 一枚徽标（自带渠道名、格内无第二个显示名节点、与卡片徽章逐字同源 R99）、账号格独占「昵称（可点改名）+ `UID: <短 uid>`」（**UID 不挪进平台格**）、积分格沿用 `acct-credits`、状态/操作原样搬列；分组行（渠道标题 / N 号 / 小计）**全撤**，渠道合计只住汇总条、表格渲染路径**零渠道级求和**（硬性反向护栏）；筛选入口收口到 `bindSummaryFilter`（删 `bindAcctListFilter` 与 `applyAcctFilter` 的分组行高亮）；**R157 其余不变量全部保留**（单表 + 唯一 `thead`、每渠道分段容器、R142 序 + 组内原序、可见性统一且不用 `:has()`、卡片零改动、`credits_na` 与默认收起正交、功能按钮条、`acct-view` 偏好、窄屏横滚不裁列、表头不粘性）；术语「面板语境『平台』= 渠道（上游服务）」两处登记（本条 + 接口参考），不新建 GLOSSARY/ADR/docs 文件。回归：场景 1.95 原地改写（4→5 列）+ 新增场景 1.97（12 断言），变异 6 处全部确认变红；已知限制：`min-width` 仍四列时代的 560px（待实测重定）、长渠道名占宽与三档真机截图属闸 2 未做。详见 [`docs/决议项.md`](docs/决议项.md) R162 |
+| R163 | **新增内建渠道豆包（`doubao/*`，第 26 条）；流式纪律四缺口合并后补修**（2026-11-16，PR #225）：工作模式 `/chat/completion` + 9 真模型 + 扫码登录 + 签到/窗口限额额度 + 工具调用文本协议（R49：不宣告能力）+ 随聊随删会话焚化；合并后补修 4 个真机探针复现的阻塞项（tool 末条被跳过且消息重复 / gate 前缀重复下发 / 空闲看门狗缺失 / 流内错误未分类）及装配层杂项（err 覆盖、注释错位、randDigits panic、取消态、rawStr 测试掩蔽）。详见 [`docs/决议项.md`](docs/决议项.md) R163 |
 
 > ⚠️ **R71 附带的实测纪律**（也是 §0.1 的来源）：上游校验的是**头族齐全**而非单点
 > （只补 `X-Conversation-ID` 仍被拒）；且 `X-Conversation-ID` 的**取值形态不被校验**
@@ -377,7 +378,7 @@
 
 **面板区块与 API 全量清单**见 [`docs/接口参考.md`](docs/接口参考.md)。
 
-### 渠道清单（25 条内建，其中旧 Qoder 仅保留路由 + 自定义）
+### 渠道清单（26 条内建，其中旧 Qoder 仅保留路由 + 自定义）
 
 WorkBuddyCN（`workbuddy/*`）、WorkBuddyAI（`workbuddyai/*`）、TraeWork（`traework/*`）、
 TraeCode（`traecode/*`）、QoderCN（`qodercn/*`）、QoderCOM（`qodercom/*`）、
@@ -388,11 +389,10 @@ LobsterAI（`lobsterai/*`，本机回调授权）、ZCode（`zcode/*`，设备�
 Gemini（`gemini/*`，本机回调授权）、CodeArts（`codearts/*`，PKCE 授权）、
 Cline（`cline-free/*`）、华为云果办 OfficeAce（`officeace/*`）、WPS Comate（`comate/*`，CDP 自动捕获 `wps_sid`、手工粘贴兜底）、
 WPS 灵犀（`lingxi/*`，扫码/`wps_sid` 粘贴 + CDP 捕获，与 comate 共用 Cookie 但 uid 前缀 `lxsid-`）、
-ModelScope（`modelscope/*`，国内站；面板粘贴 `ms-` Access Token、一枚 token = 一个账号、
-额度=真实**魔粒**（主站 `/openapi/v1/magicubes/*` 读余额/冻结/逐笔到期，每日自动领取，R161））、
-ModelScopeAI（`modelscopeai/*`，国际站；与国内站**token 不通用**、独立池、互不兜底；魔粒端点在 AI 站**未实证**）；
+ModelScopeAI（`modelscopeai/*`，国际站；与国内站**token 不通用**、独立池、互不兜底；魔粒端点在 AI 站**未实证**）、
+豆包（`doubao/*`，扫码/粘贴 Cookie，工作模式 `/chat/completion` + 工具调用文本协议 + 会话焚化，R163）；
 另有用户自定义 OpenAI 兼容渠道（`custom_channels`，R66）。
-旧 Qoder（`qoder/*`）已从界面下线，路由保留（`provider.BuiltinKinds()` 仍计入 ⇒ 25 条内建、可添加 24 条）。
+旧 Qoder（`qoder/*`）已从界面下线，路由保留（`provider.BuiltinKinds()` 仍计入 ⇒ 26 条内建、可添加 25 条）。
 
 **新增渠道步骤**：① `internal/<channel>/` 实现 `provider.Upstream`；
 ② `internal/auth` 加 `Load<Channel>Dir()`（注意 glob 边界：`qoder*.json` 会吞 `qodercn-`/`qodercom-`）；
@@ -498,7 +498,7 @@ bash scripts/probe-dump.sh summarize                # 汇总各渠道 usage 字�
 | [README.md](README.md) | 用户文档 |
 | [DEVELOPMENT.md](DEVELOPMENT.md) | 开发者文档（面向 AI Agent） |
 | [AGENTS.md](AGENTS.md) | **本文件**：纪律 + 决议索引 + 关键不变量 + 构建发版 |
-| [docs/决议项.md](docs/决议项.md) | **R1–R162 决议全文**（证据链、反例、已知限制） |
+| [docs/决议项.md](docs/决议项.md) | **R1–R163 决议全文**（证据链、反例、已知限制） |
 | [docs/渠道接入备忘.md](docs/渠道接入备忘.md) | 各渠道协议要点、凭据模型、已知限制与踩坑 |
 | [docs/接口参考.md](docs/接口参考.md) | 面板区块规划 + 管理 API 全量清单 |
 | [docs/模型降级链定义.md](docs/模型降级链定义.md) | **模型降级链的唯一权威定义**：三维归因、错误类型全量归属、两条触发路径、三条硬规则、已知限制（R94） |

@@ -89,6 +89,11 @@ const (
 	// 有每日签到（领智点）与余额端点；对话是 sessions+completions 两段式（每请求新建
 	// session）+ 自有 SSE 帧型（非 OpenAI 形）。模型面来自 plans 端点 data.models 原样透传。
 	Lingxi Kind = "lingxi"
+	// Doubao 豆包（ByteDance，www.doubao.com「工作模式」）：粘贴/扫码型渠道，
+	// 凭据是网页登录 Cookie（sessionid 等）。对话走**桌面客户端身份**（aid=582478、
+	// agent_mode=1 工作模式），不需要 a_bogus 签名；上游无 refresh 端点 ⇒ 无自动续期，
+	// Cookie 失效后重新扫码。有每日签到（工作模式活动）与额度查询（窗口限额口径）。
+	Doubao Kind = "doubao"
 )
 
 func (k Kind) String() string { return string(k) }
@@ -115,7 +120,7 @@ func BuiltinKinds() map[string]bool {
 var builtinKindList = []Kind{
 	WorkBuddy, WorkBuddyAI, TraeWork, Qoder, QoderCN, QoderCOM,
 	QwenWork, MonkeyCode, Raccoon, Loomy, TraeCode, Oczen, GLM, Cline, OfficeAce, Kilo, Minimax, LobsterAI,
-	Gemini, CodeArts, ZCode, Comate, Lingxi, ModelScope, ModelScopeAI,
+	Gemini, CodeArts, ZCode, Comate, Lingxi, ModelScope, ModelScopeAI, Doubao,
 }
 
 // DisplayNames 渠道**显示名**的 Go 侧真源（面板文案、`/v1/models` 之外的展示处同源）。
@@ -147,6 +152,7 @@ var DisplayNames = map[Kind]string{
 	OfficeAce:    "OfficeAce",
 	Comate:       "WPS Comate",
 	Lingxi:       "WPS 灵犀",
+	Doubao:       "豆包",
 	ModelScope:   "ModelScope",
 	ModelScopeAI: "ModelScopeAI",
 }
