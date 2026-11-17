@@ -8,12 +8,17 @@ package loomy
 
 import (
 	"bytes"
+	"context"
+	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -329,5 +334,83 @@ func TestChatRetryReusesTraceparentAndAuth(t *testing.T) {
 		if tp != tps[0] {
 			t.Fatalf("第 %d 次尝试的 traceparent = %q, want 与首次相同 %q", i+1, tp, tps[0])
 		}
+	}
+}
+
+// TestChatRetryableJudgement 判据表：retry.go 的单点函数逐类锁定 ——
+// 可重试（502/503 + 快速瞬态）与不可重试（500/504/429/其它 4xx/超时类）各覆盖一类。
+func TestChatRetryableJudgement(t *testing.T) {
+	retryable := []struct {
+		name   string
+		status int
+		err    error
+	}{
+		{"502", http.StatusBadGateway, nil},
+		{"503", http.StatusServiceUnavailable, nil},
+		{"EOF", 0, io.EOF},
+		{"unexpected EOF", 0, io.ErrUnexpectedEOF},
+		{"连接被重置(ECONNRESET)", 0, syscall.ECONNRESET},
+		{"连接被拒(ECONNREFUSED)", 0, syscall.ECONNREFUSED},
+		{"broken pipe(EPIPE)", 0, syscall.EPIPE},
+		{"传输层原文-连接重置", 0, errors.New(`Post "https://x/api/v1/chat/completions": read tcp: connection reset by peer`)},
+		{"传输层原文-broken pipe", 0, errors.New("write tcp: broken pipe")},
+	}
+	for _, c := range retryable {
+		if !chatRetryable(c.status, c.err) {
+			t.Errorf("%s 应可重试（status=%d err=%v）", c.name, c.status, c.err)
+		}
+	}
+	notRetryable := []struct {
+		name   string
+		status int
+		err    error
+	}{
+		{"500", http.StatusInternalServerError, nil},
+		{"504", http.StatusGatewayTimeout, nil},
+		{"429", http.StatusTooManyRequests, nil},
+		{"400", http.StatusBadRequest, nil},
+		{"401", http.StatusUnauthorized, nil},
+		{"200", http.StatusOK, nil},
+		{"等响应头超时", 0, errors.New("net/http: timeout awaiting response headers")},
+		{"dial i/o timeout", 0, errors.New("dial tcp 1.2.3.4:443: i/o timeout")},
+		{"context deadline", 0, context.DeadlineExceeded},
+		{"net.Error timeout", 0, &net.OpError{Op: "read", Err: os.ErrDeadlineExceeded}},
+		{"证书错误", 0, errors.New("x509: certificate signed by unknown authority")},
+		{"协议错误", 0, errors.New("malformed HTTP response")},
+	}
+	for _, c := range notRetryable {
+		if chatRetryable(c.status, c.err) {
+			t.Errorf("%s 不得重试（status=%d err=%v）", c.name, c.status, c.err)
+		}
+	}
+}
+
+// TestChatNoRetryOnHeaderTimeout 判据：**等响应头超时**（慢失败）在真实 HTTP 边界上
+// 只发一次 —— 上游可能已开始生成，重发有双扣分风险（工单判据「每一类各有一个用例锁定」）。
+func TestChatNoRetryOnHeaderTimeout(t *testing.T) {
+	fastChatRetry(t)
+	var attempts int32
+	release := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&attempts, 1)
+		<-release // 永不回响应头，逼客户端走 ResponseHeaderTimeout
+	}))
+	t.Cleanup(func() {
+		close(release)
+		srv.Close()
+	})
+	c := New()
+	c.Base = srv.URL
+	c.StreamHTTP = &http.Client{Transport: &http.Transport{ResponseHeaderTimeout: 50 * time.Millisecond}}
+
+	rc, status, _, err := c.ChatStream(chatAuth(), chatBody())
+	if err == nil {
+		t.Fatal("等响应头超时必须按既有契约作为 err 返回")
+	}
+	if rc != nil || status != 0 {
+		t.Fatalf("rc=%v status=%d, want nil/0", rc, status)
+	}
+	if got := atomic.LoadInt32(&attempts); got != 1 {
+		t.Fatalf("尝试次数 = %d, want 1（慢失败不重试）", got)
 	}
 }
