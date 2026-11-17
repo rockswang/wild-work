@@ -166,3 +166,30 @@ func testJWT(t *testing.T, claims map[string]any) string {
 	enc := func(b []byte) string { return base64.RawURLEncoding.EncodeToString(b) }
 	return enc(head) + "." + enc(body) + ".sig"
 }
+
+// TestParseAuthToleratesUnknownFields 票 08 的锚点：这是「读别人家的文件」。
+// ww3 客户端将来新增字段（顶层或 auth/account 段内）不得让整份凭据判无效——
+// 解析器只取自己认识的键，其余静默忽略；同时已认识的键必须照旧读出。
+func TestParseAuthToleratesUnknownFields(t *testing.T) {
+	raw := `{
+	  "schemaVersion": 7,
+	  "exportedAt": "2030-01-01T00:00:00Z",
+	  "auth": {
+	    "accessToken": "at-1",
+	    "cookies": {"__Secure-next-auth.session-token": "c1"},
+	    "deviceId": "dev-9",
+	    "futureAuthBag": {"nested": [1, 2, 3]}
+	  },
+	  "account": {"uid": "user-42", "nickname": "n", "futureAccountFlag": true}
+	}`
+	a, err := ParseAuth([]byte(raw))
+	if err != nil {
+		t.Fatalf("未来新增字段让整份凭据判无效了（这对「导入别人家的文件」是致命的）：%v", err)
+	}
+	if a.UID != "user-42" || a.DeviceID != "dev-9" || a.AccessToken != "at-1" {
+		t.Errorf("已认识的字段没读出来: %+v", a)
+	}
+	if a.Cookies["__Secure-next-auth.session-token"] != "c1" {
+		t.Errorf("cookies = %+v，期望保留", a.Cookies)
+	}
+}
