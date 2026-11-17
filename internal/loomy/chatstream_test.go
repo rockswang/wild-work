@@ -50,9 +50,9 @@ func TestApplyAuthTraceExplicitAndGenerated(t *testing.T) {
 	}
 }
 
-// TestChatStreamContractUnchanged 锁定抽函数后的对外契约（httptest 假上游）：
-// 200 → 非 nil 流 + 200；502 → nil 流 + 502 + 响应体原文；且**每个请求只发一次**
-// （本票是 prefactor，不得顺带引入重试）。
+// TestChatStreamContractUnchanged 锁定抽函数后入口的对外契约（httptest 假上游）：
+// 200 → 非 nil 流 + 200；本地校验失败 → 400 且不打上游。
+// 非 2xx 的**重试**行为由 retry_test.go 负责（票 02 起 502 会被重试到上限）。
 func TestChatStreamContractUnchanged(t *testing.T) {
 	t.Run("200 返回可用流", func(t *testing.T) {
 		var attempts int32
@@ -91,7 +91,10 @@ func TestChatStreamContractUnchanged(t *testing.T) {
 		}
 	})
 
-	t.Run("502 原样透传且只发一次", func(t *testing.T) {
+	t.Run("502 重试耗尽后仍原样透传", func(t *testing.T) {
+		// 票 02 起 502 属可重试判据；本用例只锁「耗尽后仍是上游原文」，
+		// 逐次判定的细节断言在 retry_test.go。
+		fastChatRetry(t)
 		var attempts int32
 		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			atomic.AddInt32(&attempts, 1)
@@ -112,8 +115,8 @@ func TestChatStreamContractUnchanged(t *testing.T) {
 		if status != http.StatusBadGateway || string(body) != `{"message":"bad gateway"}` {
 			t.Fatalf("status=%d body=%q, want 502 + 上游原文", status, body)
 		}
-		if got := atomic.LoadInt32(&attempts); got != 1 {
-			t.Fatalf("尝试次数 = %d, want 1（prefactor 不引入重试）", got)
+		if got := atomic.LoadInt32(&attempts); got != int32(chatMaxAttempts) {
+			t.Fatalf("尝试次数 = %d, want %d（502 可重试，耗尽后透传）", got, chatMaxAttempts)
 		}
 	})
 
