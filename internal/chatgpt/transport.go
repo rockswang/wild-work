@@ -600,6 +600,23 @@ func (c *Client) OpenStreamCtx(ctx context.Context, a *auth.Auth, path string, b
 	return c.doCtx(ctx, a, c.StreamHTTP, "POST", path, body, extra, false)
 }
 
+// DoAbs 对**绝对 URL** 发请求（非流式，复用同一账号 session 的头族与 cookie jar）。
+//
+// 用途：上游把产物与上传槽位挂在绝对直链上（estuary 产物直链、Azure Blob 上传槽）。
+// 与 `Do` 的唯一差异是不拼基址；其余（账号绑定、头族、等响应头看门狗）完全一致。
+func (c *Client) DoAbs(a *auth.Auth, method, absURL string, body []byte, extra map[string]string) (int, []byte, error) {
+	resp, err := c.doAbsCtx(context.Background(), a, c.HTTP, method, absURL, body, extra, false)
+	if err != nil {
+		return 0, nil, err
+	}
+	defer resp.Body.Close()
+	b, err := readAllMaybeGzip(resp)
+	if err != nil {
+		return resp.StatusCode, nil, fmt.Errorf("chatgpt: 读响应失败: %w", err)
+	}
+	return resp.StatusCode, b, nil
+}
+
 // do 是唯一的请求构造点：解析账号 session、绑定 context、注入头。
 func (c *Client) do(a *auth.Auth, cli *http.Client, method, path string, body []byte, extra map[string]string, noAuth bool) (*http.Response, error) {
 	return c.doCtx(context.Background(), a, cli, method, path, body, extra, noAuth)
@@ -607,6 +624,12 @@ func (c *Client) do(a *auth.Auth, cli *http.Client, method, path string, body []
 
 // doCtx 同 do，但由调用方提供基准 context（流式路径用来中断空闲卡死的连接）。
 func (c *Client) doCtx(base context.Context, a *auth.Auth, cli *http.Client, method, path string, body []byte, extra map[string]string, noAuth bool) (*http.Response, error) {
+	return c.doAbsCtx(base, a, cli, method, c.baseURL()+path, body, extra, noAuth)
+}
+
+// doAbsCtx 是**唯一**的请求构造点：绑定账号 session、注入头、发请求。
+// absURL 由调用方拼好（相对路径拼基址、绝对直链原样），其余逻辑两路共用。
+func (c *Client) doAbsCtx(base context.Context, a *auth.Auth, cli *http.Client, method, absURL string, body []byte, extra map[string]string, noAuth bool) (*http.Response, error) {
 	s, err := c.session(a)
 	if err != nil {
 		return nil, err
@@ -619,7 +642,7 @@ func (c *Client) doCtx(base context.Context, a *auth.Auth, cli *http.Client, met
 	if body != nil {
 		rd = strings.NewReader(string(body))
 	}
-	req, err := http.NewRequestWithContext(ctx, method, c.baseURL()+path, rd)
+	req, err := http.NewRequestWithContext(ctx, method, absURL, rd)
 	if err != nil {
 		return nil, fmt.Errorf("chatgpt: 构造请求失败: %w", err)
 	}

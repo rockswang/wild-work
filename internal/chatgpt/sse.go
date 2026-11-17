@@ -21,7 +21,7 @@ const (
 	thoughtsPtr = "/message/content/thoughts"
 )
 
-// turnState 是一轮对话的解析状态（正文 / 思考 / 会话锚点）。
+// turnState 是一轮对话的解析状态（正文 / 思考 / 会话锚点 / 产物图）。
 //
 // 正文与思考都给**全量文本**（上游 patch 是「改写该字段」语义），由输出层做增量差分。
 type turnState struct {
@@ -29,6 +29,20 @@ type turnState struct {
 	MsgID  string // 最后一个可见 assistant 消息 id = 下一轮的 parent_message_id
 	Text   string
 	Reason string
+	// Images 是本轮上游生成的图（生图链路用）。
+	// **不在 assistant 消息里**：它是 role:"tool" + content_type:"multimodal_text"
+	// 的 parts[].asset_pointer="sediment://file_…"（从 assistant 里找永远拿不到）。
+	Images []imageRef
+}
+
+// imageRef 是一张上游生成的图（指针形态，真地址/字节要再过两步才拿到）。
+type imageRef struct {
+	// Pointer 是上游原始指针（`sediment://file_…`）；**绝不外泄给调用方**。
+	Pointer  string
+	FileID   string // Pointer 去掉协议头（下载接口要它）
+	MimeType string
+	Width    int
+	Height   int
 }
 
 // apply 应用一帧事件（完整消息 / 单条 patch / patch 数组）。
@@ -40,6 +54,11 @@ func (t *turnState) apply(ev map[string]any) {
 		}
 		if t.ConvID == "" {
 			t.ConvID = asString(cm["conversation_id"])
+		}
+		if m, ok := cm["message"].(map[string]any); ok {
+			if author, ok := m["author"].(map[string]any); ok && asString(author["role"]) == "tool" {
+				t.addImages(m)
+			}
 		}
 	}
 	if t.ConvID == "" {
@@ -58,6 +77,61 @@ func (t *turnState) apply(ev map[string]any) {
 	}
 	t.Text = applyPatchEvent(ev, t.Text)
 	t.Reason = applyThoughts(ev, t.Reason)
+}
+
+// addImages 把一条 tool 消息里的图片指针收进本轮状态（按指针去重）。
+//
+// 去重是必需的：同一帧可能在「完整消息 + patch」里出现两次，而上游一次生成的
+// 同一张图不能被当成两张产物（否则 n 与产物数量都会对不上）。
+func (t *turnState) addImages(m map[string]any) {
+	for _, r := range imagesOf(m) {
+		seen := false
+		for _, got := range t.Images {
+			if got.Pointer == r.Pointer {
+				seen = true
+				break
+			}
+		}
+		if !seen {
+			t.Images = append(t.Images, r)
+		}
+	}
+}
+
+// imagesOf 取一条消息里的图片指针（role=tool + multimodal_text 的 parts[].image_asset_pointer）。
+func imagesOf(m map[string]any) []imageRef {
+	content, ok := m["content"].(map[string]any)
+	if !ok {
+		return nil
+	}
+	switch asString(content["content_type"]) {
+	case "multimodal_text", "image_asset_pointer":
+	default:
+		return nil
+	}
+	parts, _ := content["parts"].([]any)
+	var out []imageRef
+	for _, p := range parts {
+		pm, ok := p.(map[string]any)
+		if !ok || asString(pm["content_type"]) != "image_asset_pointer" {
+			continue
+		}
+		ptr := asString(pm["asset_pointer"])
+		if ptr == "" {
+			continue
+		}
+		fileID := strings.TrimPrefix(ptr, "sediment://")
+		fileID = strings.TrimPrefix(fileID, "file-service://")
+		r := imageRef{Pointer: ptr, FileID: fileID, MimeType: asString(pm["mime_type"])}
+		if f, ok := pm["width"].(float64); ok {
+			r.Width = int(f)
+		}
+		if f, ok := pm["height"].(float64); ok {
+			r.Height = int(f)
+		}
+		out = append(out, r)
+	}
+	return out
 }
 
 // visibleAssistant 判定消息是否属于「用户能看到的 assistant 正文」。
