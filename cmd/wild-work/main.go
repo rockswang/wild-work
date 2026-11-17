@@ -459,6 +459,9 @@ func main() {
 	// 渠道 —— 运维未配代理时表现为 502/403，属预期（不是本工具的 bug）。
 	cgUp := chatgpt.NewWithTimeout(time.Duration(cfg.Upstream.TimeoutSeconds) * time.Second)
 	cgUp.StreamHTTP.Transport = cgUp.HTTP.Transport
+	// 多轮续接的前缀链落在**独立文件**（spec §7）：不得进 state-chatgpt.json——
+	// 池状态由 pool 整文件覆写，一次积分刷新就会把链抹掉（R143）。
+	cgUp.SetConvStatePath(filepath.Join(stateDir, "chatgpt-convs.json"))
 	lxUp := lingxi.New()
 	// Lingxi：与 comate 同款——非流式 client 保留总超时；StreamHTTP 不设 Timeout（R35）。
 	lxUp.HTTP.Timeout = time.Duration(cfg.Upstream.TimeoutSeconds) * time.Second

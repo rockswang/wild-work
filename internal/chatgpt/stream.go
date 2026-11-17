@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 
 	"wild-work/internal/provider"
@@ -208,8 +209,11 @@ func (s *sseWriter) fail(code, msg string) {
 func (c *Client) Stream(w http.ResponseWriter, r io.Reader, model string) (map[string]any, error) {
 	sw := newSSEWriter(w, model)
 	var textF, reasonF citationFilter
-	_, frames, err := consumeTurn(r, func(text, reason string) error {
-		return sw.delta(textF.Write(text), reasonF.Write(reason))
+	var delivered strings.Builder // 下发给客户端的正文（下一轮会被客户端原样重放 ⇒ 进前缀键）
+	st, frames, err := consumeTurn(r, func(text, reason string) error {
+		t := textF.Write(text)
+		delivered.WriteString(t)
+		return sw.delta(t, reasonF.Write(reason))
 	})
 	if err != nil {
 		pe := asProviderError(err)
@@ -227,12 +231,15 @@ func (c *Client) Stream(w http.ResponseWriter, r io.Reader, model string) (map[s
 		return nil, provider.AsClassified(pe)
 	}
 	if tail := textF.Flush(); tail != "" {
+		delivered.WriteString(tail)
 		_ = sw.delta(tail, "")
 	}
 	if tail := reasonF.Flush(); tail != "" {
 		_ = sw.delta("", tail)
 	}
 	sw.finish()
+	// 只有正常收尾才记续接点：截断的回复不能在下一轮被当成会话锚点。
+	recordTurnOf(r, st, delivered.String(), true)
 	return nil, nil
 }
 
@@ -243,7 +250,7 @@ func (c *Client) Stream(w http.ResponseWriter, r io.Reader, model string) (map[s
 func (c *Client) Aggregate(r io.Reader, model string) (map[string]any, error) {
 	var textF, reasonF citationFilter
 	var text, reason string
-	_, frames, err := consumeTurn(r, func(t, rs string) error {
+	st, frames, err := consumeTurn(r, func(t, rs string) error {
 		text += textF.Write(t)
 		reason += reasonF.Write(rs)
 		return nil
@@ -256,6 +263,7 @@ func (c *Client) Aggregate(r io.Reader, model string) (map[string]any, error) {
 	if frames == 0 && text == "" && reason == "" {
 		return nil, provider.AsClassified(upstreamErr("上游未产出任何内容（无语义帧）"))
 	}
+	recordTurnOf(r, st, text, true)
 	msg := map[string]any{"role": "assistant", "content": text}
 	if reason != "" {
 		msg["reasoning_content"] = reason

@@ -51,6 +51,9 @@ type Config struct {
 	// DataDir 是缓存目录根（v2 惯例的 `data/`）；空 = 禁用磁盘缓存（全走内存，测试友好）。
 	// 预取票与指纹基线落在 <DataDir>/cache/ 下（spec §8）。
 	DataDir string
+	// ConvStatePath 覆盖多轮前缀链的落盘路径（spec §7 的 `data/chatgpt-convs.json`）；
+	// 空 = 用 <DataDir>/chatgpt-convs.json，两者都空 ⇒ 纯内存（重启即丢）。
+	ConvStatePath string
 	// IdleTimeout 是流中「连续无字节」上限；0 = DefaultIdleTimeout。
 	IdleTimeout time.Duration
 }
@@ -77,11 +80,15 @@ type Client struct {
 	identity   string
 	headerTime time.Duration
 	dataDir    string
+	convPath   string
 
 	rt       *accountRoundTripper
 	mu       sync.Mutex
 	sessions map[string]*session
 	closed   bool
+
+	// conv 是懒创建的多轮前缀链（见 convchain.go）；convPath 是它的落盘路径覆盖。
+	conv *convChain
 }
 
 // New 构造生产客户端（默认基址/超时/指纹档）。
@@ -123,6 +130,7 @@ func NewWithConfig(cfg Config) *Client {
 		identity:   cfg.Identity,
 		headerTime: head,
 		dataDir:    strings.TrimRight(cfg.DataDir, "/"),
+		convPath:   strings.TrimSpace(cfg.ConvStatePath),
 		sessions:   map[string]*session{},
 	}
 	c.rt = &accountRoundTripper{c: c}
@@ -147,6 +155,15 @@ func (c *Client) IdleTimeout() time.Duration {
 func (c *Client) SetDataDir(dir string) {
 	c.mu.Lock()
 	c.dataDir = strings.TrimRight(dir, "/")
+	c.mu.Unlock()
+}
+
+// SetConvStatePath 覆盖前缀链的落盘路径（wiring 在构造之后注入 v2 的 `data/`）。
+// 空串 = 退回 <DataDir>/chatgpt-convs.json；两者都空 ⇒ 纯内存。
+func (c *Client) SetConvStatePath(path string) {
+	c.mu.Lock()
+	c.convPath = strings.TrimSpace(path)
+	c.conv = nil // 换路径后旧链不再适用（调用方负责在接线期设置）
 	c.mu.Unlock()
 }
 
@@ -175,6 +192,7 @@ func (rt *accountRoundTripper) CloseIdleConnections() { rt.c.closeSessions() }
 func (c *Client) Close() {
 	c.mu.Lock()
 	c.closed = true
+	chain := c.conv
 	sessions := make([]*session, 0, len(c.sessions))
 	for _, s := range c.sessions {
 		sessions = append(sessions, s)
@@ -182,6 +200,9 @@ func (c *Client) Close() {
 	c.mu.Unlock()
 	for _, s := range sessions {
 		s.cli.CloseIdleConnections()
+	}
+	if chain != nil {
+		chain.Flush() // 命中只刷新内存里的 LastHit（LRU 用），退出时补一次落盘
 	}
 }
 

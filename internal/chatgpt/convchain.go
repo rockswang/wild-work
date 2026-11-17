@@ -10,6 +10,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"wild-work/internal/auth"
 )
 
 // 多轮续接：(A') 历史前缀哈希链（本仓原创，spec §9）。
@@ -274,4 +276,45 @@ func recordTurnOf(r io.Reader, st *turnState, reply string, ok bool) {
 	if rec, ok2 := r.(turnRecorder); ok2 {
 		rec.recordTurn(st, reply, ok)
 	}
+}
+// ── 客户端接线 ────────────────────────────────────────────────────────────
+
+// convChain 返回（必要时创建）前缀链。进程内单例：链是跨请求状态。
+func (c *Client) convChain() *convChain {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.conv == nil {
+		c.conv = newConvChain(c.convChainPathLocked(), 0)
+	}
+	return c.conv
+}
+
+// convChainPathLocked 解析前缀链的落盘路径（spec §7：`data/chatgpt-convs.json`）。
+//
+// 优先级：显式的 ConvStatePath（main.go 用 state 目录拼）＞ dataDir 根目录下的固定名。
+// 都没有 ⇒ 空串 = 纯内存模式（多轮在单进程内仍生效，只是重启会丢）。
+func (c *Client) convChainPathLocked() string {
+	if c.convPath != "" {
+		return c.convPath
+	}
+	if c.dataDir != "" {
+		return filepath.Join(c.dataDir, convChainFileName)
+	}
+	return ""
+}
+
+// resumePoint 查本轮的前缀指纹，返回上游续接点（未命中 ⇒ 空 convID + root parent）。
+//
+// 未命中必须**静默**返回新会话：首轮、客户端裁掉历史、换了账号都是正常情形，
+// 报错只会把「锦上添花的多轮」变成渠道不可用（spec §9）。
+func (c *Client) resumePoint(a *auth.Auth, req *chatRequest) (string, string) {
+	chain := c.convChain()
+	if chain == nil || req == nil {
+		return "", ""
+	}
+	e, ok := chain.Lookup(msgFingerprint(accountKey(a), req.prefixOf()))
+	if !ok {
+		return "", ""
+	}
+	return e.ConvID, e.ParentID
 }

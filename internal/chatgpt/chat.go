@@ -55,10 +55,35 @@ type inboundMsg struct {
 }
 
 // chatRequest 是压平后的出站请求。
+//
+// History/TurnIdx 是**多轮续接**所需的规范化历史（spec §9 的前缀哈希链）：
+// 上游只吃一条 user，但「这一轮接不接上一轮」要靠请求里除最后一条 user 之外
+// 的全部消息来判定，所以压平不能把历史丢掉。
 type chatRequest struct {
-	Prompt string
-	Model  string
-	Effort string
+	Prompt  string
+	Model   string
+	Effort  string
+	History []historyMsg // 全部入站消息的规范化形态（按原序，含非 user 角色）
+	TurnIdx int          // History 里最后一条 user 的下标（本轮真正发送的那一条）
+}
+
+// prefixOf 返回「除本轮 user 之外的全部历史」= 上一轮的落盘键。
+func (r *chatRequest) prefixOf() []historyMsg {
+	if r.TurnIdx < 0 || r.TurnIdx > len(r.History) {
+		return nil
+	}
+	return r.History[:r.TurnIdx]
+}
+
+// throughTurn 返回「历史 + 本轮 user」= 本轮落盘键的前半段。
+//
+// 后半段是**我们下发给客户端的回复正文**：客户端下一轮会把它原样重放，
+// 一起算进键才能让「首句相同的两个不同对话」落到不同条目上（不串话）。
+func (r *chatRequest) throughTurn() []historyMsg {
+	if r.TurnIdx < 0 || r.TurnIdx >= len(r.History) {
+		return nil
+	}
+	return r.History[:r.TurnIdx+1]
 }
 
 // reasoning 指示是否请求上游思考（只有明确 "on" 才发 system_hints:["reason"]）。
@@ -98,18 +123,21 @@ func parseChatBody(body []byte) (*chatRequest, error) {
 	if err := json.Unmarshal(body, &in); err != nil {
 		return nil, fmt.Errorf("请求体不是合法 JSON: %w", err)
 	}
+	hist := make([]historyMsg, 0, len(in.Msgs))
+	turnIdx := -1
 	var systems []string
 	lastUser := ""
-	for i := len(in.Msgs) - 1; i >= 0; i-- {
-		if strings.EqualFold(strings.TrimSpace(in.Msgs[i].Role), "user") {
-			lastUser = messageText(in.Msgs[i].Content)
-			break
-		}
-	}
 	for _, m := range in.Msgs {
-		switch strings.ToLower(strings.TrimSpace(m.Role)) {
+		role := strings.ToLower(strings.TrimSpace(m.Role))
+		text := messageText(m.Content)
+		hist = append(hist, historyMsg{Role: role, Text: text})
+		switch role {
+		case "user":
+			// 最后一条不是 user（例如 tool 回调）时**向前找最近一条**，不直接报错（spec §9）。
+			turnIdx = len(hist) - 1
+			lastUser = text
 		case "system", "developer":
-			if t := strings.TrimSpace(messageText(m.Content)); t != "" {
+			if t := strings.TrimSpace(text); t != "" {
 				systems = append(systems, t)
 			}
 		}
@@ -125,7 +153,7 @@ func parseChatBody(body []byte) (*chatRequest, error) {
 	if model == "" {
 		model = defaultChatModel
 	}
-	return &chatRequest{Prompt: prompt, Model: model, Effort: in.Effort}, nil
+	return &chatRequest{Prompt: prompt, Model: model, Effort: in.Effort, History: hist, TurnIdx: turnIdx}, nil
 }
 
 // messageText 宽容取一条消息的文本（裸串或 text 分片数组）。
@@ -184,8 +212,10 @@ func (c *Client) ChatStream(a *auth.Auth, body []byte) (io.ReadCloser, int, []by
 	}
 
 	traceID := newUUID()
+	// 多轮续接：命中前缀指纹 ⇒ 带上游续接点；未命中 ⇒ parent 落 root = 安静新建会话。
+	convID, parentID := c.resumePoint(a, req)
 	// 步骤 4：conduit 只有 60 秒寿命且每轮不同 ⇒ 每次请求现取现用。
-	conduit, status, raw, err := c.prepareConduit(a, req, traceID, sen)
+	conduit, status, raw, err := c.prepareConduit(a, req, traceID, sen, convID, parentID)
 	if err != nil {
 		return nil, 0, nil, err
 	}
@@ -194,7 +224,7 @@ func (c *Client) ChatStream(a *auth.Auth, body []byte) (io.ReadCloser, int, []by
 	}
 
 	// 步骤 5：唯一消耗配额的一步。
-	payload, err := json.Marshal(conversationBody(req, newUUID()))
+	payload, err := json.Marshal(conversationBody(req, newUUID(), convID, parentID))
 	if err != nil {
 		return nil, 0, nil, fmt.Errorf("chatgpt: 对话请求体序列化失败: %w", err)
 	}
@@ -210,17 +240,24 @@ func (c *Client) ChatStream(a *auth.Auth, body []byte) (io.ReadCloser, int, []by
 		cancel()
 		return nil, resp.StatusCode, hintForStatus(resp.StatusCode, b), nil
 	}
-	return idle.Monitor(resp.Body, c.IdleTimeout(), cancel), http.StatusOK, nil, nil
+	// 包一层 capture：解析侧（Stream/Aggregate 的 consumeTurn）读完后把本轮的续接点落进链。
+	// 只有调用方真的读完才有续接点，所以钩子必须挂在**返回给调用方的这一层**。
+	return &convCapture{
+		ReadCloser: idle.Monitor(resp.Body, c.IdleTimeout(), cancel),
+		chain:      c.convChain(),
+		account:    accountKey(a),
+		through:    req.throughTurn(),
+	}, http.StatusOK, nil, nil
 }
 
 // prepareConduit 调 /f/conversation/prepare 拿 conduit_token（零配额）。
-func (c *Client) prepareConduit(a *auth.Auth, req *chatRequest, traceID string, sen *Sentinel) (string, int, []byte, error) {
+func (c *Client) prepareConduit(a *auth.Auth, req *chatRequest, traceID string, sen *Sentinel, convID, parentID string) (string, int, []byte, error) {
 	extra := map[string]string{
 		"content-type":                            "application/json",
 		"x-oai-turn-trace-id":                     traceID,
 		"openai-sentinel-chat-requirements-token": sen.ReqToken,
 	}
-	st, m, raw, err := c.DoJSON(a, "POST", PathFConversationPrepare, conduitBody(req), extra)
+	st, m, raw, err := c.DoJSON(a, "POST", PathFConversationPrepare, conduitBody(req, convID, parentID), extra)
 	if err != nil {
 		return "", 0, nil, err
 	}
@@ -236,7 +273,9 @@ func (c *Client) prepareConduit(a *auth.Auth, req *chatRequest, traceID string, 
 }
 
 // conduitBody 构造 conduit 预取的请求体（打字防抖形态，上游接受的两种之一）。
-func conduitBody(req *chatRequest) map[string]any {
+//
+// 续接时 parent_message_id 必须与第 5 步一致（conduit 是同一轮的预取，指向别处上游不认）。
+func conduitBody(req *chatRequest, convID, parentID string) map[string]any {
 	partial := map[string]any{
 		"author":  map[string]any{"role": "user"},
 		"content": map[string]any{"content_type": "text", "parts": []string{truncate(req.Prompt, conduitPromptCap)}},
@@ -246,7 +285,7 @@ func conduitBody(req *chatRequest) map[string]any {
 		"client_prepare_state":    "sent",
 		"action":                  "next",
 		"model":                   req.Model,
-		"parent_message_id":       parentMessageRoot,
+		"parent_message_id":       parentOf(parentID),
 		"timezone":                defaultTimezone,
 		"timezone_offset_min":     defaultTimezoneOffsetMin,
 		"is_do_not_remember":      false,
@@ -255,17 +294,28 @@ func conduitBody(req *chatRequest) map[string]any {
 		"client_prepare_dispatch": "debounced",
 		"client_prepare_source":   "composer_editor_state",
 	}
+	if convID != "" {
+		body["conversation_id"] = convID
+	}
 	if hints := req.systemHints(); len(hints) > 0 {
 		body["system_hints"] = hints
 	}
 	return body
 }
 
+// parentOf 把「无续接点」统一成上游认识的哨兵值（空串 = 新会话）。
+func parentOf(parentID string) string {
+	if strings.TrimSpace(parentID) == "" {
+		return parentMessageRoot
+	}
+	return parentID
+}
+
 // conversationBody 构造 /f/conversation 的请求体（与真实网页同形）。
 //
 // 刻意**不写** tools / tool_choice / functions：本渠道无工具能力，伪造会得到
 // 一段客户端不认账的文本。
-func conversationBody(req *chatRequest, msgID string) map[string]any {
+func conversationBody(req *chatRequest, msgID, convID, parentID string) map[string]any {
 	meta := map[string]any{
 		"automation_creation_attribution": map[string]any{"origin": "conversation", "flow_id": msgID},
 	}
@@ -286,7 +336,7 @@ func conversationBody(req *chatRequest, msgID string) map[string]any {
 		"turn_attribution":    map[string]any{"turn_trigger": "composer"},
 		"action":              "next",
 		"model":               req.Model,
-		"parent_message_id":   parentMessageRoot,
+		"parent_message_id":   parentOf(parentID),
 		"timezone":            defaultTimezone,
 		"timezone_offset_min": defaultTimezoneOffsetMin,
 		"is_do_not_remember":  false,
@@ -300,6 +350,9 @@ func conversationBody(req *chatRequest, msgID string) map[string]any {
 		"supported_encodings":   []string{"v1"},
 		"genui_state_snapshots": []any{},
 		"client_prepare_state":  "success",
+	}
+	if convID != "" {
+		body["conversation_id"] = convID
 	}
 	// system_hints 必须两处都写（顶层 + messages[0].metadata），只写一处上游不认。
 	if hints := req.systemHints(); len(hints) > 0 {
