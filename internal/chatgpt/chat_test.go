@@ -22,6 +22,7 @@ type chatMock struct {
 	*mockSentinel
 
 	mu         sync.Mutex
+	seq        []string
 	conduitHit int
 	convHit    int
 	prepBodies []string
@@ -40,6 +41,7 @@ func (m *chatMock) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case PathFConversationPrepare:
 		body, _ := io.ReadAll(r.Body)
 		m.mu.Lock()
+		m.seq = append(m.seq, r.URL.Path)
 		m.conduitHit++
 		m.conduits = append(m.conduits, "cd-"+itoa(m.conduitHit))
 		m.prepBodies = append(m.prepBodies, string(body))
@@ -49,6 +51,7 @@ func (m *chatMock) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case PathFConversation:
 		body, _ := io.ReadAll(r.Body)
 		m.mu.Lock()
+		m.seq = append(m.seq, r.URL.Path)
 		m.convHit++
 		m.convBodies = append(m.convBodies, string(body))
 		m.convHdrs = append(m.convHdrs, r.Header.Clone())
@@ -71,6 +74,9 @@ func (m *chatMock) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			_, _ = io.WriteString(w, "data: [DONE]\n\n")
 		}
 	default:
+		m.mu.Lock()
+		m.seq = append(m.seq, r.URL.Path)
+		m.mu.Unlock()
 		m.mockSentinel.ServeHTTP(w, r)
 	}
 }
@@ -138,6 +144,21 @@ func TestChatStreamWalksFiveSteps(t *testing.T) {
 	conduitHit, convHit := m.counts()
 	if conduitHit != 1 || convHit != 1 {
 		t.Fatalf("conduit=%d conv=%d，期望各 1 次", conduitHit, convHit)
+	}
+
+	// 顺序锁死：conduit（第 4 步）必须在预检之后、对话（第 5 步）之前——
+	// 它只有 60 秒生命，提前取等于白取。
+	m.mu.Lock()
+	seq := append([]string(nil), m.seq...)
+	m.mu.Unlock()
+	want := []string{"/", PathSentinelPrepare, PathSentinelFinalize, PathFConversationPrepare, PathFConversation}
+	if len(seq) != len(want) {
+		t.Fatalf("请求序列 = %v，期望 %v", seq, want)
+	}
+	for i := range want {
+		if seq[i] != want[i] {
+			t.Fatalf("第 %d 步 = %s，期望 %s（顺序 = %v）", i+1, seq[i], want[i], seq)
+		}
 	}
 
 	body, h := m.lastConv()
@@ -306,5 +327,26 @@ func TestChatStreamDriftSendsNoBusinessRequest(t *testing.T) {
 	var pe *provider.Error
 	if !errors.As(err, &pe) || pe.Kind != provider.ErrUpstream {
 		t.Errorf("漂移错误分类 = %v，期望 ErrUpstream（不换号、不计账号错误）", err)
+	}
+}
+
+// TestChatStreamTransportErrorNotClassified 传输层错误保持为「裸 error」：
+// 一旦被类型化成 *provider.Error，handler 就会当账号错误去换号/计数（spec §10 禁止）。
+func TestChatStreamTransportErrorNotClassified(t *testing.T) {
+	m := newChatMock()
+	srv := httptest.NewServer(m)
+	base := srv.URL
+	srv.Close()
+
+	c := NewWithConfig(Config{Base: base, DataDir: t.TempDir()})
+	t.Cleanup(c.Close)
+
+	rc, status, _, err := c.ChatStream(sentinelAuth(), inboundBody(""))
+	if err == nil || rc != nil || status != 0 {
+		t.Fatalf("连不上必须是裸 error（rc=%v status=%d err=%v）", rc, status, err)
+	}
+	var pe *provider.Error
+	if errors.As(err, &pe) {
+		t.Errorf("传输层错误被类型化了（Kind=%v）⇒ handler 会误判成账号错误", pe.Kind)
 	}
 }

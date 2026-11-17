@@ -108,10 +108,10 @@ func TestStreamTruncatedNoDone(t *testing.T) {
 		t.Errorf("错误文案 = %q", err.Error())
 	}
 	body := rec.Body.String()
-	if strings.Contains(body, "[DONE]") {
+	_, _, _, done, errFrames := openAISSE(t, body)
+	if done {
 		t.Error("截断流不得补 [DONE]（不得伪装正常收尾）")
 	}
-	_, _, _, _, errFrames := openAISSE(t, body)
 	if len(errFrames) != 1 || !strings.Contains(errFrames[0], "upstream_truncated") {
 		t.Errorf("错误帧 = %v", errFrames)
 	}
@@ -131,10 +131,10 @@ func TestStreamBusinessErrorFrameNoDone(t *testing.T) {
 		t.Fatalf("业务错误帧必须报错，err=%v", err)
 	}
 	body := rec.Body.String()
-	if strings.Contains(body, "[DONE]") {
+	_, _, _, done, errFrames := openAISSE(t, body)
+	if done {
 		t.Error("业务错误不得补 [DONE]")
 	}
-	_, _, _, _, errFrames := openAISSE(t, body)
 	if len(errFrames) != 1 || !strings.Contains(errFrames[0], "upstream_error") {
 		t.Errorf("错误帧 = %v（code 必须是 upstream_error，不能混成截断）", errFrames)
 	}
@@ -199,7 +199,7 @@ func TestStreamEmptyUpstreamIsError(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "未产出任何内容") {
 		t.Fatalf("空流必须报错，err=%v", err)
 	}
-	if strings.Contains(rec.Body.String(), "[DONE]") {
+	if _, _, _, done, _ := openAISSE(t, rec.Body.String()); done {
 		t.Error("空流不得补 [DONE]")
 	}
 }
