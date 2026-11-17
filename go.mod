@@ -9,6 +9,7 @@ require (
 	github.com/energye/systray v1.0.3
 	github.com/refraction-networking/utls v1.8.2
 	golang.org/x/image v0.24.0
+	golang.org/x/net v0.48.0
 	golang.org/x/sys v0.47.0
 )
 
@@ -25,6 +26,5 @@ require (
 	github.com/quic-go/qpack v0.6.0 // indirect
 	github.com/tam7t/hpkp v0.0.0-20160821193359-2b70b4024ed5 // indirect
 	golang.org/x/crypto v0.46.0 // indirect
-	golang.org/x/net v0.48.0 // indirect
 	golang.org/x/text v0.32.0 // indirect
 )
