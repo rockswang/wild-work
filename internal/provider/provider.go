@@ -89,6 +89,11 @@ const (
 	// 有每日签到（领智点）与余额端点；对话是 sessions+completions 两段式（每请求新建
 	// session）+ 自有 SSE 帧型（非 OpenAI 形）。模型面来自 plans 端点 data.models 原样透传。
 	Lingxi Kind = "lingxi"
+	// ChatGPT ChatGPT 网页版逆向通道（chatgpt.com，非官方 API）：凭据是网页 session
+	// Cookie 族（面板粘贴或 from ww3 auths 导入），出站必须复刻浏览器 TLS 指纹；
+	// 纯文本对话 + 生图，**无工具调用**、无签到、无额度端点（积分「不适用」）。
+	// ⚠️ 本渠道**必须走代理**才能用（境内不可达），见 internal/chatgpt 包注释。
+	ChatGPT Kind = "chatgpt"
 	// Doubao 豆包（ByteDance，www.doubao.com「工作模式」）：粘贴/扫码型渠道，
 	// 凭据是网页登录 Cookie（sessionid 等）。对话走**桌面客户端身份**（aid=582478、
 	// agent_mode=1 工作模式），不需要 a_bogus 签名；上游无 refresh 端点 ⇒ 无自动续期，
@@ -120,7 +125,7 @@ func BuiltinKinds() map[string]bool {
 var builtinKindList = []Kind{
 	WorkBuddy, WorkBuddyAI, TraeWork, Qoder, QoderCN, QoderCOM,
 	QwenWork, MonkeyCode, Raccoon, Loomy, TraeCode, Oczen, GLM, Cline, OfficeAce, Kilo, Minimax, LobsterAI,
-	Gemini, CodeArts, ZCode, Comate, Lingxi, ModelScope, ModelScopeAI, Doubao,
+	Gemini, CodeArts, ZCode, Comate, Lingxi, ModelScope, ModelScopeAI, Doubao, ChatGPT,
 }
 
 // DisplayNames 渠道**显示名**的 Go 侧真源（面板文案、`/v1/models` 之外的展示处同源）。
@@ -155,6 +160,8 @@ var DisplayNames = map[Kind]string{
 	Doubao:       "豆包",
 	ModelScope:   "ModelScope",
 	ModelScopeAI: "ModelScopeAI",
+	// 显示名刻意写「Web」：与官方 OpenAI API 区分，说明这是网页逆向通道。
+	ChatGPT: "ChatGPT Web",
 }
 
 // DisplayName 渠道显示名；未登记时退回渠道 kind 本身（自定义渠道就走这条）。
