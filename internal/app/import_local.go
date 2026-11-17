@@ -59,9 +59,9 @@ type ImportLocalResult struct {
 
 // ImportLocalAccount 是单个凭据文件的导入结果（零明文：只有文件名与短 uid）。
 type ImportLocalAccount struct {
-	File   string `json:"file"`            // 文件名（不含目录）
-	UID    string `json:"uid,omitempty"`   // 短 uid（尾号），失败时为空
-	Status string `json:"status"`          // imported / duplicate / invalid / failed
+	File   string `json:"file"`             // 文件名（不含目录）
+	UID    string `json:"uid,omitempty"`    // 短 uid（尾号），失败时为空
+	Status string `json:"status"`           // imported / duplicate / invalid / failed
 	Reason string `json:"reason,omitempty"` // 失败/跳过原因（已做凭据掩码）
 }
 

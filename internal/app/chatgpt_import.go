@@ -62,7 +62,7 @@ func (a *App) importChatGPT(dir string) (*ImportLocalResult, error) {
 			res.Failed++
 		}
 		res.Accounts = append(res.Accounts, item)
-		// 零明文（不变量 2）：只记文件名与短 uid，不记路径里的用户名以外的任何凭据片段。
+		// 零明文（不变量 2）：只记文件名与短 uid —— 路径与上游原因一律不入日志。
 		log.Printf("chatgpt 导入：file=%s status=%s uid=%s", item.File, item.Status, item.UID)
 	}
 
