@@ -247,6 +247,9 @@ func (c *Client) ChatStream(a *auth.Auth, body []byte) (io.ReadCloser, int, []by
 		chain:      c.convChain(),
 		account:    accountKey(a),
 		through:    req.throughTurn(),
+		cli:        c,
+		auth:       a,
+		convID:     convID,
 	}, http.StatusOK, nil, nil
 }
 

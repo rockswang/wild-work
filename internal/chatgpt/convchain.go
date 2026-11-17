@@ -259,12 +259,20 @@ type turnRecorder interface {
 }
 
 // convCapture 包住上游响应体，把本轮续接点在流读完时落进前缀链。
+//
+// 它同时是出口侧图片翻译的凭据来源（票 07.5）：Stream/Aggregate 只有 io.Reader，
+// 换址需要账号凭据，故由这一层实现 exitImageResolver（cli + auth 随本轮请求带下来）。
 type convCapture struct {
 	io.ReadCloser
 	chain   *convChain
 	account string
 	// through 是本轮请求的消息（**含**最后一条 user）：落盘键 = 它 + 本轮回复正文。
 	through []historyMsg
+	// cli / auth 是产物换址（两步下载）所需的渠道客户端与账号凭据。
+	cli  *Client
+	auth *auth.Auth
+	// convID 是本轮请求带上去的会话 id（解析结果没有 conversation_id 时兜底用）。
+	convID string
 }
 
 // recordTurn 实现 turnRecorder（ok=false ⇒ 本轮失败，什么都不记）。
