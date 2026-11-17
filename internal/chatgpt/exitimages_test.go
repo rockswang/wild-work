@@ -3,6 +3,8 @@ package chatgpt
 import (
 	"encoding/base64"
 	"encoding/json"
+	"errors"
+	"io"
 	"log"
 	"net/http"
 	"net/http/httptest"
@@ -256,6 +258,41 @@ func TestChatExitImageLogsOneLine(t *testing.T) {
 	if strings.Contains(out, "tok") || strings.Contains(out, "Authorization") {
 		t.Errorf("日志不得出现凭据: %q", out)
 	}
+}
+
+// TestExitImageBlocksPreservesOrderAndSkipsFailures 多图：按上游顺序排列，单张失败只跳过该张。
+func TestExitImageBlocksPreservesOrderAndSkipsFailures(t *testing.T) {
+	fake := &fakeImageReader{
+		Reader:  strings.NewReader(""),
+		account: "uid:u1",
+		urls:    map[string]string{"file_a": "https://x/a.png", "file_b": "https://x/b.png", "file_c": "https://x/c.png"},
+		fail:    map[string]bool{"file_b": true},
+	}
+	st := &turnState{Images: []imageRef{{FileID: "file_a"}, {FileID: "file_b"}, {FileID: "file_c"}}}
+	blocks := exitImageBlocks(fake, st, "chatgpt/auto")
+	if len(blocks) != 2 {
+		t.Fatalf("图片块 = %v，期望 2（file_b 换址失败被跳过）", blocks)
+	}
+	if !strings.Contains(blocks[0], "https://x/a.png") || !strings.Contains(blocks[1], "https://x/c.png") {
+		t.Errorf("顺序 = %v，期望按上游出现顺序 a → c", blocks)
+	}
+}
+
+// fakeImageReader 是 imageResolver 的桩（单一职责：只验顺序与逐张降级）。
+type fakeImageReader struct {
+	io.Reader
+	account string
+	urls    map[string]string
+	fail    map[string]bool
+}
+
+func (f *fakeImageReader) imageAccountLabel() string { return f.account }
+
+func (f *fakeImageReader) resolveExitImage(ref imageRef, convID string) (provider.ImageResult, error) {
+	if f.fail[ref.FileID] {
+		return provider.ImageResult{}, errors.New("boom")
+	}
+	return provider.ImageResult{URL: f.urls[ref.FileID]}, nil
 }
 
 // TestExitImageBlocksWithoutResolverIsEmpty 非会话读端（裸 Reader）不编造链接。
