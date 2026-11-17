@@ -1154,6 +1154,15 @@ func (h *Handler) serveRotation(
 				// 早就写着「请求级错误，不罚号不轮转，透传原文」，但本 case 漏了它们 ⇒ 落到
 				// default 做 NoteError 计数，等于拿客户端的问题惩罚健康账号。本地拒绝型渠道
 				// （monkeycode / loomy / raccoon / minimax）最容易触发这条路径。
+				//
+				// ⚠️ 2026-11-17 补日志：这条路径此前**一行日志都不写**，只回写响应体。
+				// 实测事故——小浣熊（raccoon）上游按 content_filter 拒绝请求时，网关侧
+				// data/app.log 全量零命中，只能靠反查客户端会话记录才定住「400 是上游报的
+				// 还是网关报的」。请求级错误不罚号，但它**确实发生了**，必须留证据：
+				// 记 status + kind + 上游原文摘要，否则同类问题下次仍得从客户端侧倒推。
+				// 只记日志，判定/冷却/透传行为一字未改。
+				log.Printf("upstream error platform=%s uid=%s model=%s status=%d kind=%s body=%s（请求级错误：不罚号、不轮换，原样透传）",
+					rt.Kind, acct.UID, model, status, kind, truncateBody(respBody))
 				transparentError(w, status, respBody)
 				return
 			case provider.ErrModelBlocked:
