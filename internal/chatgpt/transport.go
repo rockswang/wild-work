@@ -51,6 +51,8 @@ type Config struct {
 	// DataDir 是缓存目录根（v2 惯例的 `data/`）；空 = 禁用磁盘缓存（全走内存，测试友好）。
 	// 预取票与指纹基线落在 <DataDir>/cache/ 下（spec §8）。
 	DataDir string
+	// IdleTimeout 是流中「连续无字节」上限；0 = DefaultIdleTimeout。
+	IdleTimeout time.Duration
 }
 
 // Client 是 chatgpt 渠道的多账号出站客户端。
@@ -131,6 +133,14 @@ func NewWithConfig(cfg Config) *Client {
 
 // HeaderTimeout 返回实际生效的等响应头上限（测试/日志用）。
 func (c *Client) HeaderTimeout() time.Duration { return c.headerTime }
+
+// IdleTimeout 返回流中空闲上限（调用方用它包 IdleReader）。
+func (c *Client) IdleTimeout() time.Duration {
+	if c.cfg.IdleTimeout > 0 {
+		return c.cfg.IdleTimeout
+	}
+	return DefaultIdleTimeout
+}
 
 // SetDataDir 设置缓存目录根（wiring 方便在构造之后注入 v2 的 `data/`）。
 // 传空串则禁用磁盘缓存（缓存与指纹退化为纯内存语义：每次都真跑预检）。
@@ -561,13 +571,26 @@ func (c *Client) OpenStream(a *auth.Auth, path string, body []byte, extra map[st
 	return c.do(a, c.StreamHTTP, "POST", path, body, extra, false)
 }
 
+// OpenStreamCtx 同 OpenStream，但允许调用方挂 context。
+//
+// 必填 ctx 的理由：流中空闲看门狗取消时，只有请求本身绑了 ctx 才能真正中断连接；
+// 只在 Monitor 里 cancel 一个游离 ctx 时，卡住的 Read 不会被唤醒。
+func (c *Client) OpenStreamCtx(ctx context.Context, a *auth.Auth, path string, body []byte, extra map[string]string) (*http.Response, error) {
+	return c.doCtx(ctx, a, c.StreamHTTP, "POST", path, body, extra, false)
+}
+
 // do 是唯一的请求构造点：解析账号 session、绑定 context、注入头。
 func (c *Client) do(a *auth.Auth, cli *http.Client, method, path string, body []byte, extra map[string]string, noAuth bool) (*http.Response, error) {
+	return c.doCtx(context.Background(), a, cli, method, path, body, extra, noAuth)
+}
+
+// doCtx 同 do，但由调用方提供基准 context（流式路径用来中断空闲卡死的连接）。
+func (c *Client) doCtx(base context.Context, a *auth.Auth, cli *http.Client, method, path string, body []byte, extra map[string]string, noAuth bool) (*http.Response, error) {
 	s, err := c.session(a)
 	if err != nil {
 		return nil, err
 	}
-	ctx := withSession(context.Background(), s)
+	ctx := withSession(base, s)
 	if noAuth {
 		ctx = withNoAuth(ctx)
 	}

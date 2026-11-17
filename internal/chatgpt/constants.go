@@ -43,6 +43,9 @@ const (
 	// DefaultHeaderTimeout 是「等响应头」下限。它只允许放宽（取 max(下限, 总超时)）：
 	// 首字节耗时由上游排队决定，拿总超时去压这一段会把「慢」误判成「失败」。
 	DefaultHeaderTimeout = 180 * time.Second
+	// DefaultIdleTimeout 是流中「连续无字节」的空闲上限（同源其它渠道的 90s 口径）。
+	// 它与 DefaultTimeout 分工不同：拿到响应头之后彻底卡死，多等不会变好。
+	DefaultIdleTimeout = 90 * time.Second
 )
 
 // 账号端点。
@@ -54,3 +57,26 @@ const (
 
 // modelsQuery 是 /backend-api/models 的固定查询串（同源于 ww3 抓包）。
 const modelsQuery = "?iim=false&include_icons=false&is_gizmo=false"
+
+// 对话端点（登录链路；匿名链路 /backend-anon/conversation 本仓不用，spec §8）。
+const (
+	// PathFConversationPrepare 是 conduit 预取（零配额），返回 60 秒有效的 conduit_token。
+	// 它必须**现取现用**：TTL 只有 60 秒，且每轮响应头里还会再下发新的。
+	PathFConversationPrepare = "/backend-api/f/conversation/prepare"
+	// PathFConversation 是唯一消耗配额的对话端点（两段式：先 conduit 再此处）。
+	PathFConversation = "/backend-api/f/conversation"
+)
+
+// 对话请求的固定取值（同源于 ww3 2026-10 抓包）。
+const (
+	// parentMessageRoot 是「新会话」的 parent_message_id 哨兵值（上游认识它）。
+	parentMessageRoot = "client-created-root"
+	// defaultTimezone / defaultTimezoneOffsetMin 与参考实现一致（上游用它渲染「今天」）。
+	// JS `getTimezoneOffset()` 对 UTC+8 返回 -480，故此处也是负数。
+	defaultTimezone          = "Asia/Shanghai"
+	defaultTimezoneOffsetMin = -480
+	// conduitPromptCap 是 conduit 预取里 partial_query 的截断长度（上游只用它做打字防抖）。
+	conduitPromptCap = 200
+	// defaultChatModel 是上游「自动选模型」的取值。
+	defaultChatModel = "auto"
+)
