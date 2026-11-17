@@ -139,11 +139,24 @@ func traceparent() string {
 }
 
 // applyAuth 写鉴权与追踪头（官方客户端 session 模式是 token 头 + Authorization **双写**）。
+// traceparent 每次现生成——非流式路径与别的调用点都走这一条，行为不变。
 func applyAuth(req *http.Request, a *auth.Auth) {
+	applyAuthTrace(req, a, "")
+}
+
+// applyAuthTrace 同 applyAuth，但允许调用方**显式指定** traceparent。
+//
+// tp == "" 时仍现生成（既有调用点逐字不变）；非空则原样使用。
+// 存在的理由：重试循环需要让同一次逻辑请求的多次尝试共用同一个链路标识，
+// 而 traceparent 在既有实现里是「发请求时现生成」，循环接不上。
+func applyAuthTrace(req *http.Request, a *auth.Auth, tp string) {
 	tok := session(a)
 	req.Header.Set("Authorization", "Bearer "+tok)
 	req.Header.Set("token", tok)
-	req.Header.Set("traceparent", traceparent())
+	if tp == "" {
+		tp = traceparent()
+	}
+	req.Header.Set("traceparent", tp)
 	req.Header.Set("loomy-version", AppVersion)
 	req.Header.Set("Accept", "application/json")
 }
@@ -191,6 +204,10 @@ func (c *Client) RefreshToken(a *auth.Auth) error {
 // ---------------------------------------------------------------------------
 
 // ChatStream 实现 provider.Upstream。
+//
+// 入口只做「校验一次 → 调用单次请求 → 返回」，与提取前逐字等价：
+// 本地模型校验与拒绝文案、档位投影与 logReasoningOnce 都留在这一层，
+// 单次请求函数不含任何重试判断（重试策略由上层决定）。
 func (c *Client) ChatStream(a *auth.Auth, body []byte) (rc io.ReadCloser, status int, respBody []byte, err error) {
 	// 校验集合 = 静态表 ∪ 已拉取到的动态目录（见 knownModel）。
 	if m := modelOf(body); m != "" && !c.knownModel(m) {
@@ -198,13 +215,26 @@ func (c *Client) ChatStream(a *auth.Auth, body []byte) (rc io.ReadCloser, status
 	}
 	projected := projectEffort(body)
 	logReasoningOnce(body, projected)
+	// traceparent 在入口生成一次：同一次逻辑请求的多次尝试共用同一个链路标识。
+	return c.chatStreamOnce(a, projected, traceparent())
+}
 
+// chatStreamOnce 发一次对话请求，并按既有 ChatStream 契约返回。
+//
+// 无任何重试判断；返回签名与 ChatStream 对外契约一致：
+//   - 成功：非 nil 流（已包空闲看门狗）+ 200 + nil 响应体 + nil 错误
+//   - 上游非 2xx：nil 流 + 该状态码 + 响应体（≤64KiB）+ nil 错误
+//   - 传输层失败：nil + 0 + nil + 原始错误
+//
+// projected 是**已投影**后的请求体：每次尝试都用同一个字节切片重建 reader，
+// 故不复用「已被消费过的 reader」。
+func (c *Client) chatStreamOnce(a *auth.Auth, projected []byte, tp string) (io.ReadCloser, int, []byte, error) {
 	req, err := http.NewRequest(http.MethodPost, c.baseURL()+EpChat, bytes.NewReader(projected))
 	if err != nil {
 		return nil, 0, nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	applyAuth(req, a)
+	applyAuthTrace(req, a, tp)
 	// 用无总超时的 client：长思考请求不受整请求上限约束（见 Client.StreamHTTP）。
 	resp, err := c.streamClient().Do(req)
 	if err != nil {
