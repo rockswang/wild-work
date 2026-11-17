@@ -1,7 +1,6 @@
 package chatgpt
 
 import (
-	"bufio"
 	"compress/gzip"
 	"context"
 	"encoding/json"
@@ -616,22 +615,7 @@ func readSSE(resp *http.Response, fn func(payload string) error) error {
 		defer gz.Close()
 		body = gz
 	}
-	sc := bufio.NewScanner(body)
-	sc.Buffer(make([]byte, 0, 1<<20), 8<<20) // 单帧上限 8MB（生图帧可能很大）
-	for sc.Scan() {
-		line := strings.TrimRight(sc.Text(), "\r")
-		if !strings.HasPrefix(line, "data:") {
-			continue
-		}
-		payload := strings.TrimPrefix(strings.TrimPrefix(line, "data:"), " ")
-		if payload == "" {
-			continue
-		}
-		if err := fn(payload); err != nil {
-			return err
-		}
-	}
-	if err := sc.Err(); err != nil {
+	if err := scanSSE(body, fn); err != nil {
 		return fmt.Errorf("chatgpt: 读流中断: %w", err)
 	}
 	return nil
