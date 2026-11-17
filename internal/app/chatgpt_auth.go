@@ -40,13 +40,9 @@ func (a *App) SubmitChatGPTAuth(cookieRaw, authRaw string) (string, string, erro
 		return "", "", err
 	}
 
-	rt := a.runtime(provider.ChatGPT)
-	if rt == nil || rt.Upstream == nil {
-		return "", "", errors.New("当前实例没有注册 ChatGPT 渠道（内建渠道未装配）")
-	}
-	client, ok := rt.Upstream.(*chatgpt.Client)
-	if !ok {
-		return "", "", errors.New("ChatGPT 渠道的客户端类型异常，无法校验凭据")
+	cf, err := a.chatgptClient()
+	if err != nil {
+		return "", "", err
 	}
 
 	probe := &auth.Auth{
@@ -55,7 +51,7 @@ func (a *App) SubmitChatGPTAuth(cookieRaw, authRaw string) (string, string, erro
 		Cookies:     cookies,
 		DeviceID:    chatgpt.NewDeviceID(),
 	}
-	me, err := client.Me(probe)
+	me, err := cf.Me(probe)
 	if err != nil {
 		return "", "", chatgptAuthError(err)
 	}
@@ -75,6 +71,19 @@ func (a *App) SubmitChatGPTAuth(cookieRaw, authRaw string) (string, string, erro
 
 }
 
+// chatgptClient 取本实例装配的 chatgpt 客户端（面板粘贴与目录导入两条入口共用）。
+func (a *App) chatgptClient() (*chatgpt.Client, error) {
+	rt := a.runtime(provider.ChatGPT)
+	if rt == nil || rt.Upstream == nil {
+		return nil, errors.New("当前实例没有注册 ChatGPT 渠道（内建渠道未装配）")
+	}
+	c, ok := rt.Upstream.(*chatgpt.Client)
+	if !ok {
+		return nil, errors.New("ChatGPT 渠道的客户端类型异常，无法校验凭据")
+	}
+	return c, nil
+}
+
 // persistChatGPTAccount 是 chatgpt 账号入库的**唯一路径**：同 uid 告警 → 落盘 → 重载池 → 重拉模型。
 //
 // 拆出来是为了让 SubmitChatGPTAuth 只管「输入规整 + 零配额校验」，不被落盘细节撑过一屏。
@@ -85,19 +94,7 @@ func (a *App) persistChatGPTAccount(uid, token string, cookies map[string]string
 		warn = fmt.Sprintf("这个 ChatGPT 账号（%s）已经添加过了，本次会用新凭据覆盖它。", chatgptUIDTail(uid))
 	}
 
-	aa := &auth.Auth{
-		Kind:        "chatgpt",
-		UID:         uid,
-		Nickname:    chatgptNickname(me, token, uid, prev.nickname),
-		AccessToken: token,
-		Cookies:     cookies,
-		DeviceID:    deviceID,
-		// 真实到期时刻：解 access token 的 JWT exp。解不出来留 0（未知，不臆造、不写远期）——
-		// 0 会让下一次续期（RefreshToken）补上真实值（不变量 21 的反面：写远期会让 90 天后静默死掉）。
-		ExpiresAt: chatgpt.JWTExp(token),
-		Extra:     chatgptExtra(token, me),
-		FilePath:  filepath.Join(a.cfg.AuthDir, "chatgpt-"+uid+".json"),
-	}
+	aa := a.newChatGPTAuth(uid, token, cookies, deviceID, me, prev)
 
 	if err := os.MkdirAll(a.cfg.AuthDir, 0o755); err != nil {
 		return "", fmt.Errorf("创建凭据目录失败：%w", err)
@@ -111,6 +108,24 @@ func (a *App) persistChatGPTAccount(uid, token string, cookies map[string]string
 	// 模型目录立刻重拉 + 费率异步刷新（否则用户要等下一次 ticker 才在面板看到模型）。
 	a.afterAccountAdded(provider.ChatGPT)
 	return warn, nil
+}
+
+// newChatGPTAuth 把校验通过的凭据组装成待落盘的 auth.Auth（粘贴与导入两条入口的唯一构造点）。
+func (a *App) newChatGPTAuth(uid, token string, cookies map[string]string, deviceID string,
+	me *chatgpt.UserInfo, prev chatgptPrev) *auth.Auth {
+	return &auth.Auth{
+		Kind:        "chatgpt",
+		UID:         uid,
+		Nickname:    chatgptNickname(me, token, uid, prev.nickname),
+		AccessToken: token,
+		Cookies:     cookies,
+		DeviceID:    deviceID,
+		// 真实到期时刻：解 access token 的 JWT exp。解不出来留 0（未知，不臆造、不写远期）——
+		// 0 会让下一次续期（RefreshToken）补上真实值（不变量 21 的反面：写远期会让 90 天后静默死掉）。
+		ExpiresAt: chatgpt.JWTExp(token),
+		Extra:     chatgptExtra(token, me),
+		FilePath:  filepath.Join(a.cfg.AuthDir, "chatgpt-"+uid+".json"),
+	}
 }
 
 // chatgptAuthError 把校验失败的上游错误翻成可行动的文案。

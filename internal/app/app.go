@@ -4669,12 +4669,15 @@ func (a *App) HandleAPI(mux *http.ServeMux) {
 	// 导入型渠道（MonkeyCode）：从本机已登录的官方客户端读取凭据并写入 auths/。
 	// 导入型渠道（小浣熊）：从本机已登录的官方客户端读取凭据并写入 auths/。
 	// 导入型渠道（Loomy）：从本机已登录的官方客户端读取凭据并写入 auths/。
+	// 导入型渠道（ChatGPT Web）：扫面板填写的 ww3 客户端数据目录，逐文件校验后导入（票 08）。
 	mux.HandleFunc("POST /api/account/import_local", func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
 			Channel string `json:"channel"`
+			// Dir 仅多文件导入渠道（chatgpt）使用：用户指点的 ww3 客户端数据目录。
+			Dir string `json:"dir"`
 		}
 		_ = json.NewDecoder(r.Body).Decode(&req)
-		res, err := a.ImportLocalCredentials(req.Channel)
+		res, err := a.ImportLocalCredentials(req.Channel, req.Dir)
 		if err != nil {
 			apiError(w, http.StatusBadRequest, err.Error())
 			return

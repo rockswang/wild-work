@@ -96,7 +96,14 @@ func (f *fakeChatGPT) counts() (me, sess int) {
 // newChatGPTApp 构造只含 ChatGPT runtime 的最小 App；srv 为假上游。
 func newChatGPTApp(t *testing.T, f *fakeChatGPT) (*App, *pool.Pool) {
 	t.Helper()
-	srv := httptest.NewServer(f)
+	return newChatGPTAppWithHandler(t, f)
+}
+
+// newChatGPTAppWithHandler 同 newChatGPTApp，但允许任意假上游 handler
+// （导入测试需要按 token 返回不同账号，见 chatgpt_import_test.go）。
+func newChatGPTAppWithHandler(t *testing.T, h http.Handler) (*App, *pool.Pool) {
+	t.Helper()
+	srv := httptest.NewServer(h)
 	t.Cleanup(srv.Close)
 
 	dir := t.TempDir()
