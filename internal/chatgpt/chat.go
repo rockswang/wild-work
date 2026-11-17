@@ -276,10 +276,19 @@ func (c *Client) prepareConduit(a *auth.Auth, req *chatRequest, traceID string, 
 //
 // 续接时 parent_message_id 必须与第 5 步一致（conduit 是同一轮的预取，指向别处上游不认）。
 func conduitBody(req *chatRequest, convID, parentID string) map[string]any {
+	return conduitBodyFor(req, convID, parentID, nil)
+}
+
+// conduitBodyFor 是 conduitBody 的带附件版本（生图链路用）：
+// 参考图以 multimodal_text 的 parts 下发，并补 attachment_mime_types（上游据此预热多模态通道）。
+func conduitBodyFor(req *chatRequest, convID, parentID string, atts []attachment) map[string]any {
 	partial := map[string]any{
 		"author":  map[string]any{"role": "user"},
 		"content": map[string]any{"content_type": "text", "parts": []string{truncate(req.Prompt, conduitPromptCap)}},
 		"id":      newUUID(),
+	}
+	if len(atts) > 0 {
+		partial["content"] = imageContent(atts, truncate(req.Prompt, conduitPromptCap))
 	}
 	body := map[string]any{
 		"client_prepare_state":    "sent",
@@ -300,6 +309,17 @@ func conduitBody(req *chatRequest, convID, parentID string) map[string]any {
 	if hints := req.systemHints(); len(hints) > 0 {
 		body["system_hints"] = hints
 	}
+	if len(atts) > 0 {
+		mimes := make([]string, 0, len(atts))
+		for _, a := range atts {
+			if a.MimeType != "" {
+				mimes = append(mimes, a.MimeType)
+			}
+		}
+		if len(mimes) > 0 {
+			body["attachment_mime_types"] = mimes
+		}
+	}
 	return body
 }
 
@@ -316,13 +336,32 @@ func parentOf(parentID string) string {
 // 刻意**不写** tools / tool_choice / functions：本渠道无工具能力，伪造会得到
 // 一段客户端不认账的文本。
 func conversationBody(req *chatRequest, msgID, convID, parentID string) map[string]any {
+	return conversationBodyFor(req, msgID, convID, parentID, nil)
+}
+
+// conversationBodyFor 是 conversationBody 的带附件版本（生图链路用）：
+// 参考图走 multimodal_text 的 parts，并在 metadata 里并列第二份附件清单。
+func conversationBodyFor(req *chatRequest, msgID, convID, parentID string, atts []attachment) map[string]any {
 	meta := map[string]any{
 		"automation_creation_attribution": map[string]any{"origin": "conversation", "flow_id": msgID},
+	}
+	content := map[string]any{"content_type": "text", "parts": []string{req.Prompt}}
+	if len(atts) > 0 {
+		content = imageContent(atts, req.Prompt)
+		list := make([]map[string]any, 0, len(atts))
+		for _, a := range atts {
+			list = append(list, map[string]any{
+				"id": a.FileID, "name": a.Name, "mime_type": a.MimeType,
+				"size": a.SizeBytes, "width": a.Width, "height": a.Height,
+			})
+		}
+		meta["attachments"] = list
+		meta["file_upload_slot_prefetch_attribution"] = map[string]any{"actual_path": "mixed", "reason": "mixed"}
 	}
 	msg := map[string]any{
 		"author":      map[string]any{"metadata": map[string]any{}, "name": nil, "role": "user"},
 		"channel":     nil,
-		"content":     map[string]any{"content_type": "text", "parts": []string{req.Prompt}},
+		"content":     content,
 		"create_time": float64(time.Now().UnixMilli()) / 1000,
 		"end_turn":    nil,
 		"id":          msgID,
