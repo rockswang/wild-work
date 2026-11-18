@@ -45,7 +45,7 @@
 
 ---
 
-## 1. 决议项索引（R1–R158）
+## 1. 决议项索引（R1–R159）
 
 **全文（含证据链、反例、已知限制）见 [`docs/决议项.md`](docs/决议项.md)** —— 改动相关代码前必读对应条目。
 
@@ -191,6 +191,7 @@
 | R156 | **脱敏表支持 `sanitize.toml` 追加自定义规则：TOML 单引号字面量让正则零转义；只 append、不覆盖、不隐式补预检**：JSON 承载正则有静默陷阱（`\b` 被解成退格符），故用 TOML 字面量字符串；段键=源文件路径、字段名=源变量名，解析器共享于 `internal/sanitizecfg`（两包各留约 30 行 append 接线）；段级 `enabled` 只管本段自定义规则是否加载（字段缺失或非布尔值按默认 `true`，显式 `false` 跳过本段追加、内置规则照常生效）；坏条目逐条跳过，文件缺失/语法错误保留内置规则；首次启动生成完整模板。已知限制：只增不删、无隐式预检、手改需重启。详见 [`docs/决议项.md`](docs/决议项.md) R156 |
 | R157 | **灵犀正文帧变体 `ppt_outline_text` 必须按 content 增量承接**（2026-11-15，PR #223）：Kimi 长上下文可只用 `ppt_outline_text` 帧承载正文（R141 序列之外变体），只认 `text` 会把它全丢弃 ⇒ HTTP 200 + stop 但 `content` 空；流式与聚合双路径均补该帧类型，`ppt_outline_start/end` 仍忽略。详见 [`docs/决议项.md`](docs/决议项.md) R157 |
 | R158 | **新增内建渠道豆包（`doubao/*`，第 24 条）；流式纪律四缺口合并后补修**（2026-11-16，PR #225）：工作模式 `/chat/completion` + 9 真模型 + 扫码登录 + 签到/窗口限额额度 + 工具调用文本协议（R49：不宣告能力）+ 随聊随删会话焚化；合并后补修 4 个真机探针复现的阻塞项（tool 末条被跳过且消息重复 / gate 前缀重复下发 / 空闲看门狗缺失 / 流内错误未分类）及装配层杂项（err 覆盖、注释错位、randDigits panic、取消态、rawStr 测试掩蔽）。详见 [`docs/决议项.md`](docs/决议项.md) R158 |
+| R159 | **CodeArts 多账号覆盖修复：UID 改由 refresh_token 的 account_id 决定，删除「复用第一个账号 UID」的方案 B**（2026-11-17，真机事故驱动）：旧 `SaveAuth` 在「上游没给身份字段」时复用该渠道**第一个**已落盘账号的 UID ⇒ 一旦有第二个华为账号，新号凭据必然写进旧号文件（真机事故：老号 3620 变新号 4500，且 refresh_token 是单次轮转票据、覆盖后不可兑回，只能重登）。新证据：STS 响应体确无身份字段，但 refresh_token 是 **JWS**，payload 的 `user_profile` 里带 `account_id`/`principal_id`/`account_name`，`account_id` 是**账号级常量**（同账号多套会话共用）。修法：新增 `codearts.ParseRefreshClaims`（容错，解不出不报错）+ Extra 增三个身份键；优先级改为 **Label → account_id → user_id/domain_id → AK**，删掉 `firstExistingUID`，并加「目标文件属于另一个账号则拒绝写盘」护栏。同账号重登=覆盖自己那条，老文件靠自身 refresh_token 现解 account_id 原地更新（零迁移）。回归 `identity_test.go` + `claims_test.go`（旧 `uid_reuse_test.go` 断言的是被修掉的旧行为，已删除）；4 处变异全部确认变红；`go build && go vet && go test ./...` 55 包全绿。 |
 
 > ⚠️ **R71 附带的实测纪律**（也是 §0.1 的来源）：上游校验的是**头族齐全**而非单点
 > （只补 `X-Conversation-ID` 仍被拒）；且 `X-Conversation-ID` 的**取值形态不被校验**
@@ -492,7 +493,7 @@ bash scripts/probe-dump.sh summarize                # 汇总各渠道 usage 字�
 | [README.md](README.md) | 用户文档 |
 | [DEVELOPMENT.md](DEVELOPMENT.md) | 开发者文档（面向 AI Agent） |
 | [AGENTS.md](AGENTS.md) | **本文件**：纪律 + 决议索引 + 关键不变量 + 构建发版 |
-| [docs/决议项.md](docs/决议项.md) | **R1–R158 决议全文**（证据链、反例、已知限制） |
+| [docs/决议项.md](docs/决议项.md) | **R1–R159 决议全文**（证据链、反例、已知限制） |
 | [docs/渠道接入备忘.md](docs/渠道接入备忘.md) | 各渠道协议要点、凭据模型、已知限制与踩坑 |
 | [docs/接口参考.md](docs/接口参考.md) | 面板区块规划 + 管理 API 全量清单 |
 | [docs/模型降级链定义.md](docs/模型降级链定义.md) | **模型降级链的唯一权威定义**：三维归因、错误类型全量归属、两条触发路径、三条硬规则、已知限制（R94） |

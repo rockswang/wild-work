@@ -24,8 +24,8 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"unicode"
 	"time"
+	"unicode"
 
 	"wild-work/internal/auth"
 )
@@ -42,6 +42,11 @@ type Credential struct {
 	DomainID     string
 	UserID       string
 	UserName     string
+	// AccountID / PrincipalID / AccountName 账号级稳定身份（从 refresh_token 的 user_profile
+	// 解出，见 claims.go）。上游 STS 响应体里没有这三个字段，**只在续期/登录解 JWS 时**才拿得到。
+	AccountID   string
+	PrincipalID string
+	AccountName string
 }
 
 // Account 是 CodeArts 账号的内存形态。
@@ -62,6 +67,11 @@ type Account struct {
 	DomainID string
 	UserID   string
 	UserName string
+	// AccountID / PrincipalID / AccountName 华为云账号级身份（来自 refresh_token 的
+	// user_profile，见 claims.go）：账号级常量，用来判「这枚凭据属于哪个账号」。
+	AccountID   string
+	PrincipalID string
+	AccountName string
 	// ProjectID / Region 华为云项目与区域（签名 V4 形态需要；snap-access 的
 	// SDK-HMAC-SHA256 不要求，故只做透传保存，不参与签名）。
 	ProjectID string
@@ -99,6 +109,9 @@ func accountFromAuthLocked(a *auth.Auth) *Account {
 		DomainID:          ex[ExtraDomainID],
 		UserID:            ex[ExtraUserID],
 		UserName:          ex[ExtraUserName],
+		AccountID:         ex[ExtraAccountID],
+		PrincipalID:       ex[ExtraPrincipalID],
+		AccountName:       ex[ExtraAccountName],
 		ProjectID:         ex[ExtraProjectID],
 		Region:            ex[ExtraRegion],
 		MaaSType:          ex[ExtraMaaSType],
@@ -129,6 +142,9 @@ func AccountFromCredential(uid, nickname string, c Credential, codeVerifier, dpo
 		DomainID:          c.DomainID,
 		UserID:            c.UserID,
 		UserName:          c.UserName,
+		AccountID:         c.AccountID,
+		PrincipalID:       c.PrincipalID,
+		AccountName:       c.AccountName,
 		MaaSType:          MaaSTypeBenefit,
 		Nickname:          strings.TrimSpace(nickname),
 	}
@@ -171,6 +187,9 @@ func (ac *Account) extra() map[string]string {
 	setIfNonEmpty(ex, ExtraDomainID, ac.DomainID)
 	setIfNonEmpty(ex, ExtraUserID, ac.UserID)
 	setIfNonEmpty(ex, ExtraUserName, ac.UserName)
+	setIfNonEmpty(ex, ExtraAccountID, ac.AccountID)
+	setIfNonEmpty(ex, ExtraPrincipalID, ac.PrincipalID)
+	setIfNonEmpty(ex, ExtraAccountName, ac.AccountName)
 	setIfNonEmpty(ex, ExtraProjectID, ac.ProjectID)
 	setIfNonEmpty(ex, ExtraRegion, ac.Region)
 	setIfNonEmpty(ex, ExtraCodeVerifier, ac.CodeVerifier)
