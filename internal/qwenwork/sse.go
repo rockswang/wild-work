@@ -326,6 +326,35 @@ func streamAsOpenAI(w io.Writer, r io.Reader, model string, flush func()) (map[s
 		// usage 捕获：末帧覆盖前面（OpenAI 语义末帧才是全量），并照常透传
 		if u, ok := chunk["usage"].(map[string]any); ok && len(u) > 0 {
 			usage = u
+			// OpenAI 规范：带 usage 的末帧 chunk，choices 必须为空数组 []
+			// 阿里/千问上游常携带 choices:[{"delta":{},"index":0}]，导致下游网关（如 New-API/One-API）
+			// 的 Claude/Gemini 转换器无法识别末帧而遗漏 message_stop，造成 Claude Code 报错断连。
+			if chs, ok := chunk["choices"].([]any); ok {
+				hasContent := false
+				for _, ci := range chs {
+					if c, ok := ci.(map[string]any); ok {
+						if fr, ok := c["finish_reason"].(string); ok && fr != "" {
+							hasContent = true
+							break
+						}
+						if d, ok := c["delta"].(map[string]any); ok {
+							for _, v := range d {
+								if s, ok := v.(string); ok && s != "" {
+									hasContent = true
+									break
+								}
+							}
+							if _, hasTC := d["tool_calls"]; hasTC {
+								hasContent = true
+								break
+							}
+						}
+					}
+				}
+				if !hasContent {
+					chunk["choices"] = []any{}
+				}
+			}
 		}
 		chunk["model"] = model
 		raw, _ := json.Marshal(chunk)

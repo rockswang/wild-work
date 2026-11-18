@@ -344,6 +344,34 @@ func TestStream_Transfer(t *testing.T) {
 	}
 }
 
+// TestStream_UsageChunkChoicesEmpty 验证带 usage 的末帧 chunk 即使上游带空 delta choice 也会被规范化为 choices: []
+func TestStream_UsageChunkChoicesEmpty(t *testing.T) {
+	chunk1 := map[string]any{"id": "1", "choices": []any{map[string]any{
+		"delta": map[string]any{"content": "hi"}, "finish_reason": "stop"}}}
+	chunk2 := map[string]any{"id": "1", "choices": []any{map[string]any{
+		"delta": map[string]any{}, "index": 0}}, "usage": map[string]any{"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}}
+	sse := ssePayload(t, chunk1, 200) + "\n" + ssePayload(t, chunk2, 200) + "\n"
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(sse))
+	}))
+	defer srv.Close()
+	resp, err := http.Get(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	rec := httptest.NewRecorder()
+	if _, err := StreamCapture(rec, resp.Body, "qwenwork/flash", nil); err != nil {
+		t.Fatal(err)
+	}
+	out := rec.Body.String()
+	if !strings.Contains(out, `"choices":[]`) {
+		t.Fatalf("末帧 usage 未规范化为 choices: []:\n%s", out)
+	}
+}
+
 // base64Raw 标准 base64 解码辅助。
 func base64Raw(s string) ([]byte, error) {
 	return base64.StdEncoding.DecodeString(s)
