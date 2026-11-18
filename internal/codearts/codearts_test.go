@@ -277,6 +277,11 @@ func TestClassifyQuotaVsQueue(t *testing.T) {
 	}{
 		{"额度码 4291", 200, `{"text":"[DONE]","error_code":"InferHub.4291.200","error_msg":"free quota exhausted"}`, provider.ErrHardCredit},
 		{"额度措辞", 200, `{"error_code":"InferHub.x","error_msg":"insufficient quota for this model"}`, provider.ErrHardCredit},
+		// R166：积分账户耗尽（真实报文，HTTP 400）绝不能落 ErrBadParams，否则不冷却/不换号/降级链不触发。
+		{"积分耗尽 TM.00001050", 400, `{"error_code":"TM.00001050","error_msg":"您的积分已耗尽，请关注活动积分领取活动或者[升级套餐](https://console.huaweicloud.com/devcloud/)"}`, provider.ErrHardCredit},
+		{"积分耗尽中文措辞", 400, `{"error_code":"TM.xxx","error_msg":"您的积分已耗尽"}`, provider.ErrHardCredit},
+		// 码后接非数字的纪律（R75）：`TM.000010500` 不得被前缀误命中 ⇒ 不归 hard_credit（回落到 400 请求级）。
+		{"TM.000010500 不得命中", 400, `{"error_code":"TM.000010500","error_msg":"其他原因"}`, provider.ErrBadParams},
 		{"排队码 TM.00001041", 200, `{"error_code":"TM.00001041","error_msg":"排队中，请稍后"}`, provider.ErrSoftRate},
 		{"排队码 81111", 429, `{"error_code":"APIG.0308","error_msg":"81111 too many requests"}`, provider.ErrSoftRate},
 		{"独立 429", 200, `{"error_code":"TM.x","error_msg":"HTTP 429 rate limited"}`, provider.ErrSoftRate},
@@ -339,6 +344,56 @@ func TestStreamEmbeddedErrorCode(t *testing.T) {
 	}
 	if strings.Count(out, "data: [DONE]") != 1 {
 		t.Fatalf("必须恰好一个 [DONE]，实际:\n%s", out)
+	}
+}
+
+// TestStreamCreditExhaustedHint 积分账户耗尽（TM.00001050）流内同样要：
+// ① 归 ErrHardCredit（可换号 + 长冷却）；② 恢复说明**不得**写「UTC+8 自然日重置」。
+func TestStreamCreditExhaustedHint(t *testing.T) {
+	payload := `{"text":"[DONE]","error_code":"TM.00001050","error_msg":"您的积分已耗尽，请关注活动积分领取活动或者升级套餐"}`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, "data:"+payload+"\n")
+		_, _ = io.WriteString(w, "data:[DONE]\n")
+	}))
+	defer srv.Close()
+
+	c := NewWithBase(srv.URL)
+	rc, status, _, err := c.ChatStream(makeAuth("u1"), []byte(`{"model":"deepseek-v4.1-flash","messages":[{"role":"user","content":"x"}]}`))
+	if err != nil || status != 200 {
+		t.Fatalf("ChatStream status=%d err=%v", status, err)
+	}
+	defer rc.Close()
+
+	rec := httptest.NewRecorder()
+	_, serr := c.Stream(rec, rc, "codearts/deepseek-v4.1-flash")
+	if serr == nil {
+		t.Fatal("内嵌 error_code 必须返回错误")
+	}
+	se, ok := serr.(*StreamError)
+	if !ok {
+		t.Fatalf("错误类型 = %T, want *StreamError", serr)
+	}
+	if se.Kind() != provider.ErrHardCredit {
+		t.Fatalf("TM.00001050 必须归 ErrHardCredit，得到 %s", se.Kind())
+	}
+	if se.Status != http.StatusPaymentRequired {
+		t.Fatalf("合成状态码应为 402，得到 %d", se.Status)
+	}
+	msg := se.Error()
+	if strings.Contains(msg, "UTC+8") || strings.Contains(msg, "重置，预计") {
+		t.Fatalf("积分账户没有自动重置时刻，不得贴 benefit 重置提示：%s", msg)
+	}
+	if !strings.Contains(msg, "积分已耗尽") || !strings.Contains(msg, "不会自动重置") {
+		t.Fatalf("提示应指向领取活动积分/升级套餐：%s", msg)
+	}
+	// 客户端仍必须收到带真实错误码的 error 帧，且恰好一个 [DONE]。
+	out := rec.Body.String()
+	if !strings.Contains(out, "TM.00001050") {
+		t.Fatalf("客户端必须收到带错误码的 error 帧：\n%s", out)
+	}
+	if strings.Count(out, "data: [DONE]") != 1 {
+		t.Fatalf("必须恰好一个 [DONE]：\n%s", out)
 	}
 }
 

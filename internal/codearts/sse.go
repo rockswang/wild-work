@@ -45,8 +45,20 @@ func BenefitResetAt(now time.Time) time.Time {
 }
 
 // BenefitResetHint 生成人类可读的额度重置说明（含「预计」二字，见上）。
+//
+// ⚠️ 只能用于 **benefit 免费额度**（`4291`）：积分账户（`TM.00001050`）靠「领取活动积分」
+// 入账，**没有**自动重置这回事 ⇒ 那个池子的说明走 CreditExhaustedHint（R166）。
 func BenefitResetHint(now time.Time) string {
 	return "免费额度按 UTC+8 自然日重置，预计 " + BenefitResetAt(now).Format("2006-01-02 15:04") + "（UTC+8）恢复"
+}
+
+// CreditExhaustedHint 积分账户耗尽的说明（**不含**任何重置时刻）。
+//
+// 为什么不能复用 BenefitResetHint：上游报文（`TM.00001050`）只给了「请关注活动积分领取活动
+// 或者升级套餐」，没有任何自动恢复时刻。按 UTC+8 自然日推算对积分账户是**编造**
+// （R49「只透传上游声明，绝不编造」）——benefit 额度是 platform 按日发的，积分是本用户去活动页领的。
+func CreditExhaustedHint() string {
+	return "该账号积分已耗尽，需领取活动积分或升级套餐后恢复（积分不会自动重置）"
 }
 
 // BenefitDay 返回 UTC+8 自然日标识（YYYY-MM-DD）——额度是按日重置，不是滚动窗口。
@@ -269,12 +281,18 @@ func rewriteModelLine(line []byte, model string) []byte {
 	}
 }
 
-// newStreamError 构造流内业务错误（额度类附 UTC+8 重置提示）。
+// newStreamError 构造流内业务错误（额度类附恢复说明，按池子分支）。
 func newStreamError(payload string, now time.Time) *StreamError {
 	status := statusOfPayload(payload)
 	e := &StreamError{Status: status, Body: payload}
 	if Classify(status, payload) == provider.ErrHardCredit {
-		e.hint = BenefitResetHint(now)
+		// 两种池子的恢复方式不同：benefit 免费额度按 UTC+8 自然日重置（可推算，标「预计」）；
+		// 积分账户靠领取活动积分入账，没有可推算的恢复时刻（R166）。
+		if reCreditExhausted.MatchString(payload) {
+			e.hint = CreditExhaustedHint()
+		} else {
+			e.hint = BenefitResetHint(now)
+		}
 	}
 	return e
 }
