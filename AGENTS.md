@@ -45,7 +45,7 @@
 
 ---
 
-## 1. 决议项索引（R1–R160）
+## 1. 决议项索引（R1–R161）
 
 **全文（含证据链、反例、已知限制）见 [`docs/决议项.md`](docs/决议项.md)** —— 改动相关代码前必读对应条目。
 
@@ -193,6 +193,7 @@
 | R158 | **新增内建渠道豆包（`doubao/*`，第 24 条）；流式纪律四缺口合并后补修**（2026-11-16，PR #225）：工作模式 `/chat/completion` + 9 真模型 + 扫码登录 + 签到/窗口限额额度 + 工具调用文本协议（R49：不宣告能力）+ 随聊随删会话焚化；合并后补修 4 个真机探针复现的阻塞项（tool 末条被跳过且消息重复 / gate 前缀重复下发 / 空闲看门狗缺失 / 流内错误未分类）及装配层杂项（err 覆盖、注释错位、randDigits panic、取消态、rawStr 测试掩蔽）。详见 [`docs/决议项.md`](docs/决议项.md) R158 |
 | R159 | **CodeArts 多账号覆盖修复：UID 改由 refresh_token 的 account_id 决定，删除「复用第一个账号 UID」的方案 B**（2026-11-17，真机事故驱动）：旧 `SaveAuth` 在「上游没给身份字段」时复用该渠道**第一个**已落盘账号的 UID ⇒ 一旦有第二个华为账号，新号凭据必然写进旧号文件（真机事故：老号 3620 变新号 4500，且 refresh_token 是单次轮转票据、覆盖后不可兑回，只能重登）。新证据：STS 响应体确无身份字段，但 refresh_token 是 **JWS**，payload 的 `user_profile` 里带 `account_id`/`principal_id`/`account_name`，`account_id` 是**账号级常量**（同账号多套会话共用）。修法：新增 `codearts.ParseRefreshClaims`（容错，解不出不报错）+ Extra 增三个身份键；优先级改为 **Label → account_id → user_id/domain_id → AK**，删掉 `firstExistingUID`，并加「目标文件属于另一个账号则拒绝写盘」护栏。同账号重登=覆盖自己那条，老文件靠自身 refresh_token 现解 account_id 原地更新（零迁移）。回归 `identity_test.go` + `claims_test.go`（旧 `uid_reuse_test.go` 断言的是被修掉的旧行为，已删除）；4 处变异全部确认变红；`go build && go vet && go test ./...` 55 包全绿。详见 [`docs/决议项.md`](docs/决议项.md) R159 |
 | R160 | **请求级 4xx 必须留日志：内容拦截/上下文超限/图片无效/body 不合格/上游请求级拒绝此前整条路径零日志**（2026-11-17，实测事故驱动）：用户报「小浣熊 deepseek 一天好几次 400」，但 `data/app.log` 全量零命中（`content_filter` 0 条、当天 `error` 行 0 条），只能反查客户端会话才定住归属。根因是可观测性缺口而非审核本身：`ErrServer`/单账号/轮转/传输层错误都有日志，唯独这条「请求级直接透传」分支只调 `transparentError` 就 return。修法=透传前加一条日志（`platform/uid/model/status/kind/body 摘要` + 明确标注「不罚号、不轮换」），**判定与行为零改动**。回归两例（单条断言五字段、五种 ErrKind 逐个覆盖），变异验证删日志即变红。详见 [`docs/决议项.md`](docs/决议项.md) R160 |
+| R161 | **CodeArts 渠道支持图片输入：出站保留 text + image_url，模态能力靠「可复现实测 ∪ 静态表」标定**（2026-11-18）：根因是本仓 `internal/codearts/body.go` 的 `textBlocksOnly` 只保留 `type=="text"` 块，图片在出站前被丢弃（R113 的「未覆盖」清单里早有标注）。直连上游 A/B 实测（同账号同模型，仅差 image_url）：`kimi-k3.1-pro` 纯文本 ptok=105、带图 389 且答对 `7319,red` ⇒ 上游本来就支持，是本地丢的。非多模态模型被上游以 `InferHub.001001020.406 not multimodal` 明确拒绝；`glm-5.3` 拒绝而 `glm-5.3-flash` 通过，**不能按名称前缀推断能力**。修法：① `normalizeMessages` → `textAndImageBlocks`，`input_image` 归一成 `image_url`（detail 透传）、空 url 丢弃、audio/file 仍丢，**纯文本形状零变化**；② `modelEntry` 加 `SupportsImages` + `measuredVisionModels`/`measuredNoVisionModels` 两张实测表 + `modelSupportsImages()`，`modelInfos`/`mergeCatalog` 全部接入（R140 口径：上游声明 ∪ 可复现实测）；③ `staticCatalog` 9→16 条，`ContextWindow` 按上游 `defaultLength` 对齐（300000/200000）。实测可识图 4 个（kimi-k3.1-pro/kimi-k3/glm-5.3-flash/deepseek-v4.1-flash），明确拒绝 6 个，`GLM-5.1`/`GLM-5`/`deepseek-v4-flash`/`deepseek-v4-pro` 撞 `TM.000010051` 并发上限属**未定**、不得写死。回归 `vision_test.go` 8 例 + 同步 2 个既有断言；`go test ./...` 全绿（54 包）。详见 [`docs/决议项.md`](docs/决议项.md) R161 |
 
 > ⚠️ **R71 附带的实测纪律**（也是 §0.1 的来源）：上游校验的是**头族齐全**而非单点
 > （只补 `X-Conversation-ID` 仍被拒）；且 `X-Conversation-ID` 的**取值形态不被校验**

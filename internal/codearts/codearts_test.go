@@ -814,9 +814,11 @@ func TestFetchModelsMergeAndBenefitSet(t *testing.T) {
 		t.Error("视觉模型必须隐藏")
 	}
 	// GLM-5.2 的窗口来自静态表，动态目录不返回窗口 ⇒ 合并后应补上。
+	// 取值见 R161：静态表已按上游 contextWindow.defaultLength 对齐到 300000
+	// （原值 202752 是参考实现手抄的旧快照）。
 	for _, m := range models {
-		if m.ID == "GLM-5.2" && m.ContextWindow != 202752 {
-			t.Errorf("GLM-5.2 窗口 = %d, want 202752（静态表补齐）", m.ContextWindow)
+		if m.ID == "GLM-5.2" && m.ContextWindow != 300000 {
+			t.Errorf("GLM-5.2 窗口 = %d, want 300000（静态表补齐）", m.ContextWindow)
 		}
 	}
 	// GET 的 Content-Type 属「未签名但必需的头」（协议表），故 SignedHeaders 里没有它。
@@ -861,11 +863,17 @@ func TestFetchModelsFallsBackToStatic(t *testing.T) {
 	}
 }
 
-// TestStaticModelsShape 静态表形状（ID 去重、窗口只填协议给的 5 条）。
+// TestStaticModelsShape 静态表形状（ID 去重、窗口与上游目录对齐）。
+//
+// R161（2026-11-18）把静态表从「协议明确给出的 9 条、其中 5 条带窗口」扩到
+// 上游目录实际下发的 16 条，窗口取 contextWindow.defaultLength（三档
+// 300k/600k/1M 的取默认档）。因此这里断言「全部条目都有窗口」——
+// 再留 0=未知的条目等于让面板显示空容量，与「对齐上游」的目标相反。
+// 窗口取值本身由 vision_test.go 的 TestStaticCatalogContextWindows 逐条锁死。
 func TestStaticModelsShape(t *testing.T) {
 	ms := StaticModels()
-	if len(ms) != 9 {
-		t.Fatalf("静态表 = %d 条, want 9", len(ms))
+	if len(ms) != 16 {
+		t.Fatalf("静态表 = %d 条, want 16（对齐上游目录）", len(ms))
 	}
 	seen := map[string]bool{}
 	withWindow := 0
@@ -881,8 +889,8 @@ func TestStaticModelsShape(t *testing.T) {
 			withWindow++
 		}
 	}
-	if withWindow != 5 {
-		t.Fatalf("有窗口的条目 = %d, want 5（协议只给了 5 条）", withWindow)
+	if withWindow != len(ms) {
+		t.Fatalf("有窗口的条目 = %d, want %d（静态表须与上游目录对齐）", withWindow, len(ms))
 	}
 }
 
