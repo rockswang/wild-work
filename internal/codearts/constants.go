@@ -165,6 +165,13 @@ const (
 	ExtraMaaSType          = "maas_type"
 	ExtraCodeVerifier      = "code_verifier"
 	ExtraDPoPPrivateKeyJWK = "dpop_private_key_jwk"
+	// ExtraAccountID / ExtraPrincipalID 是**账号级稳定身份**（见 claims.go）：
+	// 从 refresh_token 的 user_profile 解出，落盘只为诊断与「同账号重登覆盖同一文件」的查找。
+	// 它们是账号常量、不随续期变化，因此与 uid（会换）分开存。
+	ExtraAccountID   = "account_id"
+	ExtraPrincipalID = "principal_id"
+	// ExtraAccountName 华为云账号名（hw… 形态），纯诊断展示。
+	ExtraAccountName = "account_name"
 )
 
 // 超时与看门狗。
