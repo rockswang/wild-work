@@ -340,9 +340,11 @@
       `data:image/...;base64` 缩到长边 ≤1568（不透明→JPEG q85，带 alpha→PNG，转 JPEG 会把透明区涂黑），
       按 payload sha256 缓存 256 条。**只动 data URL**：`http(s)` 直链不下载不改写；解码失败 /
       重编码后变大 / 体积 ≤512KB 且长边合规 ⇒ 原样返回；像素 >5000 万放弃（防解压炸弹）。
-    - **未覆盖**：`/v1/chat/completions` 直连路径不瘦身；gemini/codearts/monkeycode/zcode/minimax
-      等原生渠道各写一套 Chat→私有协议转换，其中 `textBlocksOnly` / `toolResultBlocks` / `textOfContent`
+    - **未覆盖**：`/v1/chat/completions` 直连路径不瘦身；gemini/monkeycode/zcode/minimax
+      等原生渠道各写一套 Chat→私有协议转换，其中 `toolResultBlocks` / `textOfContent`
       会把工具结果里的图片**静默丢弃**（不会 token 爆炸，但模型看不到图）。
+      codearts 原也在其列，**已于 R161（2026-11-18）改为保留 `text` + `image_url` 两类块**，
+      出站不再丢图；能力面靠 `measuredVisionModels`/`measuredNoVisionModels` 两张实测表标定。
 
 ---
 
@@ -495,7 +497,7 @@ bash scripts/probe-dump.sh summarize                # 汇总各渠道 usage 字�
 | [README.md](README.md) | 用户文档 |
 | [DEVELOPMENT.md](DEVELOPMENT.md) | 开发者文档（面向 AI Agent） |
 | [AGENTS.md](AGENTS.md) | **本文件**：纪律 + 决议索引 + 关键不变量 + 构建发版 |
-| [docs/决议项.md](docs/决议项.md) | **R1–R160 决议全文**（证据链、反例、已知限制） |
+| [docs/决议项.md](docs/决议项.md) | **R1–R161 决议全文**（证据链、反例、已知限制） |
 | [docs/渠道接入备忘.md](docs/渠道接入备忘.md) | 各渠道协议要点、凭据模型、已知限制与踩坑 |
 | [docs/接口参考.md](docs/接口参考.md) | 面板区块规划 + 管理 API 全量清单 |
 | [docs/模型降级链定义.md](docs/模型降级链定义.md) | **模型降级链的唯一权威定义**：三维归因、错误类型全量归属、两条触发路径、三条硬规则、已知限制（R94） |
