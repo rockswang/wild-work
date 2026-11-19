@@ -119,14 +119,16 @@ func (c *Client) doBearer(url string, a *auth.Auth) (json.RawMessage, error) {
 		Data json.RawMessage `json:"data"`
 		Msg  string          `json:"msg"`
 	}
-	if err := json.Unmarshal(raw, &env); err != nil {
-		return nil, fmt.Errorf("parse failed: %w (body: %s)", err, truncate(string(raw), 120))
+	if err := json.Unmarshal(raw, &env); err == nil {
+		if env.Code != "" && env.Code != "ok" {
+			return nil, &provider.Error{Kind: Classify(resp.StatusCode, env.Msg+env.Code),
+				Status: resp.StatusCode, Msg: fmt.Sprintf("code=%s msg=%s", env.Code, truncate(env.Msg, 160))}
+		}
+		if env.Data != nil {
+			return env.Data, nil
+		}
 	}
-	if env.Code != "ok" && env.Code != "" {
-		return nil, &provider.Error{Kind: Classify(resp.StatusCode, env.Msg+env.Code),
-			Status: resp.StatusCode, Msg: fmt.Sprintf("code=%s msg=%s", env.Code, truncate(env.Msg, 160))}
-	}
-	return env.Data, nil
+	return json.RawMessage(raw), nil
 }
 
 // ---------------------------------------------------------------------------
@@ -331,9 +333,75 @@ type modelEntry struct {
 	MaxInputTokens int64   `json:"max_input_tokens"`
 }
 
-// FetchModels COSY GET /api/v2/model/list，取 scene=qwork 的档位列表。
-// GET 无 body，签名用空串 ""（非 "{}"，后者 403 Signature invalid，与 qoder 一致）。
+// chatMode 网页/桌面端 /api/chat-modes 单条（qwork scene）。
+type chatMode struct {
+	Key            string  `json:"key"`
+	PriceFactor    float64 `json:"price_factor"`
+	CostFactor     float64 `json:"cost_factor"`
+	Enable         bool    `json:"enable"`
+	IsNew          bool    `json:"is_new"`
+	MaxInputTokens int64   `json:"max_input_tokens"`
+	IsReasoning    bool    `json:"is_reasoning"`
+	IsVL           bool    `json:"is_vl"`
+	I18n           struct {
+		DisplayName struct {
+			Zh string `json:"zh"`
+			En string `json:"en"`
+		} `json:"display_name"`
+		Description struct {
+			Zh string `json:"zh"`
+			En string `json:"en"`
+		} `json:"description"`
+	} `json:"i18n"`
+}
+
+func (m chatMode) displayName() string {
+	if m.I18n.DisplayName.Zh != "" {
+		return m.I18n.DisplayName.Zh
+	}
+	if m.I18n.DisplayName.En != "" {
+		return m.I18n.DisplayName.En
+	}
+	return m.Key
+}
+
+// FetchModels 获取模型列表：优先请求网页/桌面端 /api/chat-modes（全量 13 款模型及动态能力声明）；
+// 失败时回退到 COSY GET /api/v2/model/list（旧版 3 档）；再失败则由上层回退 staticModels 静态兜底。
 func (c *Client) FetchModels(a *auth.Auth) ([]provider.ModelInfo, error) {
+	// 1. 优先尝试 /api/chat-modes（桌面端与网页端同款，支持全量第三方模型）
+	if a != nil && a.AccessToken != "" {
+		url := c.web() + EpChatModes
+		data, err := c.doBearer(url, a)
+		if err == nil {
+			var scenes map[string][]chatMode
+			if json.Unmarshal(data, &scenes) == nil && len(scenes["qwork"]) > 0 {
+				rows := scenes["qwork"]
+				out := make([]provider.ModelInfo, 0, len(rows))
+				for _, m := range rows {
+					if m.Key == "" || !m.Enable {
+						continue
+					}
+					ctx := m.MaxInputTokens
+					if ctx <= 0 || ctx > 180_000 {
+						ctx = 180_000 // 网关单次实测上限 180k
+					}
+					out = append(out, provider.ModelInfo{
+						ID:                m.Key,
+						Name:              m.displayName(),
+						ContextWindow:     ctx,
+						SupportsImages:    m.IsVL,
+						SupportsReasoning: m.IsReasoning,
+						SupportsTools:     true,
+					})
+				}
+				if len(out) > 0 {
+					return out, nil
+				}
+			}
+		}
+	}
+
+	// 2. 备选回退：COSY GET /api/v2/model/list，取 scene=qwork 的档位列表。
 	uid, name, email, token := identity(a)
 	if token == "" {
 		return nil, fmt.Errorf("no access token")
@@ -375,19 +443,14 @@ func (c *Client) FetchModels(a *auth.Auth) ([]provider.ModelInfo, error) {
 		if m.Key == "" || !m.Enable {
 			continue
 		}
-		// 上游真实上限实测 ≈180K（175K OK / 179K → 424 All models failed，见备忘 §6.9）；
-		// 网页 chat-modes 的 1M 是前端档位选择器最大值，非单次请求能力。
-		// 上游给的 180000 是准确口径，仅在缺失时兜底同值。
 		ctx := m.MaxInputTokens
 		if ctx <= 0 {
 			ctx = 180_000
 		}
 		out = append(out, provider.ModelInfo{
-			ID:            m.Key,
-			Name:          displayName(m),
-			ContextWindow: ctx,
-			// 能力：/api/chat-modes 声明三档均 is_reasoning/is_vl（pro 声明 is_vl=false），
-			// 实测 pro 路由 glm-5.2 思考可选；工具调用三档实测均支持。
+			ID:                m.Key,
+			Name:              displayName(m),
+			ContextWindow:     ctx,
 			SupportsImages:    m.Key != "pro",
 			SupportsReasoning: true,
 			SupportsTools:     true,
@@ -402,17 +465,6 @@ func (c *Client) FetchModels(a *auth.Auth) ([]provider.ModelInfo, error) {
 // displayName 档位展示名：i18n 缺失时回退 display_name → key。
 func displayName(m modelEntry) string {
 	return m.DisplayName
-}
-
-// chatMode 网页 /api/chat-modes 单条（qwork scene）。
-type chatMode struct {
-	Key            string `json:"key"`
-	PriceFactor    float64
-	Factor         float64 `json:"price_factor"`
-	CostFactor     float64 `json:"cost_factor"`
-	Enable         bool    `json:"enable"`
-	IsNew          bool    `json:"is_new"`
-	MaxInputTokens int64   `json:"max_input_tokens"`
 }
 
 // FetchModelPricing 费率：优先网页 /api/chat-modes（Bearer，price_factor），
@@ -430,7 +482,7 @@ func (c *Client) FetchModelPricing(a *auth.Auth) ([]provider.ModelPricing, error
 					if m.Key == "" || !m.Enable {
 						continue
 					}
-					rate := m.Factor
+					rate := m.PriceFactor
 					if rate == 0 {
 						rate = m.CostFactor
 					}
