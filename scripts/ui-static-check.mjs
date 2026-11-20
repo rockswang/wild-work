@@ -256,6 +256,12 @@ const check = (name, pass, extra = "") => results.push([name, pass, extra]);
 T.renderAccounts();
 const cards = document.getElementById("acctList").innerHTML;
 check("冷却标签出现（冷却至 …）", /冷却至/.test(cards));
+// 账号级签到暂停：按钮在签到状态区、文字按钮、带边界说明。
+check("可签到账号显示暂停签到按钮", cards.includes("toggleCheckinPaused(") && cards.includes(">暂停签到<"));
+check("源码接了账号级签到暂停接口", raw.includes('/api/account/checkin_disabled'));
+check("暂停按钮位于签到状态区", /class="acct-checkin">[^<]*([\s\S]{0,600}?)checkin-toggle/.test(cards));
+check("暂停按钮不使用图标（与顶部停用账号的 ⏸ 区分）", !/icon-op[^>]*onclick="toggleCheckinPaused/.test(cards));
+check("暂停按钮带明确说明", cards.includes("不影响对话与余额刷新"));
 check("冷却时间正确显示", cards.includes("10-03 09:12"));
 check("冷却原因进 title（含 3004）", cards.includes("3004"));
 check("冷却卡片带 cooling 类（左侧琥珀边）", /acct-card cooling/.test(cards));

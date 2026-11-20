@@ -245,7 +245,18 @@ body {
   animation: stale-pulse 1.6s ease-in-out infinite;
 }
 @keyframes stale-pulse { 0%,100% { opacity: 1; } 50% { opacity: .45; } }
-.acct-card .acct-checkin { font-size: 11px; }
+.acct-card .acct-checkin { font-size: 11px; display: flex; align-items: center; gap: 6px; flex-wrap: wrap; justify-content: flex-end; }
+/* 账号级「暂停/恢复签到」：与签到状态标签并排的小文字按钮。
+   刻意不用图标、不放进顶部操作行——那里紧邻刷新/删除/停用账号，图标（⏸）
+   易被误读成「停用整个账号」。 */
+.checkin-toggle {
+  font-size: 10px; line-height: 1; padding: 3px 7px; border-radius: 10px;
+  border: 1px solid var(--border); background: var(--card); color: var(--muted);
+  cursor: pointer; white-space: nowrap; transition: all .15s;
+}
+.checkin-toggle:hover { color: var(--primary); border-color: var(--primary); background: #eff6ff; }
+.checkin-toggle.on { color: var(--primary); border-color: #bfdbfe; background: #eff6ff; }
+.checkin-toggle.on:hover { color: var(--danger); border-color: var(--danger); background: #fef2f2; }
 .acct-card .acct-ops { display: flex; gap: 4px; justify-content: flex-end; }
 
 .badge { font-size: 10px; padding: 2px 7px; border-radius: 10px; color: #fff; white-space: nowrap; }
@@ -1523,6 +1534,8 @@ select.input::-ms-expand, .select::-ms-expand { display: none; }
   .acct-card { min-width: 0; }
   .acct-card .acct-top,
   .acct-card .acct-mid { flex-wrap: wrap; }
+  /* 签到状态 + 暂停/恢复按钮独占一行，避免窄屏被卡片右边缘裁掉。 */
+  .acct-card .acct-checkin { width: 100%; justify-content: flex-start; }
 }
 
 /* 4) 费率表：桌面每行两模型（模型|倍率|模型|倍率）；窄屏将同一 tr 的

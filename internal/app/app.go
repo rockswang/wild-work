@@ -26,6 +26,7 @@ import (
 	"wild-work/internal/comate"
 	"wild-work/internal/config"
 	"wild-work/internal/custom"
+	"wild-work/internal/doubao"
 	"wild-work/internal/ledger"
 	"wild-work/internal/lingxi"
 	"wild-work/internal/login"
@@ -46,7 +47,6 @@ import (
 	logintrae "wild-work/internal/login_trae"
 	"wild-work/internal/login_wbai"
 	loginzcode "wild-work/internal/login_zcode"
-	"wild-work/internal/doubao"
 	"wild-work/internal/loopguard"
 	"wild-work/internal/oczen"
 	"wild-work/internal/officeace"
@@ -2734,6 +2734,18 @@ func (a *App) CheckinAccount(uid string) (scheduler.CheckinResult, error) {
 	return res, nil
 }
 
+// SetAccountCheckinDisabled 暂停/恢复某账号的签到（账号级签到控制）。
+// 不复用 SetAccountDisabled：后者会连 API 路由一起停用，这里只停签到。
+func (a *App) SetAccountCheckinDisabled(uid string, disabled bool) error {
+	rt, _ := a.findRuntimeAuth(uid)
+	if rt == nil || rt.Pool == nil {
+		return fmt.Errorf("unknown account %s", uid)
+	}
+	rt.Pool.SetCheckinDisabled(uid, disabled)
+	log.Printf("account checkin disabled=%t uid=%s", disabled, uid)
+	return nil
+}
+
 // CheckinAll 全部账号立即签到。
 func (a *App) CheckinAll() []scheduler.CheckinResult {
 	results := make([]scheduler.CheckinResult, 0)
@@ -2757,13 +2769,15 @@ func (a *App) CheckinAll() []scheduler.CheckinResult {
 			results = append(results, res)
 		}
 	}
-	ok := 0
+	ok, paused := 0, 0
 	for _, r := range results {
-		if r.OK {
+		if r.Paused {
+			paused++
+		} else if r.OK {
 			ok++
 		}
 	}
-	log.Printf("批量签到完成：total=%d ok=%d failed=%d", len(results), ok, len(results)-ok)
+	log.Printf("批量签到完成：total=%d ok=%d paused=%d failed=%d", len(results), ok, paused, len(results)-ok-paused)
 	return results
 }
 
@@ -4009,6 +4023,8 @@ type AccountView struct {
 	UntilTS  int64  `json:"until_ts,omitempty"`
 	Reason   string `json:"reason"`
 	Disabled bool   `json:"disabled"`
+	// CheckinDisabled 账号级签到暂停，面板显示「已暂停签到」并灰掉签到按钮。
+	CheckinDisabled bool `json:"checkin_disabled,omitempty"`
 	// ModelCooling 模型级冷却（model → 解冻时刻）；仅该账号该模型限流，账号整体仍可用
 	// （429/6004 上游按模型计）。面板据此区分「整号冷却」与「个别模型限流」。
 	ModelCooling   map[string]string `json:"model_cooling,omitempty"`
@@ -4177,6 +4193,7 @@ func (a *App) accountViews() []AccountView {
 			UntilTS:                   unixOrZero(s.Until),
 			Reason:                    s.Reason,
 			Disabled:                  s.Disabled,
+			CheckinDisabled:           s.CheckinDisabled,
 			ModelCooling:              fmtTimeMap(s.ModelCooling),
 			ErrCount:                  s.ErrCount,
 			LastCheckinOK:             s.LastCheckinOK,
@@ -5002,6 +5019,19 @@ func (a *App) HandleAPI(mux *http.ServeMux) {
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+	})
+	// 账号级签到暂停：只停签到，不影响 API 路由与余额刷新。
+	mux.HandleFunc("POST /api/account/checkin_disabled", func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			UID      string `json:"uid"`
+			Disabled bool   `json:"disabled"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		if err := a.SetAccountCheckinDisabled(req.UID, req.Disabled); err != nil {
+			apiError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "checkin_disabled": req.Disabled})
 	})
 	mux.HandleFunc("GET /api/fees", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, a.FeesInfo())
