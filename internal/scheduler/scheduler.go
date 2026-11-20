@@ -54,6 +54,12 @@ type Config struct {
 	//   ② Qoder 双区的固定 10:00 窗口（上游活动开放时刻，见 main.go 的 qoderCheckinMinute）
 	//      会被用户的 09:00/21:00 覆盖掉，起点跑到活动创建之前。
 	// 「有没有签到时刻」不足以区分这两者——qodercn 有固定时刻但不该跟随全局。
+	// MultiCheckinPerDay 声明本渠道一天有多次独立签到（如 Loomy 宠物打工按档位
+	// 发放，一天可领 3 档）。为 true 时不做「当日任一时段达成即跳过后续时段」的
+	// 跨时间点去重，仍按「日+时段」各自独立；同时段内的按账号去重照常生效。
+	// 默认 false（绝大多数渠道一天只有一次签到活动）。
+	MultiCheckinPerDay bool
+
 	FollowGlobalCheckin bool
 
 	// Ledger 积分流水记账器（非 nil 时签到后余额刷新触发差分记账）。
@@ -91,6 +97,11 @@ type Scheduler struct {
 	// 因此收到重复签到请求。此集合让重试只落到尚未达成的账号上。
 	// 与 checkinDone（时段级，决定整个时段是否还要重试）是两层不同的判据。
 	accountCheckinDone map[string]bool
+	// accountDayDone 当日「某账号」已签到完成的集合，键为 "YYYY-MM-DD@uid"。
+	// 面板允许配多个签到时间（如 09:00/21:00），按「日+时段」作键会让早间
+	// 成功后晚间再打一次供应商。按日去重：当天任一时段达成后，后续时段全跳过。
+	// 与 accountCheckinDone（时段级）分层：本集合管跨时间点，那一个管同时段重试。
+	accountDayDone map[string]bool
 }
 
 // New 构建。
@@ -122,6 +133,7 @@ func New(cfg Config) *Scheduler {
 		wake:               make(chan struct{}, 1),
 		checkinDone:        map[string]bool{},
 		accountCheckinDone: map[string]bool{},
+		accountDayDone:     map[string]bool{},
 	}
 }
 
@@ -326,9 +338,14 @@ func exactSlot(ch []int, minute int) (int, bool) {
 // 配置时刻 + 窗口重试区间内的每一分钟。nextFireMinutes 只能按给定分钟集算最近触发点，
 // 若只给配置时刻，窗口内就不会醒过来重试。
 // 已完成的时段（当日已领到）不再展开，避免白醒与面板「下次签到」显示成 10:01。
+// 当日所有账号都已签到完成时（且非「一天多次」渠道）整个列表为空——后续时间点
+// 不该再打供应商，面板「下次签到」也应直接显示明天。
 func (s *Scheduler) fireMinutes(ch []int) []int {
 	until := s.retryUntil()
 	out := make([]int, 0, len(ch))
+	if s.allAccountsDayDone() {
+		return out
+	}
 	for _, start := range ch {
 		if until > 0 && s.checkinSlotDone(start) {
 			continue // 该时段当日已完成：连同起点一起跳过（下次触发交给明天）
@@ -420,6 +437,52 @@ func accountSlotKey(now time.Time, startMinute int, uid string) string {
 	return fmt.Sprintf("%s@%d@%s", now.Format("2006-01-02"), startMinute, uid)
 }
 
+// accountDayCheckinDone 某账号当日是否已在任一时段签到达成。
+func (s *Scheduler) accountDayCheckinDone(uid string) bool {
+	key := fmt.Sprintf("%s@%s", time.Now().Format("2006-01-02"), uid)
+	s.retryMu.Lock()
+	defer s.retryMu.Unlock()
+	return s.accountDayDone[key]
+}
+
+// markAccountDayCheckinDone 标记某账号当日签到完成，并清理过期条目。
+func (s *Scheduler) markAccountDayCheckinDone(uid string) {
+	now := time.Now()
+	key := fmt.Sprintf("%s@%s", now.Format("2006-01-02"), uid)
+	s.retryMu.Lock()
+	defer s.retryMu.Unlock()
+	s.accountDayDone[key] = true
+	prefix := now.AddDate(0, 0, -1).Format("2006-01-02")
+	for k := range s.accountDayDone {
+		if len(k) >= 10 && k[:10] < prefix {
+			delete(s.accountDayDone, k)
+		}
+	}
+}
+
+// allAccountsDayDone 当日是否所有账号都已签到达成（用于面板「下次签到」与
+// Run 循环的触发点计算）。暂停签到的账号视为已达成——它们本就不该收到请求。
+// 空池返回 false：没有账号时不该把下次签到算成「已完成」而停摆。
+func (s *Scheduler) allAccountsDayDone() bool {
+	// 一天多次签到的渠道不适用按日去重，不能把它的后续时段从触发点里剔掉。
+	if s.cfg.MultiCheckinPerDay {
+		return false
+	}
+	list := s.cfg.Pool.List()
+	if len(list) == 0 {
+		return false
+	}
+	for _, st := range list {
+		if st.CheckinDisabled {
+			continue
+		}
+		if !s.accountDayCheckinDone(st.UID) {
+			return false
+		}
+	}
+	return true
+}
+
 // retryWindowOpen 报告当前分钟落在哪个签到时段的窗口重试区间内（无则返回 -1,false）。
 // Run 循环用它把「窗口内重试」与「整点首次触发」区分开，以便正确维护完成状态。
 func (s *Scheduler) retryWindowOpen(minute int) (int, bool) {
@@ -452,6 +515,9 @@ type CheckinResult struct {
 	Msg       string `json:"msg"`
 	Remain    int64  `json:"remain"`
 	HasRemain bool   `json:"has_remain"`
+	// Paused 本次签到因账号级「暂停签到」而未向供应商发起请求。
+	// 与失败区分：面板/toast 显示「已暂停」而不是「签到失败」，批量统计不计入失败。
+	Paused bool `json:"paused,omitempty"`
 	// Retryable 报告本次签到未达成（no_campaign/error 等），应在当日窗口内继续重试。
 	// 仅由支持结构化结果的渠道（provider.CheckinReporter）给出；其它渠道恒为 false。
 	Retryable bool `json:"retryable"`
@@ -480,13 +546,22 @@ func (s *Scheduler) runCheckin(start int) {
 	log.Printf("checkin batch start platform=%s accounts=%d slot=%d", name, len(s.cfg.Pool.List()), start)
 	retryable := 0
 	for _, st := range s.cfg.Pool.List() {
-		if start >= 0 && s.accountCheckinSlotDone(start, st.UID) {
-			log.Printf("checkin skip platform=%s uid=%s slot=%d already done", name, st.UID, start)
+		// 跨时间点去重只对「一天一次签到」的渠道生效。Loomy 这类一天多次的
+		// 渠道（MultiCheckinPerDay）仍按「日+时段」各自独立，避免漏领后续档位。
+		dayDone := !s.cfg.MultiCheckinPerDay && s.accountDayCheckinDone(st.UID)
+		if start >= 0 && (dayDone || s.accountCheckinSlotDone(start, st.UID)) {
+			log.Printf("checkin skip platform=%s uid=%s slot=%d already done today", name, st.UID, start)
 			continue
 		}
 		r := s.checkinOne(st.UID)
 		if start >= 0 && r.checkinDone {
+			// 同时段去重对所有渠道生效：已到账的账号不该在窗口内被重打。
 			s.markAccountCheckinSlotDone(start, st.UID)
+			if !s.cfg.MultiCheckinPerDay {
+				// 跨时间点去重只对「一天一次」渠道生效；Loomy 这类按档发放的
+				// 渠道要保留后续时段，否则档位只领第一档。
+				s.markAccountDayCheckinDone(st.UID)
+			}
 		}
 		if r.Retryable {
 			retryable++
@@ -567,6 +642,14 @@ func (s *Scheduler) checkinOne(uid string) CheckinResult {
 	a := s.cfg.Pool.AuthByUID(uid)
 	if a == nil {
 		return s.finishCheckin(uid, CheckinResult{UID: uid, Msg: "unknown account", Retryable: true})
+	}
+	// 账号级「暂停签到」门禁：所有签到路径（定时批次、手动单账号、批量）都经
+	// checkinOne，在这里统一拦截才不会出现某条路径绕过。暂停期间不碰供应商，
+	// 也不记签到状态/不标完成（Paused=True、Retryable=False、checkinDone=False）。
+	// 与 Disabled（路由停用）分离：那只影响 API 选号，这里只停签到。
+	if st, ok := s.cfg.Pool.Status(uid); ok && st.CheckinDisabled {
+		log.Printf("checkin paused platform=%s uid=%s", name, uid)
+		return CheckinResult{UID: uid, Msg: "已暂停签到", Paused: true}
 	}
 	// ⚠️「无凭据」判定**不能只看 refresh token**（2026-10-17 修）。
 	//

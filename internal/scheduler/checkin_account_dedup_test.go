@@ -7,6 +7,7 @@ import (
 	"errors"
 	"sync"
 	"testing"
+	"time"
 
 	"wild-work/internal/auth"
 	"wild-work/internal/pool"
@@ -124,19 +125,76 @@ func TestManualCheckinIgnoresAccountDone(t *testing.T) {
 	}
 }
 
-// TestAccountDoneScopedToSlot 已完成的账号只在「本时段」跳过，另一个时段照常签到。
-func TestAccountDoneScopedToSlot(t *testing.T) {
+// TestAccountDoneAcrossSlots 默认的「一天一次签到」渠道：当日任一时段达成后，
+// 后续时段不再向供应商发起签到请求。
+func TestAccountDoneAcrossSlots(t *testing.T) {
 	up := newPerAccountUpstream(abStatus)
 	s, _ := newTwoAccountScheduler(up)
 
 	s.runCheckin(10 * 60)
-	s.runCheckin(21 * 60) // 另一时段：A 应重新签到
+	if !s.accountDayCheckinDone("uA") {
+		t.Fatal("A 当日应标记完成")
+	}
+	s.runCheckin(21 * 60) // 另一时段：A 不应再打供应商
+
+	if got := up.count("uA"); got != 1 {
+		t.Fatalf("跨时段 A 调用=%d，期望保持 1", got)
+	}
+	if got := up.count("uB"); got != 2 {
+		t.Fatalf("跨时段 B 调用=%d，期望 2（B 仍未达成）", got)
+	}
+	if s.accountCheckinSlotDone(21*60, "uA") {
+		t.Fatal("跳过时段不该标记时段完成（时间根本没走到那一步）")
+	}
+}
+
+// TestMultiCheckinPerDayAcrossSlots 一天多次的渠道（Loomy 宠物打工按档领奖）：
+// 关闭跨时间点去重，每个签到时刻仍各打一次，避免漏领后续档位。
+func TestMultiCheckinPerDayAcrossSlots(t *testing.T) {
+	up := newPerAccountUpstream(abStatus)
+	s, _ := newTwoAccountScheduler(up)
+	s.cfg.MultiCheckinPerDay = true
+
+	s.runCheckin(10 * 60)
+	s.runCheckin(21 * 60)
 
 	if got := up.count("uA"); got != 2 {
-		t.Fatalf("跨时段 A 调用=%d，期望 2", got)
+		t.Fatalf("多次签到渠道跨时段 A 调用=%d，期望 2", got)
 	}
-	if s.accountCheckinSlotDone(10*60, "uA") != true || s.accountCheckinSlotDone(21*60, "uA") != true {
-		t.Fatal("两个时段的 A 都应各自标记完成")
+	if s.accountDayCheckinDone("uA") {
+		t.Fatal("多次签到渠道不该写入当日完成标记")
+	}
+	// 同时段内的按账号去重仍生效：重试只打未达成的账号。
+	// 重试传时段起点（Run 循环里 retryWindowOpen 返回 start），不是当前分钟。
+	s.runCheckin(21 * 60)
+	if got := up.count("uA"); got != 2 {
+		t.Fatalf("同时段重试 A 被重复请求 %d 次，期望保持 2", got)
+	}
+}
+
+// TestAllAccountsDayDoneDrivesNextFire 当日全员完成后，触发点为空，
+// 面板「下次签到」与 Run 循环都不再为今天排任何时间点。
+func TestAllAccountsDayDoneDrivesNextFire(t *testing.T) {
+	up := newPerAccountUpstream(func(uid string) provider.CheckinStatus {
+		return provider.CheckinClaimed // 两个账号都成功
+	})
+	s, _ := newTwoAccountScheduler(up)
+
+	if s.allAccountsDayDone() {
+		t.Fatal("开局不该是已完成")
+	}
+	if got := s.fireMinutes([]int{10 * 60, 21 * 60}); len(got) == 0 {
+		t.Fatal("开局应有两个触发点")
+	}
+	s.runCheckin(10 * 60)
+	if !s.allAccountsDayDone() {
+		t.Fatal("全员签到达成后应为当日完成")
+	}
+	if got := s.fireMinutes([]int{10 * 60, 21 * 60}); len(got) != 0 {
+		t.Fatalf("当日完成后触发点应为空，实际 %v", got)
+	}
+	if !s.NextFire().IsZero() && s.NextFire().Before(time.Now().Add(12*time.Hour)) {
+		t.Fatalf("下次签到不该排在今天：%v", s.NextFire())
 	}
 }
 
