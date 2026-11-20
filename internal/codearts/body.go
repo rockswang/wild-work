@@ -155,7 +155,7 @@ func numberValue(raw any) float64 {
 }
 
 // normalizeMessages 出站消息归一（协议 §2.3「messages 序列化的硬约束」）：
-//  1. 非 text 内容块丢弃（图片等一律不发）；
+//  1. 文本与图片块保留，其余（audio/file 等）丢弃 —— 见 R169；
 //  2. assistant 恒带 reasoning_content（缺失即补空串，否则上游 400）；
 //  3. 孤儿 tool_call / tool_result 整对剔除。
 func normalizeMessages(msgs []any) []any {
@@ -165,7 +165,7 @@ func normalizeMessages(msgs []any) []any {
 			continue
 		}
 		if blocks, ok := msg["content"].([]any); ok {
-			msg["content"] = textBlocksOnly(blocks)
+			msg["content"] = textAndImageBlocks(blocks)
 		}
 		if role, _ := msg["role"].(string); role == "assistant" {
 			if _, has := msg["reasoning_content"]; !has {
@@ -176,19 +176,69 @@ func normalizeMessages(msgs []any) []any {
 	return cleanupOrphanToolCalls(msgs)
 }
 
-// textBlocksOnly 只保留 type=="text" 的内容块。
-func textBlocksOnly(blocks []any) []any {
+// textAndImageBlocks 保留 type=="text" 与图片类内容块，其余（audio/file 等）丢弃。
+//
+// R169（2026-11-18）：上游 chat 端点实测接受 OpenAI 形态的 image_url 内容块
+// （非多模态模型会被上游以 InferHub.001001020.406 明确拒绝，属误用而非本层问题），
+// 故不再一刀切丢弃图片。
+//
+// 图片统一归一到 OpenAI Chat 的 image_url 形状：网关层对 /v1/responses 与
+// Anthropic 入站已做过一次归一，但 CodeArts 是直连 OpenAI Chat 语义的渠道，
+// 这里再做一次防御性归一 —— input_image 是 Responses 的形状，个别客户端会
+// 原样塞进 chat 消息，直接透传会吃上游 4000 参数错。
+func textAndImageBlocks(blocks []any) []any {
 	out := make([]any, 0, len(blocks))
 	for _, b := range blocks {
 		blk, ok := b.(map[string]any)
 		if !ok {
 			continue
 		}
-		if t, _ := blk["type"].(string); t == "text" {
+		switch t, _ := blk["type"].(string); t {
+		case "text":
 			out = append(out, blk)
+		case "image_url":
+			if norm, ok := normalizeImageURLBlock(blk); ok {
+				out = append(out, norm)
+			}
+		case "input_image":
+			if norm, ok := inputImageBlock(blk); ok {
+				out = append(out, norm)
+			}
 		}
 	}
 	return out
+}
+
+// normalizeImageURLBlock 校验并归一 image_url 块；url 为空则丢弃（上游会 400）。
+//
+// 也接受 image_url 直接是字符串的宽松形态：OpenAI 规范是对象，
+// 但社区实现里两种都见得到。
+func normalizeImageURLBlock(blk map[string]any) (map[string]any, bool) {
+	inner, ok := blk["image_url"].(map[string]any)
+	if !ok {
+		s, isStr := blk["image_url"].(string)
+		if !isStr || strings.TrimSpace(s) == "" {
+			return nil, false
+		}
+		return map[string]any{"type": "image_url", "image_url": map[string]any{"url": s}}, true
+	}
+	if u, _ := inner["url"].(string); strings.TrimSpace(u) == "" {
+		return nil, false
+	}
+	return map[string]any{"type": "image_url", "image_url": inner}, true
+}
+
+// inputImageBlock 把 Responses 的 input_image 转成 Chat 的 image_url。
+func inputImageBlock(blk map[string]any) (map[string]any, bool) {
+	u, _ := blk["image_url"].(string)
+	if strings.TrimSpace(u) == "" {
+		return nil, false
+	}
+	inner := map[string]any{"url": u}
+	if d, ok := blk["detail"].(string); ok && d != "" {
+		inner["detail"] = d
+	}
+	return map[string]any{"type": "image_url", "image_url": inner}, true
 }
 
 // cleanupOrphanToolCalls 剔除无法配对的 tool_call 与 tool 结果（两侧按同一份

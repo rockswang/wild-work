@@ -33,22 +33,78 @@ type modelEntry struct {
 	Name string
 	// ContextWindow 上下文窗口；**0 = 未知**（消费方必须判 > 0）。
 	ContextWindow int64
+	// SupportsImages 是否支持图像输入。**上游目录不下发这个字段**，
+	// 只能靠 R169 的可复现实测标定（见 measuredVisionModels），静态表是唯一来源。
+	SupportsImages bool
 }
 
-// staticCatalog 静态兜底表（协议 §2.5(a)，顺序照抄）。
+// staticCatalog 静态兜底表（协议 §2.5(a)）。
 //
-// ContextWindow 只填协议明确给出的 5 条（参考实现的静态表实测值），其余保持 0=未知
-// ——「上游没给就不编容量」与 ContextFromAPI 哲学一致。
+// ContextWindow 取上游模型目录下发值（contextWindow.defaultLength；三档
+// 300k/600k/1M 的取默认档 300000）；上游未给的保持 0=未知——「上游没给就不编容量」
+// 与 ContextFromAPI 哲学一致。
 var staticCatalog = []modelEntry{
-	{ID: "GLM-5.2", ContextWindow: 202752},
-	{ID: "GLM-5.1"},
-	{ID: "GLM-5"},
-	{ID: "glm-5.3-flash", ContextWindow: 1048576},
-	{ID: "openpangu-2.0-flash"},
-	{ID: "openpangu-2.0-pro"},
-	{ID: "deepseek-v4-flash", ContextWindow: 1048576},
-	{ID: "deepseek-v4-pro", ContextWindow: 1048576},
-	{ID: "deepseek-v4.1-flash", ContextWindow: 1000000},
+	{ID: "GLM-5.2", ContextWindow: 300000},
+	{ID: "GLM-5.1", ContextWindow: 200000},
+	{ID: "GLM-5", ContextWindow: 200000},
+	{ID: "glm-5.3", ContextWindow: 300000},
+	{ID: "glm-5.3-flash", ContextWindow: 300000, SupportsImages: true},
+	{ID: "glm-5.2-sft-harmony", ContextWindow: 300000},
+	{ID: "openpangu-2.0-flash", ContextWindow: 200000},
+	{ID: "openpangu-2.0-pro", ContextWindow: 200000},
+	{ID: "openpangu-2.1-pro", ContextWindow: 200000},
+	{ID: "deepseek-v4-flash", ContextWindow: 300000},
+	{ID: "deepseek-v4-pro", ContextWindow: 300000},
+	{ID: "deepseek-v4.1-flash", ContextWindow: 300000, SupportsImages: true},
+	{ID: "kimi-k3", ContextWindow: 300000, SupportsImages: true},
+	{ID: "kimi-k3.1-pro", ContextWindow: 300000, SupportsImages: true},
+	{ID: "speed", ContextWindow: 300000},
+	{ID: "mimo-v2.6-pro", ContextWindow: 300000},
+}
+
+// measuredVisionModels —— **可复现实测**得出的可识图模型集合（R169，2026-11-18）。
+//
+// 上游目录（GET /v1/model/builtin 与 gateway config）**完全不下发**模态能力字段，
+// 「能不能识图」只能实测：同一张 640×320 PNG（白底 + 红框 + 数字 7319）走真实链路
+// wild-work → snap-access，严格 A/B（无图对照必须答不出，带图要答对数字与颜色）。
+//
+// 判定三态（判据分层见 AGENTS §0.1）：
+//   - 支持：带图请求 prompt_tokens 显著高于纯文本（约 +150~+300），且答对图内内容；
+//   - 不支持：上游明确回 InferHub.001001020.406 "The request model is not multimodal"；
+//   - 未定：撞 TM.000010051（账号并发会话数上限 3），与模型能力无关，
+//     不得据此写死任何一侧（GLM-5.1 / GLM-5 / deepseek-v4-flash / deepseek-v4-pro
+//     当前即属此类，待资源空闲后补测）。
+var measuredVisionModels = map[string]bool{
+	"kimi-k3.1-pro":       true, // ptok 389 → 7319,red
+	"kimi-k3":             true, // ptok 389 → 7319,red
+	"glm-5.3-flash":       true, // ptok 310 → 7319,red
+	"deepseek-v4.1-flash": true, // ptok 254 → 7319,red
+}
+
+// measuredNoVisionModels —— 实测**明确拒绝**图片的模型（上游回 406 not multimodal）。
+//
+// 与「未测过」严格区分：命中本表的模型不下发图片能力，也不会被静态表误标。
+var measuredNoVisionModels = map[string]bool{
+	"glm-5.3":             true,
+	"GLM-5.2":             true,
+	"openpangu-2.0-flash": true,
+	"openpangu-2.0-pro":   true,
+	"openpangu-2.1-pro":   true,
+	"glm-5.2-sft-harmony": true,
+}
+
+// modelSupportsImages 判定模型是否可识图（R140 口径：上游声明 ∪ 可复现实测）。
+//
+// 上游当前没有任何声明通道，故先查实测支持表，再排除实测否定表，
+// 最后回落到静态表条目自带的标记（两者同源，静态表供无凭据时兜底展示）。
+func modelSupportsImages(id string, fromStatic bool) bool {
+	if measuredVisionModels[id] {
+		return true
+	}
+	if measuredNoVisionModels[id] {
+		return false
+	}
+	return fromStatic
 }
 
 // 为什么**没有**静态 benefit 名单（2026-10-26 删）：
@@ -74,6 +130,8 @@ func modelInfos(entries []modelEntry) []provider.ModelInfo {
 			// ContextWindow 来自参考实现的静态表/上游声明，**不是**上游接口字段，
 			// 故 ContextFromAPI 保持 false（面板据此不把它当官方容量标注）。
 			ContextWindow: e.ContextWindow,
+			// 模态同上：上游不声明，只能靠 R169 实测表 + 静态表标记。
+			SupportsImages: modelSupportsImages(e.ID, e.SupportsImages),
 		})
 	}
 	return out
@@ -242,9 +300,10 @@ func mergeCatalog(dynamic, fallback []modelEntry) []provider.ModelInfo {
 		}
 		seen[id] = true
 		out = append(out, provider.ModelInfo{
-			ID:            id,
-			Name:          firstNonEmpty(e.Name, id),
-			ContextWindow: e.ContextWindow,
+			ID:             id,
+			Name:           firstNonEmpty(e.Name, id),
+			ContextWindow:  e.ContextWindow,
+			SupportsImages: modelSupportsImages(id, e.SupportsImages),
 		})
 	}
 	for _, e := range dynamic {
@@ -255,12 +314,16 @@ func mergeCatalog(dynamic, fallback []modelEntry) []provider.ModelInfo {
 			add(e)
 			continue
 		}
-		// 已存在：仅补 ContextWindow（动态目录没有这个字段）。
-		if e.ContextWindow > 0 {
-			for i := range out {
-				if out[i].ID == e.ID && out[i].ContextWindow == 0 {
-					out[i].ContextWindow = e.ContextWindow
-				}
+		// 已存在：补 ContextWindow 与模态（动态目录这两项都不下发）。
+		for i := range out {
+			if out[i].ID != e.ID {
+				continue
+			}
+			if e.ContextWindow > 0 && out[i].ContextWindow == 0 {
+				out[i].ContextWindow = e.ContextWindow
+			}
+			if !out[i].SupportsImages && modelSupportsImages(e.ID, e.SupportsImages) {
+				out[i].SupportsImages = true
 			}
 		}
 	}
