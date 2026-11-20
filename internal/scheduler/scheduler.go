@@ -85,6 +85,12 @@ type Scheduler struct {
 	// 用「日+时段」而非「日」作键：本工具允许一天多个签到时间（如 09:00/21:00），
 	// 若只按日标记，早间签到成功会连带吞掉晚间时段。
 	checkinDone map[string]bool
+	// accountCheckinDone 当日「某账号在某时段」已签到完成的集合，
+	// 键为 "YYYY-MM-DD@起始分钟数@uid"。一个时段内只要还有别的账号 retryable，
+	// 整批就会在窗口内逐分钟重试；此前会把整批账号重新打一遍，已到账的账号
+	// 因此收到重复签到请求。此集合让重试只落到尚未达成的账号上。
+	// 与 checkinDone（时段级，决定整个时段是否还要重试）是两层不同的判据。
+	accountCheckinDone map[string]bool
 }
 
 // New 构建。
@@ -111,7 +117,12 @@ func New(cfg Config) *Scheduler {
 	if cfg.KeepaliveHours == nil {
 		cfg.KeepaliveHours = []int{22}
 	}
-	return &Scheduler{cfg: cfg, wake: make(chan struct{}, 1), checkinDone: map[string]bool{}}
+	return &Scheduler{
+		cfg:                cfg,
+		wake:               make(chan struct{}, 1),
+		checkinDone:        map[string]bool{},
+		accountCheckinDone: map[string]bool{},
+	}
 }
 
 // schedule 返回当前签到分钟/保活小时配置的副本。
@@ -381,6 +392,34 @@ func slotKey(now time.Time, startMinute int) string {
 	return fmt.Sprintf("%s@%d", now.Format("2006-01-02"), startMinute)
 }
 
+// accountCheckinSlotDone 某账号在某时段当日是否已签到达成。
+func (s *Scheduler) accountCheckinSlotDone(startMinute int, uid string) bool {
+	key := accountSlotKey(time.Now(), startMinute, uid)
+	s.retryMu.Lock()
+	defer s.retryMu.Unlock()
+	return s.accountCheckinDone[key]
+}
+
+// markAccountCheckinSlotDone 标记某账号在某时段当日签到成功。
+// 清理沿用与 markSlotDone 相同的保留窗口（今天与昨天）。
+func (s *Scheduler) markAccountCheckinSlotDone(startMinute int, uid string) {
+	key := accountSlotKey(time.Now(), startMinute, uid)
+	s.retryMu.Lock()
+	defer s.retryMu.Unlock()
+	s.accountCheckinDone[key] = true
+	prefix := time.Now().AddDate(0, 0, -1).Format("2006-01-02")
+	for k := range s.accountCheckinDone {
+		// 键形如 "YYYY-MM-DD@start@uid"，前 10 位为日期。
+		if len(k) >= 10 && k[:10] < prefix {
+			delete(s.accountCheckinDone, k)
+		}
+	}
+}
+
+func accountSlotKey(now time.Time, startMinute int, uid string) string {
+	return fmt.Sprintf("%s@%d@%s", now.Format("2006-01-02"), startMinute, uid)
+}
+
 // retryWindowOpen 报告当前分钟落在哪个签到时段的窗口重试区间内（无则返回 -1,false）。
 // Run 循环用它把「窗口内重试」与「整点首次触发」区分开，以便正确维护完成状态。
 func (s *Scheduler) retryWindowOpen(minute int) (int, bool) {
@@ -416,6 +455,11 @@ type CheckinResult struct {
 	// Retryable 报告本次签到未达成（no_campaign/error 等），应在当日窗口内继续重试。
 	// 仅由支持结构化结果的渠道（provider.CheckinReporter）给出；其它渠道恒为 false。
 	Retryable bool `json:"retryable"`
+
+	// checkinDone 签到动作本身是否达成（claimed/already/非结构化成功）。
+	// 与 OK 分离：OK 还会被后续的余额查询失败改写成 false，但那种情况下签到
+	// 已经到账，重试窗口内不该再向供应商发第二次签到请求。仅内部使用，不序列化。
+	checkinDone bool
 }
 
 // RunCheckinNow 立即对所有账号执行签到 + 余额刷新 + 解冻。
@@ -426,12 +470,24 @@ func (s *Scheduler) RunCheckinNow() {
 }
 
 // runCheckin 签到批次主逻辑；start>=0 时按结果决定是否标记该时段完成。
+//
+// 自动批次（start>=0）在重试窗口内只重打「本时段尚未签到达成」的账号：
+// 一个时段里只要还有某账号 retryable，整批就会逐分钟重试，已到账的账号
+// 不该跟着再收一次签到请求。手动签到（start<0，面板「签到全部」）不受此限，
+// 用户显式点击就是要把所有账号重新打一遍。
 func (s *Scheduler) runCheckin(start int) {
 	name := s.name()
 	log.Printf("checkin batch start platform=%s accounts=%d slot=%d", name, len(s.cfg.Pool.List()), start)
 	retryable := 0
 	for _, st := range s.cfg.Pool.List() {
+		if start >= 0 && s.accountCheckinSlotDone(start, st.UID) {
+			log.Printf("checkin skip platform=%s uid=%s slot=%d already done", name, st.UID, start)
+			continue
+		}
 		r := s.checkinOne(st.UID)
+		if start >= 0 && r.checkinDone {
+			s.markAccountCheckinSlotDone(start, st.UID)
+		}
 		if r.Retryable {
 			retryable++
 		}
@@ -589,6 +645,9 @@ func (s *Scheduler) checkinOne(uid string) CheckinResult {
 			r.Msg = "活跃保活"
 		}
 	}
+	// 签到动作本身的达成快照：此时 r.OK 尚未被下面的余额查询失败改写。
+	// 供自动批次的重试窗口做按账号去重——已到账的账号不再重发签到请求。
+	r.checkinDone = r.OK && !r.Retryable
 	// 无论签到成败都查余额（已签到等业务错误下余额刷新仍有效）。
 	// 用 Detail 而非 UserResource：一次请求同时拿到可消耗余额与不可消耗额度小计。
 	usable, items, rerr := s.cfg.Upstream.UserResourceDetail(a)
