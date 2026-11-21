@@ -56,19 +56,23 @@ type Status struct {
 	// CreditsStale 标记余额口径不可信：state 文件是旧版本格式（无 unusable 字段）
 	// 或尚未完成首次成功刷新。UI 应显示「待刷新」而非把旧值/0 当真值。
 	// 自动刷新循环首次成功写入后即清除。
-	CreditsStale   bool      `json:"credits_stale,omitempty"`
-	Cooling        bool      `json:"cooling"`
-	Until          time.Time `json:"until,omitempty"`
-	Reason         string    `json:"reason,omitempty"`
-	Disabled       bool      `json:"disabled"`
-	ErrCount       int       `json:"err_count,omitempty"`
-	LastCheckinOK  bool      `json:"last_checkin_ok,omitempty"`
-	LastCheckinAt  time.Time `json:"last_checkin_at,omitempty"`
-	LastCheckinMsg string    `json:"last_checkin_msg,omitempty"`
+	CreditsStale bool      `json:"credits_stale,omitempty"`
+	Cooling      bool      `json:"cooling"`
+	Until        time.Time `json:"until,omitempty"`
+	Reason       string    `json:"reason,omitempty"`
+	Disabled     bool      `json:"disabled"`
+	// CheckinDisabled 账号级签到暂停（用户控制项）。
+	// 与 Disabled（停用账号，API 路由也不选它）分离：暂停签到只停定时/手动签到，
+	// 账号仍能正常参与 API 路由与余额刷新。零值=false = 照常签到（向后兼容）。
+	CheckinDisabled bool      `json:"checkin_disabled,omitempty"`
+	ErrCount        int       `json:"err_count,omitempty"`
+	LastCheckinOK   bool      `json:"last_checkin_ok,omitempty"`
+	LastCheckinAt   time.Time `json:"last_checkin_at,omitempty"`
+	LastCheckinMsg  string    `json:"last_checkin_msg,omitempty"`
 	// SessionDead 登录态失效（401/登录已失效）：挑号跳过 + 面板「需重新登录」徽标（#134）。
 	// 与 Disabled（用户手动停用）分离，避免机器状态混入用户控制项。
-	SessionDead       bool      `json:"session_dead,omitempty"`
-	SessionDeadReason string    `json:"session_dead_reason,omitempty"`
+	SessionDead       bool   `json:"session_dead,omitempty"`
+	SessionDeadReason string `json:"session_dead_reason,omitempty"`
 	// SessionDeadAt 标记**首次**进入失效态的时刻，是「重登后自动清除」的时间锚
 	// （clearReloggedLocked 比较 auth 文件 mtime 与它）。已标记时不得刷新成 now，
 	// 否则重登后再一次陈旧凭证失败就会把锚顶到文件之后 ⇒ 永不清除（#134 死锁）。
@@ -93,9 +97,11 @@ type entry struct {
 	// 仅影响面板展示，不参与 Pick() 路由。
 	creditsStale bool
 	disabled     bool
-	reason       string
-	until        time.Time
-	errCount     int
+	// checkinDisabled 账号级签到暂停，与 disabled（路由停用）分离。
+	checkinDisabled bool
+	reason          string
+	until           time.Time
+	errCount        int
 	// modelCool 模型级冷却：model → 解冻时刻（429/6004 上游按模型限额，
 	// 只冷却撞墙的模型，账号对其他模型仍可用）。条目过期后延迟清理。
 	modelCool map[string]time.Time
@@ -152,6 +158,7 @@ type accountState struct {
 	// 与升级前行为等价，首刷（10 分钟内）自动补上；bump 反而会让全部账号白闪一次「待刷新」。
 	EarliestExpireUnix int64                `json:"earliest_expire,omitempty"`
 	Disabled           bool                 `json:"disabled"`
+	CheckinDisabled    bool                 `json:"checkin_disabled,omitempty"`
 	Reason             string               `json:"reason,omitempty"`
 	Until              time.Time            `json:"until,omitempty"`
 	ModelCool          map[string]time.Time `json:"model_cooling,omitempty"`
@@ -465,6 +472,17 @@ func (p *Pool) SetDisabled(uid string, d bool) {
 	p.saveLocked()
 }
 
+// SetCheckinDisabled 设置账号级签到暂停。与 SetDisabled（路由停用）完全独立：
+// 这里只影响定时/手动签到是否向供应商发起请求，不影响账号作为 API 上游被选用。
+func (p *Pool) SetCheckinDisabled(uid string, d bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if e, ok := p.byUID[uid]; ok {
+		e.checkinDisabled = d
+	}
+	p.saveLocked()
+}
+
 // ReenableIfCredits 签到后解冻：仅当 remain > 0 且账号处于冷却（非禁用）时恢复。
 // expiring 为临期额度小计（仅展示），unusable 为不可消耗额度小计（仅展示），
 // earliest 为仍有效的最早到期时刻（零值 = 无到期信息）。写入即视为余额口径可信。
@@ -666,6 +684,7 @@ func (p *Pool) statusOf(uid string, e *entry) Status {
 		Until:             e.until,
 		Reason:            e.reason,
 		Disabled:          e.disabled,
+		CheckinDisabled:   e.checkinDisabled,
 		ErrCount:          e.errCount,
 		LastCheckinOK:     e.lastCheckinOK,
 		LastCheckinAt:     e.lastCheckinAt,
@@ -719,6 +738,7 @@ func (p *Pool) load() {
 			earliestExpire:    unixOrZero(s.EarliestExpireUnix),
 			creditsStale:      stale,
 			disabled:          s.Disabled,
+			checkinDisabled:   s.CheckinDisabled,
 			reason:            s.Reason,
 			until:             s.Until,
 			modelCool:         s.ModelCool,
@@ -754,6 +774,7 @@ func (p *Pool) saveLocked() {
 			Unusable:           e.unusable,
 			EarliestExpireUnix: zeroOrUnix(e.earliestExpire),
 			Disabled:           e.disabled,
+			CheckinDisabled:    e.checkinDisabled,
 			Reason:             e.reason,
 			Until:              e.until,
 			ModelCool:          mc,

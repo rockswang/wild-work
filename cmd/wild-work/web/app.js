@@ -1307,9 +1307,18 @@ function acctParts(a) {
     // 让一个根本没有签到活动的渠道显示绿色「签到成功」。
     const checkinTag = noCheckin
       ? `<span class="tag neutral" title="${esc(noCheckinTitle)}">${noCheckinText(a.group)}</span>`
-      : a.last_checkin_at
-        ? checkinStatusTag(a)
-        : '<span class="tag neutral">未签到</span>';
+      : a.checkin_disabled
+        ? '<span class="tag neutral" title="该账号已暂停签到，恢复后照常定时签到">已暂停签到</span>'
+        : a.last_checkin_at
+          ? checkinStatusTag(a)
+          : '<span class="tag neutral">未签到</span>';
+
+    // 账号级签到暂停：只停该账号的签到，不影响对话与余额刷新。
+    // 刻意放在签到状态标签旁、用文字——顶部操作行的 ⏸ 是「停用整个账号」，
+    // 放那里会误读。无签到活动的渠道不显示。
+    const pauseBtn = noCheckin ? "" : a.checkin_disabled
+      ? `<button class="checkin-toggle on" title="恢复该账号的定时与手动签到" onclick="toggleCheckinPaused('${a.uid}', false)">恢复签到</button>`
+      : `<button class="checkin-toggle" title="暂停该账号的定时与手动签到（不影响对话与余额刷新）" onclick="toggleCheckinPaused('${a.uid}', true)">暂停签到</button>`;
 
     const disableIcon = a.disabled ? "▶" : "⏸";
     const disableTitle = a.disabled ? "启用" : "停用";
@@ -1331,8 +1340,8 @@ function acctParts(a) {
     const coolingTag = a.cooling
       ? `<span class="tag warn" title="${esc(a.reason || "冷却中")}">冷却至 ${esc(a.until || "-")}${a.until_ts ? `<span data-until-ts="${a.until_ts}">（${fmtLeft(a.until_ts)}）</span>` : ""}</span>`
       : "";
-    const checkinBtn = noCheckin
-      ? `<span class="icon-op off" title="${esc(noCheckinTitle)}" onclick="return false">✓</span>`
+    const checkinBtn = noCheckin || a.checkin_disabled
+      ? `<span class="icon-op off" title="${a.checkin_disabled ? "已暂停签到" : esc(noCheckinTitle)}" onclick="return false">✓</span>`
       : `<span class="icon-op" title="签到" onclick="checkin('${a.uid}')">✓</span>`;
 
     // 无积分账号分三类，处理不同：
@@ -1416,7 +1425,7 @@ function acctParts(a) {
       // 默认收起的「不适用」账号：渲染时就带 hidden（而不是等 applyAcctFilter），
       // 首帧不会先闪一排「不适用」再消失；applyAcctFilter 后续负责保持同步。
       naHidden: !showNoCredit && isVirtualAcct(a),
-      tags: `${coolingTag}${disabledTag}${sessionDeadTag}${missingRTTag}${checkinTag}`,
+      tags: `${coolingTag}${disabledTag}${sessionDeadTag}${missingRTTag}${checkinTag}${pauseBtn}`,
     };
 }
 
@@ -1988,6 +1997,14 @@ async function checkin(uid) {
   } catch (e) { toast(e.message); }
 }
 
+async function toggleCheckinPaused(uid, paused) {
+  try {
+    await api("/api/account/checkin_disabled", { uid, disabled: paused });
+    toast(paused ? "已暂停该账号签到" : "已恢复该账号签到");
+    loadState();
+  } catch (e) { toast(e.message); }
+}
+
 async function refreshOne(uid) {
   try {
     const r = await api("/api/account/refresh", { uid });
@@ -2031,9 +2048,11 @@ async function checkinAll() {
     detailCache = {}; // 批量签到改变余额，全部明细缓存作废
     const ok = (r.results || []).filter((x) => x.ok).length;
     const pending = (r.results || []).filter((x) => !x.ok && x.retryable).length;
+    const paused = (r.results || []).filter((x) => x.paused).length;
     const skip = (state.accounts || []).filter((a) => noExplicitCheckin(a.group)).length;
     const total = (r.results || []).length + skip;
     const parts = [skip ? `成功 ${ok} / ${total}（${skip} 个无签到活动跳过）` : `成功 ${ok} / 共 ${total}`];
+    if (paused) parts.push(`${paused} 个已暂停签到`);
     if (pending) parts.push(`${pending} 个未领到将在窗口内自动重试`);
     toast(`批量签到完成：${parts.map(friendlyCheckinMsg).join("；")}`);
     loadState();

@@ -642,8 +642,10 @@ func main() {
 	// 窗口内每分钟重试既无意义又违反 §0.1；每个签到时刻单次尝试即可。
 	// KeepaliveHours 仍为显式空切片：**上游无 refresh 端点**（session 14 天，到期需重新登录/导入），
 	// 保活没有可刷的东西（refreshToken 为空，调度器会跳过并只记一条日志）。
+	// 宠物打工按档位发放，一天可领多档（见 internal/loomy/checkin.go）——
+	// MultiCheckinPerDay 关闭跨时间点去重，让各签到时刻分别领一档。
 	lmSch := scheduler.New(scheduler.Config{Pool: lmPool, Upstream: lmUp, Name: "loomy", FollowGlobalCheckin: true,
-		CheckinMinutes: checkinMinutes, KeepaliveHours: []int{}, Ledger: lg})
+		CheckinMinutes: checkinMinutes, KeepaliveHours: []int{}, Ledger: lg, MultiCheckinPerDay: true})
 	// Cline：官方 API Key **不过期**、无签到活动、无 refresh token ⇒ 定时任务全部关闭。
 	// 必须传显式空切片 []int{}（R39）：传 nil 会被 scheduler.New 的零值兜底补上默认时间，
 	// 于是每天空跑一次必然失败的签到，并在面板渲染红色「签到失败」。
