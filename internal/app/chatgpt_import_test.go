@@ -16,6 +16,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -176,8 +177,10 @@ func TestImportChatGPTCredentialsSuccess(t *testing.T) {
 		if statErr != nil {
 			t.Fatalf("凭据未落盘到 %s：%v", fp, statErr)
 		}
-		if fi.Mode().Perm()&0o077 != 0 {
-			t.Errorf("%s 权限 = %v，必须仅属主可读（0600）", fp, fi.Mode().Perm())
+		if runtime.GOOS != "windows" { // Windows 的 os.Stat 不带 POSIX 权限位
+			if fi.Mode().Perm()&0o077 != 0 {
+				t.Errorf("%s 权限 = %v，必须仅属主可读（0600）", fp, fi.Mode().Perm())
+			}
 		}
 	}
 

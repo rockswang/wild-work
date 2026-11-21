@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -209,8 +210,10 @@ func TestRefreshTokenPersistsToDisk(t *testing.T) {
 	if b.Extra["accountId"] != "acct-9" {
 		t.Errorf("accountId 未落 Extra: %+v", b.Extra)
 	}
-	if fi, err := os.Stat(fp); err != nil || fi.Mode().Perm() != 0o600 {
-		t.Errorf("凭据文件权限 = %v，期望 0600", fi.Mode().Perm())
+	if runtime.GOOS != "windows" { // Windows 的 os.Stat 不带 POSIX 权限位
+		if fi, err := os.Stat(fp); err != nil || fi.Mode().Perm() != 0o600 {
+			t.Errorf("凭据文件权限 = %v，期望 0600", fi.Mode().Perm())
+		}
 	}
 }
 

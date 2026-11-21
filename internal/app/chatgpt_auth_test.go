@@ -24,6 +24,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -181,8 +182,10 @@ func TestSubmitChatGPTAuthSuccess(t *testing.T) {
 	if _, statErr := os.Stat(path); statErr != nil {
 		t.Fatalf("凭据未落盘到 %s：%v", path, statErr)
 	}
-	if fi, _ := os.Stat(path); fi.Mode().Perm()&0o077 != 0 {
-		t.Errorf("凭据文件权限 = %v，必须仅属主可读（0600）", fi.Mode().Perm())
+	if runtime.GOOS != "windows" { // Windows 的 os.Stat 不带 POSIX 权限位，0600 断言仅 POSIX 有意义
+		if fi, _ := os.Stat(path); fi.Mode().Perm()&0o077 != 0 {
+			t.Errorf("凭据文件权限 = %v，必须仅属主可读（0600）", fi.Mode().Perm())
+		}
 	}
 	list, lerr := auth.LoadChatGPTDir(a.cfg.AuthDir)
 	if lerr != nil || len(list) != 1 {

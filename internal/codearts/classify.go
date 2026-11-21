@@ -20,7 +20,7 @@
 //
 // ② 是**两个池子**（2026-11-18，R166）：`4291` 是 benefit **免费额度**（按 UTC+8 自然日
 // 重置），`TM.00001050` 是**积分账户**耗尽（靠「领取活动积分」入账，**不会**自动重置）。
-// 两者的**处置完全相同**（账号级长冷却 + 换号），故共用 ErrHardCredit、不新增 ErrKind；
+// 两者的**处置完全相同**（模型级 CooldownModel 冷却 + 换号；R60 口径，账号本身不动），故共用 ErrHardCredit、不新增 ErrKind；
 // 但给用户看的恢复说明必须分开，判据就是这两条正则（见 sse.go 的两个 hint）。
 // 反过来 ① 在 ② 之前，保证排队报文里若同时出现额度字样也仍按排队处理——这与
 // AGENTS.md 不变量 15「429 优先于 hardMarkers」同向（`4291` 是**精确码**而非泛化词）。
@@ -82,7 +82,7 @@ func Classify(status int, body string) provider.ErrKind {
 		// 免费额度用尽：**不可重试**（重试到天亮也没用），按长冷却处理。
 		return provider.ErrHardCredit
 	case reCreditExhausted.MatchString(low):
-		// 积分账户耗尽（TM.00001050）：与 benefit 额度**同一种处置**（账号级长冷却 + 换号），
+		// 积分账户耗尽（TM.00001050）：与 benefit 额度**同一种处置**（模型级 CooldownModel 冷却 + 换号；R60 口径，账号本身不动），
 		// 否则它会被下面的 `status == 400 → ErrBadParams` 接走 ⇒ 不冷却、不计错、不换号、
 		// 降级链也不触发，已耗尽的账号永远「健康」并被反复挑中（R166）。
 		return provider.ErrHardCredit
