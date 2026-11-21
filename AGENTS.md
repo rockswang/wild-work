@@ -45,7 +45,7 @@
 
 ---
 
-## 1. 决议项索引（R1–R161）
+## 1. 决议项索引（R1–R162）
 
 **全文（含证据链、反例、已知限制）见 [`docs/决议项.md`](docs/决议项.md)** —— 改动相关代码前必读对应条目。
 
@@ -194,6 +194,7 @@
 | R159 | **CodeArts 多账号覆盖修复：UID 改由 refresh_token 的 account_id 决定，删除「复用第一个账号 UID」的方案 B**（2026-11-17，真机事故驱动）：旧 `SaveAuth` 在「上游没给身份字段」时复用该渠道**第一个**已落盘账号的 UID ⇒ 一旦有第二个华为账号，新号凭据必然写进旧号文件（真机事故：老号 3620 变新号 4500，且 refresh_token 是单次轮转票据、覆盖后不可兑回，只能重登）。新证据：STS 响应体确无身份字段，但 refresh_token 是 **JWS**，payload 的 `user_profile` 里带 `account_id`/`principal_id`/`account_name`，`account_id` 是**账号级常量**（同账号多套会话共用）。修法：新增 `codearts.ParseRefreshClaims`（容错，解不出不报错）+ Extra 增三个身份键；优先级改为 **Label → account_id → user_id/domain_id → AK**，删掉 `firstExistingUID`，并加「目标文件属于另一个账号则拒绝写盘」护栏。同账号重登=覆盖自己那条，老文件靠自身 refresh_token 现解 account_id 原地更新（零迁移）。回归 `identity_test.go` + `claims_test.go`（旧 `uid_reuse_test.go` 断言的是被修掉的旧行为，已删除）；4 处变异全部确认变红；`go build && go vet && go test ./...` 55 包全绿。详见 [`docs/决议项.md`](docs/决议项.md) R159 |
 | R160 | **请求级 4xx 必须留日志：内容拦截/上下文超限/图片无效/body 不合格/上游请求级拒绝此前整条路径零日志**（2026-11-17，实测事故驱动）：用户报「小浣熊 deepseek 一天好几次 400」，但 `data/app.log` 全量零命中（`content_filter` 0 条、当天 `error` 行 0 条），只能反查客户端会话才定住归属。根因是可观测性缺口而非审核本身：`ErrServer`/单账号/轮转/传输层错误都有日志，唯独这条「请求级直接透传」分支只调 `transparentError` 就 return。修法=透传前加一条日志（`platform/uid/model/status/kind/body 摘要` + 明确标注「不罚号、不轮换」），**判定与行为零改动**。回归两例（单条断言五字段、五种 ErrKind 逐个覆盖），变异验证删日志即变红。详见 [`docs/决议项.md`](docs/决议项.md) R160 |
 | R161 | **CodeArts 渠道支持图片输入：出站保留 text + image_url，模态能力靠「可复现实测 ∪ 静态表」标定**（2026-11-18）：根因是本仓 `internal/codearts/body.go` 的 `textBlocksOnly` 只保留 `type=="text"` 块，图片在出站前被丢弃（R113 的「未覆盖」清单里早有标注）。直连上游 A/B 实测（同账号同模型，仅差 image_url）：`kimi-k3.1-pro` 纯文本 ptok=105、带图 389 且答对 `7319,red` ⇒ 上游本来就支持，是本地丢的。非多模态模型被上游以 `InferHub.001001020.406 not multimodal` 明确拒绝；`glm-5.3` 拒绝而 `glm-5.3-flash` 通过，**不能按名称前缀推断能力**。修法：① `normalizeMessages` → `textAndImageBlocks`，`input_image` 归一成 `image_url`（detail 透传）、空 url 丢弃、audio/file 仍丢，**纯文本形状零变化**；② `modelEntry` 加 `SupportsImages` + `measuredVisionModels`/`measuredNoVisionModels` 两张实测表 + `modelSupportsImages()`，`modelInfos`/`mergeCatalog` 全部接入（R140 口径：上游声明 ∪ 可复现实测）；③ `staticCatalog` 9→16 条，`ContextWindow` 按上游 `defaultLength` 对齐（300000/200000）。实测可识图 4 个（kimi-k3.1-pro/kimi-k3/glm-5.3-flash/deepseek-v4.1-flash），明确拒绝 6 个，`GLM-5.1`/`GLM-5`/`deepseek-v4-flash`/`deepseek-v4-pro` 撞 `TM.000010051` 并发上限属**未定**、不得写死。回归 `vision_test.go` 8 例 + 同步 2 个既有断言；`go test ./...` 全绿（54 包）。详见 [`docs/决议项.md`](docs/决议项.md) R161 |
+| R162 | **qwenwork 全量模型动态获取 + usage 末帧规范化（合入 PR #229，剔除凭据文档提交）**（2026-11-18）：FetchModels 优先 `/api/chat-modes` 动态取 13 款模型（能力取上游声明，R49 合规），静态表/别名/费率同步扩 13 档；SSE 带 usage 末帧的空 delta choices 规范化为 `[]`（治 New-API 系漏识别末帧致 Claude Code 断连）；PR 的部署文档提交因明文落盘生产 API-Key 与管理密码被剔除（零凭据红线），需作者轮换。详见 [`docs/决议项.md`](docs/决议项.md) R162 |
 
 > ⚠️ **R71 附带的实测纪律**（也是 §0.1 的来源）：上游校验的是**头族齐全**而非单点
 > （只补 `X-Conversation-ID` 仍被拒）；且 `X-Conversation-ID` 的**取值形态不被校验**
@@ -497,7 +498,7 @@ bash scripts/probe-dump.sh summarize                # 汇总各渠道 usage 字�
 | [README.md](README.md) | 用户文档 |
 | [DEVELOPMENT.md](DEVELOPMENT.md) | 开发者文档（面向 AI Agent） |
 | [AGENTS.md](AGENTS.md) | **本文件**：纪律 + 决议索引 + 关键不变量 + 构建发版 |
-| [docs/决议项.md](docs/决议项.md) | **R1–R161 决议全文**（证据链、反例、已知限制） |
+| [docs/决议项.md](docs/决议项.md) | **R1–R162 决议全文**（证据链、反例、已知限制） |
 | [docs/渠道接入备忘.md](docs/渠道接入备忘.md) | 各渠道协议要点、凭据模型、已知限制与踩坑 |
 | [docs/接口参考.md](docs/接口参考.md) | 面板区块规划 + 管理 API 全量清单 |
 | [docs/模型降级链定义.md](docs/模型降级链定义.md) | **模型降级链的唯一权威定义**：三维归因、错误类型全量归属、两条触发路径、三条硬规则、已知限制（R94） |
