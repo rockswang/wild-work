@@ -223,6 +223,12 @@ const patched =
     { channel: "cline", models: [
       { model: "cline-free/mimo-v2.6-flash", id: "cline-free/mimo-v2.6-flash", priced: true, rate: 0, free: true, has_context: true, context_window: 1000000 },
     ] },
+    // 能出图的模型（D12）：/api/fees 的 supports_image_generation 与 /v1/models 同源，
+    // 面板据此显示 🎨——不靠模型名在 JS 里再猜一遍。
+    { channel: "modelscope", models: [
+      { model: "Kwai-Kolors/Kolors", id: "modelscope/Kwai-Kolors/Kolors", priced: false, rate: 0, free: false, has_context: false,
+        supports_image_generation: true },
+    ] },
   ] }) + ";"
   + "\n; globalThis.__T = { renderAccounts, renderSummary, loadStats, renderStats, renderPlatformTable, renderRotation, renderExpiry, renderModels, renderLogs, renderAbnormal, renderFallbacks, renderEffList, renderAppLog, handleToasts, renderModelSearch, collectAllModels, cacheCell, renderUsageCacheCard, renderModelTable, renderUsage, renderFees"
   // 积分明细浮窗：函数 + 两个模块级 let 的注入器（detailState/detailCache 是 `let`，
@@ -232,9 +238,15 @@ const patched =
   // 降级链别名（R129）前端即时校验：fbRules / fbAliasValidate 是 `let` 与模块内函数，
   // 由改写注入 setter + 校验入口，供「硬拒分支 + 软警告不阻止保存」的断言直接调用。
   + ", fbAliasValidate, __setFbRules: (rs) => { fbRules = rs; }"
+  // 备胎重叠合法（工单 01）：「主力汇总」（fbFromSet）与「清洗」（fbSanitize）都是模块内函数，
+  // 且 fbRules 是 `let`，必须显式接入沙箱才能断言「其他规则主力被保留 / 同规则自环被剔除」。
+  + ", fbFromSet, fbSanitize, __getFbRules: () => fbRules"
   + ", renderCreditDetail, showCreditDetail, __setCreditDetailState: (st, resp) => { detailState = st; detailCache = { [st.uid]: resp }; }"
   // 「不适用」默认收起（R103）：showNoCredit / acctFilter 都是 `let`，toggle 也要直接调
-  + ", applyAcctFilter, toggleNoCredit, __setShowNoCredit: (v) => { showNoCredit = v; }, __setAcctFilter: (v) => { acctFilter = v; }"
+  + ", applyAcctFilter, toggleNoCredit, setAcctFilter, setAcctView, __getAcctView: () => acctView, __setShowNoCredit: (v) => { showNoCredit = v; }, __setAcctFilter: (v) => { acctFilter = v; }"
+  // 视图模式（工单 02）：acctView 是 `let`，需要渲染前注入；__pushAccount/__popAccount
+  // 让场景能临时补一个「自定义渠道 / token 计量」账号，而不污染共享 fixture 的合计口径。
+  + ", __pushAccount: (a) => { state.accounts.push(a); }, __popAccount: () => { state.accounts.pop(); }"
   // 停用原因徽标（R135）：需要临时把一条 fixture 账号改成「已停用 + 指定原因」再重渲染。
   + ", __setAccount: (uid, patch) => { const a = (state.accounts || []).find((x) => x.uid === uid); if (a) Object.assign(a, patch); }"
   + " };";
@@ -514,6 +526,421 @@ check("非 officeace 账号不带「缺续期凭据」（渠道限定，避免�
   T.renderSummary();
 }
 
+// ---- 场景 1.95：卡片⇄列表视图模式 + 功能按钮条（工单 02）----
+// 断言 1–10（断言 10「积分列两行制」= 票 03）；断言 11「既有账号页断言零回归」
+// 由本文件其余全部场景共同承担 —— 本文件只要有一条红就整体失败，没有单独一行可写。
+//
+// 为什么必须有这个场景：视图模式是**结构性**新增（同一容器两种互斥渲染），
+// 最容易出的错不是「列表不好看」，而是「列表里少了一份数据/多了一份求和」：
+//   ① 表格里又长出一份渠道求和 → 与汇总条 chip 静默漂移（断言 4）；
+//   ② 可见性只认卡片、不认列表行与空分组 → 筛选/收起在列表里失效（断言 7/8）；
+//   ③ 控件又搬回顶部工具栏 → 与 owner 拍板的按钮条位置不一致（断言 9）。
+// 2026-11-16（票 02）：分组行（渠道标题 / N 号 / 小计）整体删除，列 4 → 5（平台列独立）。
+// 本场景因此原地改写了三处判据：表头四列 → 五列、列表行四格 → 五格、
+// 「分组行单格跨列」→「无分组行」反向护栏；其余断言一条不删。
+{
+  const html = readFileSync(new URL("../cmd/wild-work/web/index.html", import.meta.url), "utf8");
+  const css = readFileSync(new URL("../cmd/wild-work/web/style.css", import.meta.url), "utf8");
+  const listOf = () => document.getElementById("acctList").innerHTML;
+  const sumOf = () => document.getElementById("creditSummary").innerHTML;
+  const segOf = (split, uid) => listOf().split(split).find((s) => s.includes(uid)) || "";
+  const rowOf = (uid) => segOf('<tr class="acct-row', `"${uid}"`);
+  // 源码切片：结构不变量断言要局限于函数体内，不能拿整份文件当判据。
+  const slice = (src, from, to) => {
+    const i = src.indexOf(from), j = i < 0 ? -1 : src.indexOf(to, i + from.length);
+    return i < 0 ? "" : src.slice(i, j > i ? j : undefined);
+  };
+  const acctBody = slice(raw, "function acctParts(a) {", "function renderTimes()");
+  const csBody95 = slice(raw, "function channelSummaries(accounts) {", "// renderSummary");
+  const grBody = slice(raw, "function acctGroupsHtml() {", "// renderAccounts 账号区渲染");
+  const afBody = slice(raw, "function applyAcctFilter() {", "// setAcctFilter");
+  // 注释先剔掉再判"不得出现"：本仓大量注释会引用被禁写法（如 :has()）作反例说明，
+  // 不剔就会把「注释里的反例」当成真使用，反而逗着人把注释写糊。
+  const noComments = (s) => s.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
+
+  // ---- 断言 1：默认卡片模式；本地偏好值异常时回退卡片且不报错 ----
+  check("视图偏好默认卡片（acctView 初值 card）", /let acctView = "card";/.test(raw));
+  check("本地偏好只有 \"list\" 才生效，其余一律回退卡片",
+    /localStorage\.getItem\(ACCT_VIEW_KEY\) === "list"\) acctView = "list"/.test(raw)
+      && /acctView = v === "list" \? "list" : "card";/.test(raw));
+  check("偏好读写沿用既有「直读写 + 失败静默」写法（存储不可用不抛错）",
+    /try \{ if \(localStorage\.getItem\(ACCT_VIEW_KEY\) === "list"\) acctView = "list"; \} catch \(e\) \{/.test(raw)
+      && /function persistAcctView\(\)/.test(raw) && raw.includes("localStorage.setItem(ACCT_VIEW_KEY, acctView)"));
+  T.setAcctView("card");
+  const card95 = listOf();
+  check("默认即卡片模式：渲染出账号卡片且无表格", /class="acct-card/.test(card95) && !/<table/.test(card95));
+  check("偏好回显高亮覆盖两种模式（卡片/列表）",
+    /syncAcctViewSeg\(\);/.test(raw) && /b\.classList\.toggle\("active", b\.dataset\.view === acctView\)/.test(raw));
+
+  // ---- 断言 2：两模式互斥渲染；列表模式只有一张表（反向护栏）----
+  T.setAcctView("list");
+  const list95 = listOf();
+  check("列表模式渲染单表（<table> 只出现一次，不退化成每渠道一张表）",
+    (list95.match(/<table\b/g) || []).length === 1 && !/class="acct-card/.test(list95),
+    `表 ${(list95.match(/<table\b/g) || []).length} 张`);
+  check("列表模式只有一处列名表头（thead 唯一）", (list95.match(/<thead>/g) || []).length === 1);
+  check("表头五列逐字且按序为 平台 / 账号 / 积分 / 状态 / 操作（积分列沿用数字类 num）",
+    /<thead><tr><th class="col-platform">平台<\/th><th class="col-acct">账号<\/th><th class="num col-credits">积分<\/th><th class="col-status">状态<\/th><th class="col-ops">操作<\/th><\/tr><\/thead>/.test(list95));
+  check("两个模式互斥（卡片模式无表格也无列表行）",
+    (T.setAcctView("card"), /class="acct-card/.test(listOf()) && !/<table/.test(listOf()) && !/acct-row/.test(listOf())));
+
+  // ---- 断言 3：渠道块顺序 = 渠道顺序唯一规则（含自定义垫底）----
+  T.__pushAccount({ uid: "z-token-1", group: "zcode", nickname: "token号", credits: 8000000, credits_unit: "token",
+    expiring_credits: 500000, unusable_credits: 0, credits_na: false, cooling: false, until: "", reason: "",
+    disabled: false, last_checkin_at: "", last_checkin_ok: false });
+  T.__pushAccount({ uid: "custom-1", group: "custom-demo", nickname: "自定义号", credits: 300,
+    expiring_credits: 0, unusable_credits: 0, credits_na: false, cooling: false, until: "", reason: "",
+    disabled: false, last_checkin_at: "", last_checkin_ok: false });
+  T.setAcctView("list");
+  T.renderSummary();
+  const labels95 = (() => {
+    const m = raw.match(/const CH_LABEL = (\{[^}]*\});/);
+    return m ? new Function("return (" + m[1] + ")")() : {};
+  })();
+  const groups95 = [...listOf().matchAll(/<tbody class="acct-group" data-group="([^"]+)"/g)].map((m) => m[1]);
+  const builtin95 = groups95.filter((g) => !g.startsWith("custom-"));
+  const sorted95 = builtin95.slice().sort((a, b) => (labels95[a] < labels95[b] ? -1 : labels95[a] > labels95[b] ? 1 : 0));
+  check("渠道块顺序 = 内建渠道按显示名字节序（R142，与汇总条/费率页同序）",
+    builtin95.length >= 3 && builtin95.join("|") === sorted95.join("|"), groups95.join("|"));
+  check("自定义渠道块钉在最末（不被字母序混排进内建）",
+    groups95.length > 0 && groups95[groups95.length - 1] === "custom-demo", groups95.join("|"));
+  // 分组行（渠道标题 /「N 号」/ 该渠道小计）2026-11-16 整体删除：表格里只剩账号行。
+  // 反向护栏 —— 任何岗哨行回潮（group-row / 跨列 th / 渠道标题 / N 号 / 小计）都在这里红。
+  check("表格里无分组行（无 group-row、无跨列岗哨行、无渠道标题 / N 号 / 小计节点）",
+    !/group-row/.test(listOf()) && !/colspan=/.test(listOf())
+      && !/acct-group-head/.test(listOf()) && !/class="cs-n"/.test(listOf())
+      && !/g-name|g-lbl/.test(listOf()) && !/group-row/.test(noComments(grBody)),
+    listOf().slice(0, 200));
+  check("空分组不渲染（每个分组容器里至少有一行账号）",
+    groups95.length > 0 && listOf().split('<tbody class="acct-group"').slice(1).every((s) => s.includes('class="acct-row')));
+  check("分组内保持后端下发原序", /state\.accounts\s*\n\s*\.filter\(\(a\) => \(a\.group \|\| "workbuddy"\) === k\)/.test(grBody));
+
+
+  // ---- 断言 4：表格渲染路径零渠道级求和（分组行删除后，小计的唯一住所是汇总条）----
+  const tok = (s) => [...s.matchAll(/<span class="(cs-num|cs-exp|cs-tok|cs-unu|cs-stale|credit-na)"[^>]*>[^<]*<\/span>/g)].map((m) => m[0]);
+  const chipTokens = (k) => tok(sumOf().split('<span class="cs-chip').find((s) => s.includes(`data-wg="${k}"`)) || "");
+  check("表格渲染路径不消费任何渠道级数字（c.body / 小计 / cs-* 一个都不用）",
+    grBody.includes("channelSummaries(state.accounts)")
+      && !/c\.body|c\.credits|c\.tokens|c\.expiring|c\.unusable|\$\{c\.|小计|cs-(num|exp|tok|unu|stale)|reduce\(/.test(noComments(grBody)),
+    noComments(grBody).slice(0, 200));
+  check("token 计量渠道的 tokens 单位只由汇总条承担（表格已无小计）",
+    chipTokens("zcode").join("|").includes("tokens") && chipTokens("zcode").join("|").includes("cs-exp")
+      && !/tokens/.test(noComments(grBody)), chipTokens("zcode").join("|"));
+  T.__setShowNoCredit(true);
+  T.renderSummary();
+  check("「不适用」只在汇总条显示（表格已无小计）",
+    chipTokens("oczen").join("|").includes('credit-na">不适用'), chipTokens("oczen").join("|"));
+  T.__setShowNoCredit(false);
+  T.renderSummary();
+
+  // ---- 断言 5：反向护栏 —— 账号渲染函数内不得出现第二份按渠道求和 ----
+  check("账号渲染函数内没有第二份按渠道求和",
+    !/c\.credits \+= a\.credits/.test(acctBody) && !/c\.tokens \+= a\.credits/.test(acctBody)
+      && !/for \(const a of accounts\)/.test(acctBody));
+  check("全文件的按渠道求和仍只有一份（工单 01 的唯一来源未退化）",
+    (raw.match(/c\.credits \+= a\.credits/g) || []).length === 1
+      && (raw.match(/for \(const a of accounts\)/g) || []).length === 1 && csBody95.length > 0);
+  check("卡片模板未变（仍由 acctParts → acctCardHtml 产出，逐字保持升级前形态）",
+    /function acctCardHtml\(a\) \{[\s\S]*?const p = acctParts\(a\);[\s\S]*?<div class="acct-card\$\{disabledClass\}/.test(raw)
+      && /function acctRowHtml\(a\) \{[\s\S]*?const p = acctParts\(a\);/.test(raw));
+
+  // ---- 断言 6：渠道筛选入口唯一 = 汇总条 chip（分组行点击入口已随分组行删除）----
+  check("筛选入口只有汇总条 chip（data-wg 只出现在 chip 模板里）",
+    raw.includes("setAcctFilter(chip.dataset.wg || null);")
+      && /data-wg="\$\{esc\(k\)\}"/.test(raw)
+      && !/data-wg=/.test(noComments(grBody)) && !/data-wg=/.test(listOf()),
+    listOf().slice(0, 160));
+  check("分组行点击链路已彻底删除（不留死代码 / 死样式）",
+    !noComments(raw).includes("acct-group-head") && !noComments(css).includes("acct-group-head"));
+  T.__setAcctFilter(null);
+  T.renderAccounts();
+  T.renderSummary();
+  T.setAcctFilter("traework");
+  check("筛选后汇总条 chip 高亮同步（.on 由 acctFilter 派生）",
+    /cs-chip clickable on" data-wg="traework"/.test(sumOf()), sumOf().slice(0, 240));
+  check("再点同一条即取消（幂等切换，未新增取消动作）",
+    /acctFilter = \(acctFilter === kind\) \? null : kind;/.test(raw));
+  T.setAcctFilter("traework");
+
+  // ---- 断言 7：统一可见性函数同时处理账号行与空分组容器；不使用 :has() ----
+  check("可见性函数用统一选择器（卡片 + 列表行同一处判据）",
+    /const ACCT_UNIT_SEL = "\.acct-card, \.acct-row";/.test(raw) && afBody.includes("ACCT_UNIT_SEL"));
+  check("可见性函数同时处理空分组容器（一行不留即整体隐藏）",
+    afBody.includes('querySelectorAll(".acct-group")') && /classList\.toggle\("hidden", !anyVisible\)/.test(afBody));
+  check("空分组隐藏判据派生自账号单元可见性（不重算筛选条件）",
+    afBody.includes("grp.querySelectorAll(ACCT_UNIT_SEL)") && afBody.includes('u.classList.contains("hidden")'));
+  check("源码与样式表都不用 :has( 做隐藏（静态检查器覆盖不到隐式选择器）",
+    !noComments(raw).includes(":has(") && !noComments(css).includes(":has("));
+  check("「全部被收起」提示也按统一选择器计数（列表模式不漏号）",
+    afBody.includes("grid.querySelectorAll(ACCT_UNIT_SEL).length") && afBody.includes('.acct-row[data-na="1"]'));
+
+  // ---- 断言 8：虚拟账号默认收起在列表模式下同样生效且可逆 ----
+  T.__setShowNoCredit(false);
+  T.setAcctView("list");
+  check("列表模式下虚拟账号（oczen）默认带 hidden",
+    /\bhidden" data-group="oczen" data-na="1"/.test(rowOf("oczen-anon")), rowOf("oczen-anon").slice(0, 160));
+  check("列表模式下用户添加的无积分账号（cline）默认不收起（R131 不回归）",
+    rowOf("cline-abcdef123456") !== "" && !/\bhidden" data-group="cline"/.test(rowOf("cline-abcdef123456")));
+  check("列表模式下 comate 账号默认不收起",
+    rowOf("sid-0123456789abcdef") !== "" && !/\bhidden" data-group="comate"/.test(rowOf("sid-0123456789abcdef")));
+  T.__setShowNoCredit(true);
+  T.renderAccounts();
+  check("展开后列表里的虚拟账号行回来（可逆）",
+    rowOf("oczen-anon") !== "" && !/\bhidden" data-group="oczen"/.test(rowOf("oczen-anon")));
+  check("收起判据仍是虚拟账号名单（两种视图同一处判据，不用 credits_na）",
+    /naHidden: !showNoCredit && isVirtualAcct\(a\),/.test(raw)
+      && /const isVirtualAcct = \(a\) => VIRTUAL_ACCOUNTS\.has/.test(raw));
+  T.__setShowNoCredit(false);
+  T.renderAccounts();
+
+  // ---- 断言 9：按钮条双向锁（三控件在按钮条内，不得回到顶部工具栏）----
+  const headSeg = html.slice(html.indexOf('<div class="panel-head">'), html.indexOf('id="acctFnBar"'));
+  const fnSeg = html.slice(html.indexOf('id="acctFnBar"'), html.indexOf('id="creditSummary"'));
+  check("功能按钮条含刷新积分 / 全部签到 / 视图切换三控件",
+    fnSeg.includes('id="btnRefreshAll"') && fnSeg.includes('id="btnCheckinAll"')
+      && fnSeg.includes('id="acctViewSeg"') && fnSeg.includes('data-view="card"') && fnSeg.includes('data-view="list"'));
+  check("按钮条位于汇总条上方（DOM 顺序：按钮条 → 汇总条 → 账号区）",
+    html.indexOf('id="acctFnBar"') < html.indexOf('id="creditSummary"')
+      && html.indexOf('id="creditSummary"') < html.indexOf('id="acctList"'));
+  check("顶部工具栏内不得再出现这三个控件（反向护栏）",
+    headSeg !== "" && !headSeg.includes("btnRefreshAll") && !headSeg.includes("btnCheckinAll")
+      && !headSeg.includes("acctViewSeg"));
+  check("刷新 / 签到沿用原标识与既有绑定（绑定未动）",
+    raw.includes('$("btnCheckinAll").onclick = checkinAll;') && raw.includes('$("btnRefreshAll").onclick = refreshAll;'));
+  check("视图切换绑定在功能按钮条内（不新增接口、不动渠道按钮阵列）",
+    /\$\("acctViewSeg"\)\.addEventListener\("click"/.test(raw) && raw.includes("setAcctView(b.dataset.view)"));
+  check("render() 里回显视图高亮（刷新页面后按钮态与本地偏好一致）",
+    /function render\(\) \{\n  renderTopbar\(\);\n  syncAcctViewSeg\(\);/.test(raw));
+
+  // ---- 断言 10：积分列两行制（第一行数字 + 单位，第二行角标；单位不占数字对齐容器）----
+  // 结构用一个「有数字 + 有临期角标」的正常行与一个 token 计量行来锁：
+  //   · 数字在 .cr-num-box（右对齐 + 等宽数字）内，单位 .cr-unit 在其**外**；
+  //   · 角标（临期 / 不可用）独占第二行 .cr-sub，不与数字同行；
+  //   · 反向护栏：把单位并回 .cr-num-box（变异）必须变红。
+  const crRow = rowOf("4298452267967801"); // traework 健康号：2686 + 临期100
+  check("列表积分格第一行 = 数字 + 单位（数字在 cr-num-box 内、单位在其外）",
+    /<div class="cr-main has-unit"><span class="cr-num-box"><span class="credit-num">2686<\/span><\/span><span class="cr-unit">可用积分<\/span><\/div>/.test(crRow),
+    crRow);
+  check("列表积分格第二行 = 角标（临期独占 cr-sub，不与数字同行）",
+    /<div class="cr-sub"><span class="credit-expiring"> \(临期100\)<\/span><\/div>/.test(crRow), crRow);
+  const tokRow = rowOf("z-token-1");
+  check("token 计量渠道同样两行制（第一行数字 + tokens，第二行临期）",
+    /<span class="cr-num-box"><span class="credit-num">800万<\/span><\/span><span class="cr-unit"[^>]*>tokens<\/span>/.test(tokRow)
+      && /<div class="cr-sub"><span class="credit-expiring"> \(临期50万\)<\/span><\/div>/.test(tokRow),
+    tokRow);
+  const crNumBoxInner = (crRow.match(/<span class="cr-num-box">([\s\S]*?)<\/span><\/span>/) || [])[1] || "";
+  check("反向护栏：单位小字不在数字对齐容器（cr-num-box）内",
+    crNumBoxInner.includes('class="credit-num"') && !crNumBoxInner.includes("cr-unit")
+      && !crNumBoxInner.includes("可用积分") && !crNumBoxInner.includes("tokens"), crNumBoxInner);
+  check("单位小字不占列宽（cr-unit 绝对定位）+ 数字右对齐 + 等宽数字",
+    /\.acct-table \.cell-credits \.cr-main \{[^}]*text-align: right; \}/.test(css)
+      && /\.acct-table \.cell-credits \.cr-num-box \{[^}]*font-variant-numeric: tabular-nums; \}/.test(css)
+      && /\.acct-table \.cell-credits \.cr-unit \{[^}]*position: absolute;/.test(css), "");
+  check("「不适用」占第一行且无单位（非数字主文案分支）",
+    /<div class="cr-main"><span class="credit-na"[^>]*>不适用<\/span><\/div>/.test(rowOf("oczen-anon"))
+      && !/cr-num-box/.test(rowOf("oczen-anon")), rowOf("oczen-anon"));
+
+  // ---- 补充：列表行的五列 / 操作 / 状态徽标 / 窄屏（工单验收项）----
+  T.__setAccount("1606848467182378", { cooling: true, until: "10-03 09:12", until_ts: Math.floor(Date.now() / 1000) + 12 * 3600, reason: "3004" });
+  T.setAcctView("list");
+  const trBody = rowOf("1606848467182378");
+  check("列表行含五列（平台 / 账号 / 积分 / 状态 / 操作）",
+    (trBody.match(/<td\b/g) || []).length === 5
+      && /<td class="cell-platform">/.test(trBody) && /<td class="cell-acct">/.test(trBody)
+      && /<td class="num cell-credits/.test(trBody)
+      && /<td class="cell-tags">/.test(trBody) && /<td class="cell-ops">/.test(trBody), trBody.slice(0, 240));
+  check("整行不可点（tr 标签无 onclick），只有积分单元格与昵称可点",
+    !/onclick/.test(trBody.slice(0, trBody.indexOf("<td")))
+      && trBody.includes("showCreditDetail(event,") && /class="acct-name editable"[^>]*onclick="openRename\(/.test(trBody));
+  check("列表积分格沿用卡片语义类 acct-credits（明细浮窗切换/就地回写两链路都认它）",
+    /<td class="num cell-credits acct-credits/.test(trBody)
+      && /const cell = document\.querySelector\(`\.acct-credits\[data-uid="\$\{uid\}"\]`\)/.test(raw)
+      && /n\.classList\.contains\("acct-credits"\)/.test(raw));
+  check("列表积分格有列表作用域样式（单位小字 / 临期红 / 不可用灰，不靠卡片规则凑）",
+    /\.acct-table \.cell-credits \.credit-expiring \{ font-size: 12px; font-weight: 600; color: var\(--danger\); \}/.test(css)
+      && /\.acct-table \.cell-credits span \{/.test(css));
+  check("列表行内联全部操作（签到 / 刷新积分 / 停用·启用 / 删除）",
+    trBody.includes("onclick=\"checkin(") && trBody.includes("onclick=\"refreshOne(")
+      && trBody.includes("onclick=\"toggleDisable(") && trBody.includes("onclick=\"removeAcct("), trBody.slice(-420));
+  check("状态徽标全部内联（冷却至 + 相对时长）",
+    /tag warn[^>]*>冷却至 /.test(trBody) && /（剩 \d+ 时 \d+ 分）/.test(trBody));
+  T.__setAccount("1606848467182378", { cooling: false, until: "", until_ts: 0, reason: "自动停用（测试）", disabled: true });
+  T.renderAccounts();
+  check("停用·原因在列表行内联（不只卡片有）",
+    /tag neutral"[^>]*>已停用 · /.test(rowOf("1606848467182378")), rowOf("1606848467182378").slice(0, 260));
+  T.__setAccount("1606848467182378", { disabled: false });
+  T.renderAccounts();
+  check("需重新登录 / 缺续期凭据在列表行内联",
+    rowOf("qwenwork-session-dead-1").includes("需重新登录")
+      && rowOf("01a149d8913679e5ba6de6275047897f:01a149d8913672db88d7a95fb3382d4d").includes("缺续期凭据"));
+  check("无签到渠道在列表行是中性灰标（不误报红）",
+    /tag neutral"[^>]*>无签到</.test(rowOf("cline-abcdef123456")));
+  check("虚拟账号列表行仍只读（🔒 + 无停用/删除入口）",
+    rowOf("oczen-anon").includes("固定账号，不可停用/删除")
+      && !rowOf("oczen-anon").includes("removeAcct('oczen")
+      && !rowOf("oczen-anon").includes("toggleDisable('oczen"));
+  check("列表行复用账号单元（平台徽标走 chBadge、账号/状态/操作走 acctParts，不另立一套）",
+    /<td class="cell-platform">\$\{chBadge\(a\.group\)\}<\/td>/.test(raw)
+      && /<td class="cell-acct">\$\{p\.nameHtml\}/.test(raw));
+  check("窄屏：列表容器横向滚动、列不裁剪、不降级回卡片",
+    /\.tbl-scroll \{ overflow-x: auto; \}/.test(css) && /min-width: 607px/.test(css)
+      && /display: block/.test(slice(css, ".acct-grid.list-mode", "\n")));
+  check("卡片网格既有规则零改动（升级前形态不变）",
+    /\.acct-grid \{ display: grid; grid-template-columns: 1fr 1fr; gap: 12px; \}/.test(css));
+
+  // ---- 闸 2（票 04）真实页实测落到 CSS 的四条结论 ----
+  // 实测（Chromium 156 / 真实 21 账号 + 126 行密集快照）：.tbl-scroll 的 overflow-x:auto 使它成为
+  // 最近的 scrollport，而它纵向不滚动 ⇒ thead 的 position:sticky 恒失效（文档滚 300px 后 top=-300）。
+  // 故**不得**出现「写了 sticky 就当生效」：这条锁住「不粘性」结论，理由写在 style.css 的注释里。
+  check("闸 2 粘性表头：thead 不得写 position: sticky（实测在当前滚动上下文恒失效）",
+    !/\.acct-table thead th \{[^}]*position: sticky/.test(css));
+  // 积分列的「单位带」必须单一来源（--acct-cred-unit）：数据格的预留带与表头对齐都从它派生，
+  // 两处各写死一个 px 值必然漂移（实测改前表头与数字右缘差 46px）。
+  check("闸 2 积分列单位带单一来源 + 表头与数字右缘对齐",
+    /\.acct-table \{[^}]*--acct-cred-unit: \d+px/.test(css)
+      && /\.acct-table \.cell-credits \.cr-main \{[^}]*padding-right: var\(--acct-cred-unit\)/.test(css)
+      && /\.acct-table thead th\.num \{[^}]*padding-right: calc\(var\(--acct-cred-unit\) \+ \d+px\)/.test(css));
+  // 状态徽标封顶：实测 126 行快照里长停用原因徽标 305px，把整表撑到 904px > 890px 容器
+  // ⇒ 1440px 视口也出横滚条；封顶后列宽不再被最长理由单点决定（hover 仍有 title 全文）。
+  check("闸 2 状态徽标封顶（max-width + 省略号）",
+    /\.acct-table \.cell-tags \.tag \{[^}]*max-width: \d+px[^}]*text-overflow: ellipsis/.test(css));
+  // 窄屏断点卡在**实测阈值** 869（不是拍脑袋的档位）：票 04 重测五列版（分组行已删）：紧凑档
+  // min-content 606.3px、宽档 761.9px，容器 = 视口 −85 ⇒ 视口 ≥691 起不横溢（690 溢 1px）；
+  // 但 855~869 行高因账号列挤到 min-content 跳到 103.5~209.5px（紧凑档内 47.5，845 起也 47.5）。
+  // 故紧凑规则挂在 869：压紧内边距/字号/徽标上限、状态列允许折行，min-width: 607px 取紧凑档
+  // 实测下限（606.3 向上取整），保证跨引擎可读宽度一致。
+  check("闸 2 窄屏断点：列表紧凑档挂在实测阈值 869（物理阈值，非视觉档位）",
+    /@media \(max-width: 869px\) \{\s*\.acct-table \{ font-size: 12px; --acct-cred-unit: 44px; \}/.test(css)
+      && /\.acct-table \.cell-tags \{ white-space: normal; \}/.test(css));
+
+  // 复原：临时账号 / 筛选 / 视图 / 收起态全部回到共享 fixture 的基线，避免污染后续场景。
+  T.__popAccount(); // custom-demo
+  T.__popAccount(); // zcode token
+  T.__setAcctFilter(null);
+  T.__setShowNoCredit(false);
+  T.setAcctView("card");
+  T.renderSummary();
+}
+
+// ---- 场景 1.97：列表模式五列拆列（工单 02，spec 断言 1–11）----
+// 1.95 锁的是「两视图互斥 / 可见性统一 / 按钮条位置」，本场景锁的是**五列拆列后的表格结构**：
+// 平台列独立成徽标列、账号列独占「昵称 + UID」、分组行（渠道标题 / N 号 / 小计）彻底消失。
+// 变异验证（实现票逐条记录，每处确认变红）：
+//   ① 加回分组行或第二个列名来源 → 断言 1/3 红；
+//   ② 表格里加回渠道小计（任何渠道级求和）→ 断言 2 红；
+//   ③ 把 UID: 挪进平台格 → 断言 5 红；
+//   ④ 平台格加回重复显示名 → 断言 6 红；
+//   ⑤ 改成每渠道一张表 → 断言 9 红；
+//   ⑥ 平台列直接写死样式类而不走徽章函数 → 断言 7 红。
+{
+  const css = readFileSync(new URL("../cmd/wild-work/web/style.css", import.meta.url), "utf8");
+  const listOf = () => document.getElementById("acctList").innerHTML;
+  const sumOf = () => document.getElementById("creditSummary").innerHTML;
+  const noComments = (x) => x.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
+  const rowOf = (uid) => listOf().split('<tr class="acct-row').find((x) => x.includes(`"${uid}"`)) || "";
+  const grBody = (() => {
+    const i = raw.indexOf("function acctGroupsHtml() {");
+    const j = raw.indexOf("// renderAccounts 账号区渲染", i);
+    return i < 0 ? "" : noComments(raw.slice(i, j > i ? j : undefined));
+  })();
+  T.setAcctView("list");
+  T.renderSummary();
+  const markup = listOf();
+  const tableBody = markup.slice(markup.indexOf("<tbody"));
+  const cellOf = (row, re) => (row.match(re) || [])[1] || "";
+
+  // ---- 断言 1：全表恰好一行全局 thead，列名逐字且按序 ----
+  check("全表恰好一行全局 thead（开闭各一次），五列逐字且按序为 平台 / 账号 / 积分 / 状态 / 操作",
+    (markup.match(/<thead>/g) || []).length === 1 && (markup.match(/<\/thead>/g) || []).length === 1
+      && /<thead><tr><th class="col-platform">平台<\/th><th class="col-acct">账号<\/th><th class="num col-credits">积分<\/th><th class="col-status">状态<\/th><th class="col-ops">操作<\/th><\/tr><\/thead>/.test(markup),
+    markup.slice(0, 200));
+
+  // ---- 断言 2：表格里无分组行（reverse guard，含源码级）----
+  check("表格里无分组行：无 group-row、无 colspan 岗哨行、无渠道标题 / N 号 / 小计节点",
+    !/<th\b/.test(tableBody) && !/group-row/.test(markup) && !/colspan=/.test(markup)
+      && !/class="(cs-n|g-name|g-sub|g-lbl|acct-group-head)"/.test(markup)
+      && !/小计/.test(markup) && !/(\d+)号</.test(tableBody),
+    tableBody.slice(0, 200));
+  check("列表渲染路径无任何渠道级求和（c.* / reduce / cs-* 小计产物一个不出现）",
+    !/c\.(body|credits|tokens|expiring|unusable|n|stale)\b|reduce\(|cs-(num|exp|tok|unu|stale)|小计/.test(grBody),
+    grBody.slice(0, 200));
+
+  // ---- 断言 3：五个列名/列类只有一处来源 ----
+  check("五个列名与列类在源码里各只出现一次（唯一 thead 模板，无第二处列名表）",
+    ["col-platform", "col-acct", "col-credits", "col-status", "col-ops"]
+      .every((c) => (raw.match(new RegExp(c, "g")) || []).length === 1)
+      && (grBody.match(/<th /g) || []).length === 5, String((grBody.match(/<th /g) || []).length));
+
+  // ---- 断言 4：数据行五格齐备 ----
+  const row = rowOf("4298452267967801");
+  const cells = [...row.matchAll(/<td class="([^"]*)"/g)].map((m) => m[1]);
+  check("数据行五格齐备：平台 / 账号 / 积分（沿用卡片语义类 acct-credits）/ 状态 / 操作",
+    cells.length === 5 && cells[0] === "cell-platform" && cells[1] === "cell-acct"
+      && /num cell-credits acct-credits/.test(cells[2]) && cells[3] === "cell-tags" && cells[4] === "cell-ops"
+      && /class="acct-name editable"/.test(row) && /UID: /.test(row) && /class="cr-main/.test(row),
+    JSON.stringify(cells));
+  check("平台/账号两列各有列级样式（徽标不折行、长昵称折行不撑破列宽）",
+    /\.acct-table \.cell-platform \{ white-space: nowrap; \}/.test(css)
+      && /\.acct-table \.cell-acct \{ max-width: 220px; overflow-wrap: anywhere; \}/.test(css));
+
+  // ---- 断言 5：UID 归属账号字段（反向护栏）----
+  const platCell = cellOf(row, /<td class="cell-platform">([\s\S]*?)<\/td>/);
+  const acctCell = cellOf(row, /<td class="cell-acct">([\s\S]*?)<\/td>/);
+  check("UID: 只在账号格内，平台格内没有（反向护栏）",
+    /UID: /.test(acctCell) && !/UID/.test(platCell)
+      && !/UID/.test(markup.slice(0, markup.indexOf("<tbody"))), platCell);
+
+  // ---- 断言 6：平台格只含徽标，渠道名不重复 ----
+  check("平台格只含一枚徽标，渠道名在格内只出现一次（无重复显示名节点）",
+    /^<span class="badge trae" style="background:[^"]*">TraeWork<\/span>$/.test(platCell.trim())
+      && (platCell.match(/TraeWork/g) || []).length === 1, platCell);
+
+  // ---- 断言 7：平台徽标与卡片徽标同源 ----
+  const cardBadge = (() => {
+    T.setAcctView("card");
+    const m = document.getElementById("acctList").innerHTML.match(/<span class="badge trae"[^>]*>TraeWork<\/span>/);
+    T.setAcctView("list");
+    return m ? m[0] : "";
+  })();
+  check("平台徽标与卡片徽标逐字同一产物（同一徽章函数，不手写样式类）",
+    cardBadge !== "" && platCell.trim() === cardBadge
+      && /<td class="cell-platform">\$\{chBadge\(a\.group\)\}<\/td>/.test(raw), `${cardBadge} vs ${platCell.trim()}`);
+
+  // ---- 断言 8：每渠道一个分组容器、块序与汇总条同序、组内原序 ----
+  const tblGroups = [...markup.matchAll(/<tbody class="acct-group" data-group="([^"]+)"/g)].map((m) => m[1]);
+  const chips = [...sumOf().matchAll(/data-wg="([^"]+)"/g)].map((m) => m[1]);
+  check("每个渠道一个分组容器，块序与汇总条 chip 完全同序（R142 唯一规则）",
+    tblGroups.length >= 4 && tblGroups.filter((k) => chips.includes(k)).join("|") === chips.filter((k) => tblGroups.includes(k)).join("|"),
+    `${tblGroups.join("|")} vs ${chips.join("|")}`);
+  const trSeg = markup.split('<tbody class="acct-group"').find((x) => x.includes('data-group="traework"')) || "";
+  const trUids = [...trSeg.matchAll(/data-uid="([^"]+)"/g)].map((m) => m[1]);
+  check("分组容器内保持后端下发原序（不排序），且没有空容器（空渠道整段不渲染）",
+    trUids.join("|") === "1606848467182378|4298452267967801"
+      && !/<tbody class="acct-group"[^>]*>\s*<\/tbody>/.test(markup), trUids.join("|"));
+
+  // ---- 断言 9：单表不变量（不得退化成每渠道一张表）----
+  check("列表模式下 <table> 只出现一次，且 tbody 数 = 分组容器数",
+    (markup.match(/<table\b/g) || []).length === 1 && (markup.match(/<\/table>/g) || []).length === 1
+      && (markup.match(/<tbody/g) || []).length === tblGroups.length,
+    String((markup.match(/<table\b/g) || []).length));
+
+  // ---- 断言 10：ACCT_UNIT_SEL 未变、容器不计入账号单元、筛选入口仍唯一 ----
+  check("ACCT_UNIT_SEL 逐字未变且不含分组容器（容器不计入账号单元）",
+    /const ACCT_UNIT_SEL = "\.acct-card, \.acct-row";/.test(raw)
+      && !/ACCT_UNIT_SEL = [^;]*acct-group/.test(raw));
+  check("渠道筛选入口唯一：表格里没有 data-wg（筛选仍只由汇总条 chip 驱动）",
+    !/data-wg=/.test(markup) && /data-wg="\$\{esc\(k\)\}"/.test(raw));
+
+  // ---- 断言 11：卡片模式互斥渲染不回归 ----
+  T.setAcctView("card");
+  check("卡片模式仍渲染卡片且不含表格（两模式互斥）",
+    /class="acct-card/.test(listOf()) && !/<table/.test(listOf()) && !/cell-platform/.test(listOf()));
+  // 复原到共享基线（后续场景按卡片模式取片段）：视图回卡片并重渲染。
+  T.setAcctView("card");
+  T.renderAccounts();
+  T.renderSummary();
+}
+
 // ---- 场景 2：渠道汇总条 ----
 T.renderSummary();
 const sum = document.getElementById("creditSummary").innerHTML;
@@ -521,6 +948,30 @@ check("汇总条渲染了 traework", sum.includes("TraeWork"));
 check("汇总可用 = 2050+2686 = 4736", sum.includes("4,736"), sum.slice(0, 160));
 check("汇总临期 = 100", sum.includes("临期100"));
 check("汇总含合计", sum.includes("合计"));
+// 汇总条聚合 + 摘要文案分支共用一个共享函数（工单 01，零可见变化 prefactor）：
+// 后续「列表模式分组行小计」复用同一处，分组行与 chip 逐字同源在结构上不可能漂移。
+const csStart = raw.indexOf("function channelSummaries(");
+const csEnd = raw.indexOf("\n}", csStart);
+const csBody = csStart >= 0 && csEnd > csStart ? raw.slice(csStart, csEnd) : "";
+const rsStart = raw.indexOf("function renderSummary()");
+const rsEnd = raw.indexOf("\n}", rsStart);
+const rsBody = rsStart >= 0 && rsEnd > rsStart ? raw.slice(rsStart, rsEnd) : "";
+check("存在共享函数 channelSummaries（聚合 + 文案分支同处一处）",
+  /^function channelSummaries\s*\(/m.test(raw) && csBody.length > 0);
+check("汇总条 chip 由 channelSummaries 渲染（限定在 renderSummary 作用域内）",
+  rsBody.includes("channelSummaries(state.accounts)") && rsBody.includes("const body = c.body;"));
+check("按渠道求和逻辑只有一份（单聚合循环且只累加一次）",
+  (raw.match(/for \(const a of accounts\)/g) || []).length === 1
+    && (raw.match(/c\.credits \+= a\.credits/g) || []).length === 1
+    && (raw.match(/c\.tokens \+= a\.credits/g) || []).length === 1
+    && csBody.includes("c.credits += a.credits"),
+  `循环 ${(raw.match(/for \(const a of accounts\)/g) || []).length} 处`);
+// 四种摘要分支的判据与文案都在共享函数内 —— 丢条件（尤其 token 计量与「不适用」
+// 两条最容易在搬运时漏）会立即变红。
+check("共享函数含四种摘要分支（不适用 / tokens / 待刷新 / 数字）",
+  csBody.includes('credit-na">不适用') && csBody.includes("cs-tok")
+    && csBody.includes('credit-stale">待刷新') && csBody.includes("cs-num")
+    && csBody.includes("c.isToken") && csBody.includes("c.na") && csBody.includes("c.allStale"));
 
 // ---- 场景 2.1：临期口径可配（R112b）----
 // 背景：R112 把临期展示固定成 1 个自然日并删掉设置项，导致「明早 05:47 到期」
@@ -564,8 +1015,8 @@ check("不再有写死的「今日到期（次日 00:00 失效算今日）」硬
   !/今日到期（次日 00:00 失效算今日），选号时优先消耗/.test(raw));
 
 // ---- 场景 2.5：模型查找面板（纯前端过滤，全量渲染 + 列表滚动） ----
-// 假缓存共 17 个模型：qodercn 2 + workbuddy 2 + loomy 12 + cline 1（含 13 个 qwen* 用于滚动断言）
-check("collectAllModels 展平全渠道 17 个模型", T.collectAllModels().length === 17, `实际 ${T.collectAllModels().length}`);
+// 假缓存共 18 个模型：qodercn 2 + workbuddy 2 + loomy 12 + cline 1 + modelscope 1（含 13 个 qwen* 用于滚动断言）
+check("collectAllModels 展平全渠道 18 个模型", T.collectAllModels().length === 18, `实际 ${T.collectAllModels().length}`);
 check("collectAllModels 完整 ID = 渠道/裸名", T.collectAllModels()[0].full === "qodercn/qwen3.8-flash");
 // 上游 ID 自带命名空间（cline-free/*）时完整 ID = 上游 ID 原样（服务端 m.id 同源），
 // 不再拼 `cline/`（R59）；旧的 cline/cline-free/* 仍可路由（兼容断言在 Go 侧）
@@ -582,8 +1033,8 @@ check("档位 title 含默认档", msHtml.includes("默认 high"));
 check("底部提示共 N 个匹配", /共 1 个匹配/.test(document.getElementById("modelSearchFoot").textContent));
 T.renderModelSearch("");
 msHtml = document.getElementById("modelSearchList").innerHTML;
-check("空关键字全量列出 17 条（不再截断）", (msHtml.match(/class="ms-row"/g) || []).length === 17, `实际 ${(msHtml.match(/class="ms-row"/g) || []).length}`);
-check("空关键字提示共 N 个匹配", /共 17 个匹配/.test(document.getElementById("modelSearchFoot").textContent), document.getElementById("modelSearchFoot").textContent);
+check("空关键字全量列出 18 条（不再截断）", (msHtml.match(/class="ms-row"/g) || []).length === 18, `实际 ${(msHtml.match(/class="ms-row"/g) || []).length}`);
+check("空关键字提示共 N 个匹配", /共 18 个匹配/.test(document.getElementById("modelSearchFoot").textContent), document.getElementById("modelSearchFoot").textContent);
 check("免费模型显示 Free", msHtml.includes("Free"));
 check("未定价模型显示 unknown", msHtml.includes("unknown"));
 T.renderModelSearch("zzz-none");
@@ -605,11 +1056,20 @@ T.renderFees({ channels: [
   { channel: "cline", models: [
     { model: "cline-free/mimo-v2.6-flash", id: "cline-free/mimo-v2.6-flash", priced: true, rate: 0, free: true, has_context: true, context_window: 1000000 },
   ] },
+  // 能出图（D12）：supports_image_generation 与 /v1/models 同源 → 模型 ID 后给 🎨
+  { channel: "modelscope", models: [
+    { model: "Kwai-Kolors/Kolors", id: "modelscope/Kwai-Kolors/Kolors", priced: false, rate: 0, free: false, has_context: false,
+      supports_image_generation: true },
+  ] },
 ] });
 const feesHtml = document.getElementById("feesBox").innerHTML;
 check("费率表档位小字标出现（[low·high·max]）", feesHtml.includes("effort-tag") && feesHtml.includes("[low·high·max]"), feesHtml.slice(0, 200));
 check("档位 title 含默认档与调档提示", feesHtml.includes("默认 high") && feesHtml.includes("reasoning_effort"));
 check("无档位声明的模型不显示档位标", (feesHtml.match(/effort-tag/g) || []).length === 1);
+check("费率表能出图模型显示 🎨（cap-gen，与 /v1/models 同源）",
+  feesHtml.includes("cap-gen") && (feesHtml.match(/🎨/g) || []).length === 1, feesHtml.slice(0, 400));
+check("费率表对话模型不显示 🎨（标记只为真值出现，不按名字猜）",
+  !/cap-gen[^>]*>[^<]*🎨<\/span>[\s\S]{0,80}qodercn/.test(feesHtml));
 // 完整 ID（R59）：上游命名空间 ID 直接透传（服务端 m.id 同源），复制出去即可用
 // （旧的 cline/cline-free/* 仍被服务端路由兼容，但对外只广告新形态）
 check("费率表上游命名空间 ID 直通（cline-free/*）",
@@ -638,6 +1098,17 @@ check("费率表上游命名空间 ID 直通（cline-free/*）",
 T.renderModelSearch("deepseek");
 msHtml = document.getElementById("modelSearchList").innerHTML;
 check("未声明档位的模型行无 ms-eff", !msHtml.includes("ms-eff"), msHtml.slice(0, 200));
+
+// ---- 场景 2.76：「能出图」标记（D12，与 /v1/models 的 supports_image_generation 同源）----
+// 客户端/面板靠这个标记区分「画图模型」与「对话模型」；它必须只来自服务端字段，
+// 前端不得按模型名再猜一遍（猜对了也迟早与渠道侧漂移）。
+T.renderModelSearch("Kwai-Kolors/Kolors");
+msHtml = document.getElementById("modelSearchList").innerHTML;
+check("生图模型行显示 🎨", (msHtml.match(/class="ms-row"/g) || []).length === 1 && msHtml.includes("🎨"), msHtml.slice(0, 200));
+check("生图模型不被标成识图（能出图 ≠ 能看图）", !msHtml.includes("👁"), msHtml.slice(0, 200));
+T.renderModelSearch("qwen3.8-flash");
+msHtml = document.getElementById("modelSearchList").innerHTML;
+check("对话模型行不显示 🎨", !msHtml.includes("🎨"), msHtml.slice(0, 200));
 
 // ---- 场景 3：运行统计（/api/stats 载荷 → 各区块渲染） ----
 // 载荷形状 = internal/stats 引擎 Snapshot 的 JSON（与 sidecar /capi/stats 对齐）
@@ -927,6 +1398,313 @@ const regexOk = (re) => re.test(raw);
   check("手工兜底仍在（整段 Cookie 也能粘）", html.includes('id="comateSidInput"') && html.includes('id="btnComateToggleManual"'));
 }
 
+// ---- 场景 1.96：ModelScope 两区接入面板（票 04）----
+// 两个新内建渠道同时落在面板**六处真源**上，每处漏改都是静默降级：
+//   - CH_LABEL 少一键 → 汇总条/按钮显示裸渠道名，且与后端 ChannelDisplayOrder 排出两个顺序；
+//   - CH_CLASS 少一键 → chColor() 回退 --ch-custom，图上两区同色且与徽章对不上；
+//   - 按钮 DOM 序错 → R142「显示名字节序」规则被破坏（面板/汇总条/费率 tab 互相打脸）；
+//   - NO_CREDITS_BUILTIN 漏 → 积分列显示 0，被读成「额度用光」（实际是「没有积分概念」）；
+//   - VIRTUAL_ACCOUNTS 多 → 真账号被当匿名通道默认收起并丢失删除/停用入口（R130/R131）；
+//   - 弹层出现「浏览器自动登录」按钮 → 该渠道根本没有 CDP/扫码/cookie 换 token 的路（D4）。
+{
+  const html96 = readFileSync(new URL("../cmd/wild-work/web/index.html", import.meta.url), "utf8");
+  const css96 = readFileSync(new URL("../cmd/wild-work/web/style.css", import.meta.url), "utf8");
+  const label96 = new Function("return (" + (raw.match(/const CH_LABEL = (\{[^}]*\});/) || [])[1] + ")")();
+  const class96 = new Function("return (" + (raw.match(/const CH_CLASS = (\{[^}]*\});/) || [])[1] + ")")();
+
+  // ① 显示名两键（Go 侧 DisplayNames 逐字一致由配色组的跨语言断言兜底）
+  check("ModelScope / ModelScopeAI 显示名逐字正确（排序键就是它，改字会改顺序）",
+    label96.modelscope === "ModelScope" && label96.modelscopeai === "ModelScopeAI",
+    `modelscope=${label96.modelscope} modelscopeai=${label96.modelscopeai}`);
+
+  // ② 短类名两键（缺 → chColor 回退 #6366f1，折线图与徽章撞色）
+  check("两区短类名进 CH_CLASS（缺则图色回退 --ch-custom）",
+    class96.modelscope === "modelscope" && class96.modelscopeai === "modelscopeai",
+    `modelscope=${class96.modelscope} modelscopeai=${class96.modelscopeai}`);
+
+  // ③ 按钮 DOM 序 = 显示名字节序（ModelScope 在 MiniMax 之后、MonkeyCode 之前；AI 紧随其后）
+  {
+    const btns96 = [...html96.matchAll(/<button class="btn primary alt (\S+)" id="(btnAdd\w+)"/g)].map((m) => m[2]);
+    const idx = (id) => btns96.indexOf(id);
+    check("两区按钮存在（＋ ModelScope / ＋ ModelScopeAI）",
+      idx("btnAddModelScope") >= 0 && idx("btnAddModelScopeAI") >= 0, btns96.join(","));
+    check("按钮 DOM 序符合字节序：MiniMax < ModelScope < ModelScopeAI < MonkeyCode（R142）",
+      idx("btnAddMiniMax") < idx("btnAddModelScope")
+      && idx("btnAddModelScope") + 1 === idx("btnAddModelScopeAI")
+      && idx("btnAddModelScopeAI") < idx("btnAddMonkeyCode"),
+      `MiniMax=${idx("btnAddMiniMax")} ModelScope=${idx("btnAddModelScope")} ModelScopeAI=${idx("btnAddModelScopeAI")} MonkeyCode=${idx("btnAddMonkeyCode")}`);
+  }
+
+  // ④⑤ 配色三处同补：:root 变量 + .badge 规则 + .btn 规则，且一律 var(--ch-*)
+  check("两套 --ch-* 存在于 :root（6 位 hex）",
+    /--ch-modelscope:\s*#[0-9a-fA-F]{6}/.test(css96) && /--ch-modelscopeai:\s*#[0-9a-fA-F]{6}/.test(css96));
+  {
+    const rules = ["badge", "btn"]; // .badge.x 与 .btn.primary.alt.x
+    const missing = [];
+    for (const c of ["modelscope", "modelscopeai"]) {
+      for (const r of rules) {
+        const sel = r === "badge" ? `\\.badge\\.${c}` : `\\.btn\\.primary\\.alt\\.${c}`;
+        const prop = r === "badge" ? "background" : "background";
+        if (!new RegExp(`${sel}\\s*\\{[^}]*${prop}:\\s*var\\(--ch-${c}\\)`).test(css96)) missing.push(`${r}.${c}`);
+      }
+    }
+    check("两区徽章与按钮规则都在、都走 var(--ch-*)（不写死 hex）", missing.length === 0, missing.join(", "));
+  }
+  check("两区相关规则体内没有写死 hex（白字除外）",
+    !/\.(?:badge|btn\.primary\.alt)\.(?:modelscope|modelscopeai)\b[^{]*\{[^}]*#(?!fff)[0-9a-fA-F]{3,6}/.test(css96));
+
+  // ⑥ 魔粒 ≠ 无积分（2026-11-16 反转 D5）：两区已有真实魔粒余额端点 ⇒ 移出「不适用」集合。
+  check("NO_CREDITS_BUILTIN 不含两区（有真实魔粒余额端点，显示真实数字）",
+    !/const NO_CREDITS_BUILTIN = new Set\(\[[^\]]*"modelscope"/.test(raw));
+  check("VIRTUAL_ACCOUNTS 不含两区（真多 token 池：可删/可停/可改名，默认可见）",
+    !/const VIRTUAL_ACCOUNTS = new Set\(\[[^\]]*"modelscope/.test(raw));
+
+  // ⑦⑧ 真实渲染：真实魔粒数字 + 冻结进「不可用」+ 默认不收起 + 可删可停 + 刷新积分入口
+  T.__pushAccount({
+    uid: "mst-0000000000000001", group: "modelscope", nickname: "ModelScope 0001",
+    credits: 350, expiring_credits: 0, unusable_credits: 50, credits_na: false,
+    credits_term: "魔粒",
+    cooling: false, until: "", reason: "", disabled: false, last_checkin_at: "", last_checkin_ok: false,
+  });
+  T.renderAccounts();
+  {
+    const seg = document.getElementById("acctList").innerHTML
+      .split('<div class="acct-card').find((s) => s.includes("ModelScope 0001")) || "";
+    const head = seg.slice(0, seg.indexOf(">"));
+    check("ModelScope 账号积分列显示真实魔粒而非「不适用」",
+      seg !== "" && /credit-num">350</.test(seg) && seg.includes("可用魔粒") && !seg.includes("不适用"), seg.slice(0, 240));
+    check("冻结魔粒进「不可用」角标（不并入可用数字）",
+      /credit-unusable"> \(不可用50\)</.test(seg), seg.slice(0, 240));
+    check("ModelScope 账号默认不收起（data-na=0 且无 hidden）",
+      seg !== "" && !head.includes("hidden") && head.includes('data-na="0"'), head.slice(0, 160));
+    check("ModelScope 账号可删可停（不是固定账号）",
+      /onclick="removeAcct\('mst-/.test(seg) && /onclick="toggleDisable\('mst-/.test(seg));
+    check("ModelScope 账号恢复「刷新积分」入口（余额可刷）", seg.includes("refreshOne('mst-"));
+
+    // ⑨ 汇总条 chip 恢复：带真实数字与渠道术语「魔粒」（不再是「不适用」）。
+    T.renderSummary();
+    const sum96 = document.getElementById("creditSummary").innerHTML;
+    const chip96 = sum96.split('<span class="cs-chip').find((s) => s.includes('data-wg="modelscope"')) || "";
+    check("汇总条恢复 modelscope 渠道 chip", chip96 !== "", sum96.slice(0, 300));
+    check("汇总条 chip 带真实数字与「魔粒」术语",
+      /cs-num">350</.test(chip96) && /cs-term"[^>]*>魔粒</.test(chip96) && !chip96.includes("不适用"), chip96.slice(0, 260));
+  }
+  T.__popAccount();
+  T.renderAccounts();
+  T.renderSummary();
+
+  // ⑩⑪ 弹层：只有 token 一个输入；没有任何自动登录/扫码动作
+  {
+    const start96 = html96.indexOf('<div class="overlay hidden" id="msOverlay">');
+    const end96 = html96.indexOf("<!-- 确认弹层 -->");
+    const modal96 = start96 >= 0 && end96 > start96 ? html96.slice(start96, end96) : "";
+    check("存在 ModelScope 粘贴弹层（id=msOverlay）", modal96 !== "");
+    const inputs96 = [...modal96.matchAll(/<input\b/g)].length;
+    check("弹层只含一个输入框且是 token（type 非 hidden，id=msTokenInput）",
+      inputs96 === 1 && /<input id="msTokenInput"[^>]*class="input grow"/.test(modal96)
+      && !/id="msTokenInput"[^>]*type="hidden"/.test(modal96), `输入框数=${inputs96}`);
+    const btnIds96 = [...modal96.matchAll(/<button[^>]*id="(btn\w+)"/g)].map((m) => m[1]);
+    check("弹层按钮只有「验证并添加」与「关闭」（无自动登录/扫码入口）",
+      btnIds96.length === 2 && btnIds96.includes("btnMsSubmit") && btnIds96.includes("btnMsCancel"),
+      btnIds96.join(","));
+    check("弹层不出现自动登录/扫码按钮或文案（D4：本渠道无 CDP、无扫码、无 cookie 换 token）",
+      !/浏览器登录|扫码|自动登录/.test(modal96), "弹层里只应有粘贴说明");
+    // 前置条件三连必须在文案里（用户「不翻文档就知道为什么调不通」）
+    check("弹层文案含「阿里云」「实名」「区域」自查项",
+      modal96.includes("阿里云") && /实名/.test(modal96) && /区域/.test(modal96), "缺前置条件说明");
+    check("弹层点明两区 token 不通用 + 区域必须一致",
+      /不通用/.test(modal96) && /一致/.test(modal96), "缺区域一致性提示");
+  }
+
+  // ⑫ 提交端点按 kind 分派；关闭即清空（凭据不得留在 DOM）
+  check("提交按渠道分派两个端点（modelscope_token / modelscopeai_token）",
+    raw.includes('"/api/login/modelscopeai_token"') && raw.includes('"/api/login/modelscope_token"'));
+  check("关闭即清空 token 输入（closeMsDialog 里 value = \"\"）",
+    /function closeMsDialog\(\)[\s\S]{0,200}\$\("msTokenInput"\)\.value = ""/.test(raw));
+  check("粘贴型渠道纳入重登入口（⟳ 不落到 unknown login provider）",
+    /const RELOGIN_CHANNELS = new Set\(\[[^\]]*"modelscope"[^\]]*"modelscopeai"/.test(raw)
+    && /if \(isModelScopeCh\(channel\)\) return promptLogin\(channel\);/.test(raw));
+
+  // ⑬ 两区现在**有**签到（票 04：领取动作 = 幂等 `login/info`）：必须移出「无签到」名单，
+  //    卡片显示后端如实文案（含金额 / 三态），且「上游还没有发放」不得渲染成红色失败（R150）。
+  check("两区已移出无签到名单（它们现在有每日魔粒领取）",
+    !/const NO_EXPLICIT_CHECKIN = new Set\(\[[^\]]*"modelscope"/.test(raw)
+    && !/modelscope: "无签到"/.test(raw) && !/modelscopeai: "无签到"/.test(raw));
+  {
+    T.__pushAccount({
+      uid: "mst-0000000000000002", group: "modelscope", nickname: "领到魔粒的号",
+      credits: 550, expiring_credits: 0, unusable_credits: 0, credits_na: false,
+      credits_term: "魔粒", cooling: false, until: "", reason: "", disabled: false,
+      last_checkin_at: "2026-11-16 09:00", last_checkin_ok: true, last_checkin_msg: "领到 200 魔粒",
+    });
+    T.renderAccounts();
+    const cardOk96 = document.getElementById("acctList").innerHTML
+      .split('<div class="acct-card').find((s) => s.includes("领到魔粒的号")) || "";
+    check("两区签到成功显示后端如实文案（含金额）",
+      /tag ok"[^>]*>领到 200 魔粒</.test(cardOk96), cardOk96.slice(0, 320));
+    T.__popAccount();
+    // no_campaign：上游还没发放 ⇒ 中性文案，绝不是红「签到失败」（R150）。
+    T.__pushAccount({
+      uid: "mst-0000000000000003", group: "modelscope", nickname: "还没发放的号",
+      credits: 0, expiring_credits: 0, unusable_credits: 0, credits_na: false,
+      credits_term: "魔粒", cooling: false, until: "", reason: "", disabled: false,
+      last_checkin_at: "2026-11-16 09:00", last_checkin_ok: false,
+      last_checkin_msg: "上游还没有发放（今日暂无魔粒活动）",
+    });
+    T.renderAccounts();
+    const cardPending96 = document.getElementById("acctList").innerHTML
+      .split('<div class="acct-card').find((s) => s.includes("还没发放的号")) || "";
+    check("两区 no_campaign 显示中性「上游还没有发放」而非红「签到失败」",
+      cardPending96.includes("上游还没有发放") && !/tag bad"[^>]*>签到失败</.test(cardPending96),
+      cardPending96.slice(0, 320));
+    T.__popAccount();
+    T.renderAccounts();
+  }
+  // 晋级：手动签到的「可重试」提示不得对没有窗口重试的渠道承诺 10:00–12:00。
+  check("重试提示按渠道区分（只有 Qoder 双区有 10:00–12:00 窗口）",
+    /acc\.group === "qodercn" \|\| acc\.group === "qodercom"/.test(raw)
+    && /将在下一个签到时段重试/.test(raw));
+
+  // ⑭ 渠道级术语「魔粒」必须来自后端单一来源，且**不得**发明计量单位（D6）。
+  check("魔粒术语由后端 credits_term 下发（前端不维护渠道名单）",
+    /credits_term/.test(raw) && /const creditTermOf = \(a\) => \(a && a\.credits_term\)/.test(raw));
+  check("未给两区发明计量单位（Go creditsUnit 不涉 modelscope、前端无次数单位函数）",
+    !/creditsUnit/.test(raw) && !/modelscope/i.test(
+      (readFileSync(new URL("../internal/app/app.go", import.meta.url), "utf8")
+        .match(/func \(a \*App\) creditsUnit\(group string\) string \{[\s\S]{0,200}?\n\}/) || [""])[0]));
+}
+
+// ---- 场景 1.98：ChatGPT Web 渠道接入面板（票 05）----
+// 本场景锁的是一条**跨层**约束：面板能看得到这个渠道，且它只能靠「粘两段凭据」进来。
+//   - 显示名/短类名/配色/按钮摆位四处真源，漏一处就静默降级（R99/R142）；
+//   - 配色必须与 `docs/渠道配色规范.md` 逐值一致（改一处即红，R99 文档化）；
+//   - `NO_CREDITS_BUILTIN` 必须有它（无额度端点 ⇒ 「不适用」），
+//     但 `VIRTUAL_ACCOUNTS` **绝不能**有它（R131：用户亲手粘凭据的账号不得默认收起）；
+//   - 粘的是**两段**（Cookie 族 + Authorization），只贴一段 = 「看着成功、每次 403」的账号。
+{
+  const html98 = readFileSync(new URL("../cmd/wild-work/web/index.html", import.meta.url), "utf8");
+  const css98 = readFileSync(new URL("../cmd/wild-work/web/style.css", import.meta.url), "utf8");
+  const go98 = readFileSync(new URL("../internal/provider/provider.go", import.meta.url), "utf8");
+  const doc98 = readFileSync(new URL("../docs/渠道配色规范.md", import.meta.url), "utf8");
+  const label98 = new Function("return (" + (raw.match(/const CH_LABEL = (\{[^}]*\});/) || [])[1] + ")")();
+  const class98 = new Function("return (" + (raw.match(/const CH_CLASS = (\{[^}]*\});/) || [])[1] + ")")();
+
+  // ① 显示名与后端逐字一致（排序键就是它：改字会改变 R142 的按钮/汇总条顺序）
+  check("ChatGPT Web 显示名与后端 provider.DisplayNames 逐字一致",
+    label98.chatgpt === "ChatGPT Web" && /ChatGPT:\s*"ChatGPT Web"/.test(go98),
+    `js=${label98.chatgpt}`);
+  check("短类名进 CH_CLASS（缺则 chColor 回退 #6366f1，折线图与徽章撞色）",
+    class98.chatgpt === "chatgpt", `class=${class98.chatgpt}`);
+
+  // ② 配色三处同补，且一律 var(--ch-*)（不写死 hex）
+  {
+    const cssVal = (css98.match(/--ch-chatgpt:\s*(#[0-9a-fA-F]{6})/) || [])[1] || "";
+    const docVal = (doc98.match(/\|\s*27\s*\|\s*`chatgpt`[^\n]*?(#[0-9a-fA-F]{6})/) || [])[1] || "";
+    check(":root 有 --ch-chatgpt（6 位 hex）", cssVal !== "", cssVal);
+    check("配色规范文档的 chatgpt 行色值与 :root 逐值一致（改色必须同步文档）",
+      cssVal !== "" && docVal === cssVal, `css=${cssVal} doc=${docVal}`);
+    const badge98 = /\.badge\.chatgpt\s*\{[^}]*background:\s*var\(--ch-chatgpt\)/.test(css98);
+    const btn98 = /\.btn\.primary\.alt\.chatgpt\s*\{[^}]*background:\s*var\(--ch-chatgpt\)/.test(css98);
+    check("徽章与按钮规则都在且走 var(--ch-chatgpt)（不写死 hex）", badge98 && btn98,
+      `badge=${badge98} btn=${btn98}`);
+    check("该渠道规则体内没有写死 hex（白字除外）",
+      !/\.(?:badge|btn\.primary\.alt)\.chatgpt\b[^{]*\{[^}]*#(?!fff)[0-9a-fA-F]{3,6}/.test(css98));
+  }
+
+  // ③ 积分口径：在「不适用」集合，但**不在**虚拟账号集合（R131）
+  check("chatgpt 在 NO_CREDITS_BUILTIN（无额度端点 ⇒ 显示「不适用」而非 0）",
+    /const NO_CREDITS_BUILTIN = new Set\(\[[^\]]*"chatgpt"/.test(raw));
+  check("chatgpt **不在** VIRTUAL_ACCOUNTS（真凭据多账号池：可删/可停/可改名、默认可见）",
+    !/const VIRTUAL_ACCOUNTS = new Set\(\[[^\]]*"chatgpt/.test(raw));
+
+  // ④ 按钮摆位 = 显示名字节序（`ChatGPT Web` < `Cline`），且按钮带 alt 修饰类
+  {
+    const btns98 = [...html98.matchAll(/<button class="btn primary alt (\S+)" id="(btnAdd\w+)"/g)];
+    const idx = (id) => btns98.findIndex((m) => m[2] === id);
+    check("按钮存在且 DOM 序符合字节序：ChatGPT Web < Cline（R142）",
+      idx("btnAddChatGPT") >= 0 && idx("btnAddChatGPT") + 1 === idx("btnAddCline"),
+      btns98.map((m) => m[2]).slice(0, 4).join(","));
+    check("按钮带 alt chatgpt 修饰类（裸 btn primary 会落到 --primary 静默错色）",
+      btns98.some((m) => m[1] === "chatgpt" && m[2] === "btnAddChatGPT"));
+  }
+
+  // ⑤ 粘贴弹层：**两个**输入（Cookie + Authorization），无自动登录/扫码入口
+  {
+    const start98 = html98.indexOf('<div class="overlay hidden" id="chatgptOverlay">');
+    const end98 = html98.indexOf('<!-- 设置弹层');
+    const modal98 = start98 >= 0 && end98 > start98 ? html98.slice(start98, end98) : "";
+    check("存在 ChatGPT 粘贴弹层（id=chatgptOverlay）", modal98 !== "");
+    const inputs98 = [...modal98.matchAll(/<input\b[^>]*id="(\w+)"/g)].map((m) => m[1]);
+    check("弹层三个输入框：Cookie 头 + Authorization 头 + ww3 数据目录（票 08 导入入口）",
+      inputs98.length === 3 && inputs98.includes("cgptCookieInput") && inputs98.includes("cgptAuthInput")
+      && inputs98.includes("cgptImportDir"),
+      inputs98.join(","));
+    check("粘贴两格都不是 hidden（用户得看得见自己在粘什么）",
+      !/id="cgpt(?:Cookie|Auth)Input"[^>]*type="hidden"/.test(modal98));
+    const btnIds98 = [...modal98.matchAll(/<button[^>]*id="(btn\w+)"/g)].map((m) => m[1]);
+    check("弹层按钮：验证并添加 / 从客户端导入 / 关闭（无自动登录、无扫码）",
+      btnIds98.length === 3 && btnIds98.includes("btnCgptSubmit") && btnIds98.includes("btnCgptImport")
+      && btnIds98.includes("btnCgptCancel"),
+      btnIds98.join(","));
+    check("弹层不出现浏览器登录/扫码入口（CDP 只能拉起网关机浏览器，R104）",
+      !/浏览器登录|扫码|自动登录/.test(modal98));
+    check("弹层点明「两段都必须粘、来自同一次登录」与「必须配代理」",
+      /两段都必须粘/.test(modal98) && /HTTPS_PROXY/.test(modal98));
+  }
+
+  // ⑥ 提交与清空：成功先清空两格再关弹层；失败留在弹层里给原因
+  check("提交走 POST /api/login/chatgpt_auth 并同时带 cookie 与 authorization",
+    /api\("\/api\/login\/chatgpt_auth", \{ cookie, authorization \}\)/.test(raw));
+  check("成功后两个输入框都清空（凭据不得留在 DOM）",
+    /function submitChatGPTAuth\([\s\S]{0,1400}\$\("cgptCookieInput"\)\.value = ""[\s\S]{0,200}\$\("cgptAuthInput"\)\.value = ""/.test(raw)
+    && /function closeChatGPTPasteDialog\(\)[\s\S]{0,240}\$\("cgptCookieInput"\)\.value = ""/.test(raw));
+  check("失败不关弹层（错误留在 cgptErr，用户只需改其中一段）",
+    /catch \(e\)[\s\S]{0,160}\$\("cgptErr"\)\.textContent = e\.message/.test(raw));
+
+  // ⑦ ww3 客户端目录导入（票 08）：入口就在同一个弹层，回包逐文件展示
+  check("导入按钮走 POST /api/account/import_local 并同时带 channel 与 dir",
+    /api\("\/api\/account\/import_local", \{ channel: "chatgpt", dir \}\)/.test(raw));
+  check("逐文件展示结果（file / uid / status / reason 四项都在）",
+    /items\.map\(\(it\) =>[\s\S]{0,400}it\.file[\s\S]{0,200}it\.uid[\s\S]{0,200}it\.status[\s\S]{0,200}it\.reason/.test(raw));
+  check("路径层错误留在弹层里（cgptErr）而不是被吞成「导入 0 个」",
+    /function importChatGPTFromDir\([\s\S]{0,2000}catch \(e\)[\s\S]{0,200}\$\("cgptErr"\)\.textContent = e\.message/.test(raw));
+  check("导入按钮已绑定（不是死按钮）", /\$\("btnCgptImport"\)\.onclick = importChatGPTFromDir;/.test(raw));
+  check("粘贴型渠道纳入重登入口（⟳ 不落到 unknown login provider）",
+    /const RELOGIN_CHANNELS = new Set\(\[[^\]]*"chatgpt"/.test(raw)
+    && /if \(channel === "chatgpt"\) return promptLogin\(channel\);/.test(raw));
+  check("添加按钮打开的是粘贴弹层（不请求 /api/login/start）",
+    /function promptLogin[\s\S]{0,4000}channel === "chatgpt"[\s\S]{0,120}openChatGPTPasteDialog\(\)/.test(raw));
+
+  // ⑦ 真渲染：不适用积分进「不适用」列，但账号卡片**默认可见**、可删可停（R131）
+  T.__pushAccount({
+    uid: "user-abcdef123456", group: "chatgpt", nickname: "ChatGPT Web 123456",
+    credits: 0, expiring_credits: 0, unusable_credits: 0, credits_na: true,
+    cooling: false, until: "", reason: "", disabled: false,
+    last_checkin_at: "", last_checkin_ok: false,
+  });
+  T.renderAccounts();
+  {
+    const seg98 = document.getElementById("acctList").innerHTML
+      .split('<div class="acct-card').find((s) => s.includes("ChatGPT Web 123456")) || "";
+    const head98 = seg98.slice(0, seg98.indexOf(">"));
+    check("chatgpt 账号卡片可见（不因 credits_na 被默认收起）",
+      seg98 !== "" && !head98.includes("hidden") && head98.includes('data-na="0"'), head98.slice(0, 160));
+    check("chatgpt 积分列显示「不适用」而不是 0", seg98.includes("不适用"), seg98.slice(0, 240));
+    check("chatgpt 账号可删可停（不是虚拟账号）",
+      /onclick="removeAcct\('user-/.test(seg98) && /onclick="toggleDisable\('user-/.test(seg98));
+    check("chatgpt 不出「刷新积分」入口（无额度端点，刷了也不会有数字）",
+      !seg98.includes("refreshOne("));
+
+    T.renderSummary();
+    const sum98 = document.getElementById("creditSummary").innerHTML;
+    check("汇总条出现 chatgpt 渠道 chip（用户添加的无积分渠道 chip 常驻）",
+      /data-wg="chatgpt"/.test(sum98), sum98.slice(0, 240));
+  }
+  T.__popAccount();
+  T.renderAccounts();
+  T.renderSummary();
+}
+
 // ---- 输出 ----
 let failed = 0;
 for (const [name, pass, extra] of results) {
@@ -940,6 +1718,7 @@ for (const [name, pass, extra] of results) {
 // 一旦有人"修好"死的那版，面板数字会静默变化。
 const uniq = [
   ["function renderSummary", /^\s*function renderSummary\s*\(/gm],
+  ["function channelSummaries", /^\s*function channelSummaries\s*\(/gm],
   ["const CH_ORDER", /^\s*const CH_ORDER\s*=/gm],
   ["const CH_SUMMARY_ORDER", /^\s*const CH_SUMMARY_ORDER\s*=/gm],
   ["function renderAccounts", /^\s*function renderAccounts\s*\(/gm],
@@ -1113,7 +1892,19 @@ for (const [label, re] of uniq) {
     [".credit-tip 不再重复定义（原两块，后者静默覆盖前者）", (css.match(/^\.credit-tip \{/gm) || []).length === 1],
     ["浮窗宽度自适应视口（手机不再溢出）", /width: min\(420px, calc\(100vw - 24px\)\)/.test(css)],
     // 响应式：断点是按实测溢出阈值卡位的，调宽会破坏桌面端逐像素一致性，调窄则手机仍溢出。
-    ["渠道按钮基础为 6 列（消除孤行，按钮数变动时按行自然流）", css.includes("repeat(6, auto)")],
+    ["渠道按钮基础为 6 列等宽（消除孤行，按钮数变动时按行自然流）",
+      /\.pa-right \{[^}]*grid-template-columns: repeat\(6, minmax\(0, 1fr\)\);/.test(css)],
+    // 顶部按钮区占满行宽（票 05）：早期是「弹性空白 + 右组 grid 靠右」，把同排的
+    // 「刷新积分/全部签到/视图切换」搬去 .fn-bar 后左侧留下一条死的空白（owner 报障）。
+    // 现由网格自身 flex:1 吃掉行宽 —— 这两条是它的正向锁（占满 + 无空档）。
+    ["渠道网格弹性占满行宽（.pa-right 自带 flex:1 撑满 wrap，wrap 仍是 flex 容器）",
+      /\.pa-right \{[^}]*flex: 1;[^}]*min-width: 0;[^}]*grid-template-columns: repeat\(6, minmax\(0, 1fr\)\)/.test(css) &&
+      /\.panel-actions-wrap \{ display: flex;/.test(css)],
+    // 反向护栏：死的弹性空档元素与它的 CSS 规则都不得回来（注释里的历史提及不算，
+    // 与本文件「hover 关闭函数已删除（防回退；注释提及不算）」同款口径）。
+    // 注：.fn-bar 的 .fn-spacer 是另一处弹性空档（把视图切换推向右端），职责不同，不得误伤。
+    ["顶部按钮区不再有死的弹性空档元素（DOM 无 class=\"pa-spacer\"、CSS 无 .pa-spacer 规则）",
+      !/<div class="pa-spacer/.test(html) && !/\.pa-spacer\s*\{/.test(css) && /class="fn-spacer"/.test(html)],
     ["渠道按钮摆位全归 CSS（index.html 不再内联 grid-column，否则窄屏无法重排）", !/btnAdd\w+" style="grid-column/.test(html)],
     // R142（2026-10-30 用户拍板）：渠道展示序唯一规则 = 内建渠道按**显示名的 UTF-8 字节序**升序，
     // 自定义渠道 / 自定义模型**硬编码钉在最末**。三处（面板按钮 / 汇总条 / 后端费率 tab）
@@ -1188,6 +1979,12 @@ for (const [label, re] of uniq) {
     // 否则用户在渠道全灭时看到 503 会以为降级链没配好。
     ["降级链 hint 写明两种触发形态（模型全冷 / 整渠道全灭）",
       /无账号可承载[\s\S]{0,120}整渠道/.test(html)],
+    // 工单 02：「主力也可作他链备胎」是面板真实行为，帮助文案必须正面说明；
+    // 旧文案只提「主力唯一」容易让人以为主力与备胎互斥（自环才是唯一禁止项）。
+    ["降级链 ? 说明写明重叠合法（主力可作他链备胎，同规则自环除外）",
+      html.includes("同一模型可既是某规则主力、又作为其他规则的备胎；同规则自环除外")],
+    ["降级链 ? 说明不暗示「主力不能作备胎」",
+      !/主力[^。<]{0,24}(不能|不得|不可|禁止)[^。<]{0,12}备胎/.test(html)],
     ["降级记录区块标题不再写死「主模型全冷」", !html.includes("主模型全冷切备胎")],
   ];
   for (const [label, pass] of need) {
@@ -1252,6 +2049,41 @@ for (const [label, re] of uniq) {
     console.log(`  ${pass ? "✅" : "❌"} ${label}`);
     if (!pass) failed++;
   }
+}
+
+// ---- 备胎重叠合法（工单 01）：同一模型可既是某规则主力、又作其他规则的备胎 ----
+// 为什么必须是**行为**断言：旧实现把「全部主力集合」用于清洗与候选排除，于是「重叠」
+// 既选不出来也留不住，而这类静默剔除只表现为「配了又被删掉」——不报错、不崩溃。
+// 只有把「主力汇总」（fbFromSet）与「清洗」（fbSanitize）直接喂进沙箱才能锁死。
+// 边界：只禁「备胎 = 本规则自己的主力」（自环）。
+{
+  const need = [
+    ["其他规则的主力在清洗后被保留（重叠合法）", (() => {
+      T.__setFbRules([
+        { from: "workbuddyai/deepseek-v4.1-flash", to: ["workbuddy/glm-5.2"] },
+        { from: "workbuddy/glm-5.2", to: ["oczen/big-pickle"] },
+      ]);
+      const dropped = T.fbSanitize();
+      const rs = T.__getFbRules();
+      // 主力汇总仍如实包含两条主力（它现在**只**给「主力唯一」的候选隐藏用，不得再进备胎链）
+      return dropped === 0 && T.fbFromSet()["workbuddy/glm-5.2"] === true
+        && rs[0].to.length === 1 && rs[0].to[0] === "workbuddy/glm-5.2"
+        && rs[1].to.length === 1 && rs[1].to[0] === "oczen/big-pickle";
+    })()],
+    ["同规则自环在清洗后被剔除（其他备胎不受影响）", (() => {
+      T.__setFbRules([
+        { from: "workbuddy/glm-5.2", to: ["workbuddy/glm-5.2", "workbuddyai/deepseek-v4.1-flash"] },
+      ]);
+      const dropped = T.fbSanitize();
+      const rs = T.__getFbRules();
+      return dropped === 1 && rs[0].to.length === 1 && rs[0].to[0] === "workbuddyai/deepseek-v4.1-flash";
+    })()],
+  ];
+  for (const [label, pass] of need) {
+    console.log(`  ${pass ? "✅" : "❌"} ${label}`);
+    if (!pass) failed++;
+  }
+  T.__setFbRules([]); // 复位，避免污染后续场景的编辑态
 }
 
 // ---- 思考强度注入（issue #96）：设置弹层接线与三态语义文案 ----

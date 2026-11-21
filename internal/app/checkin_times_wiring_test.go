@@ -93,7 +93,7 @@ func TestMainGoFollowGlobalCheckinWiring(t *testing.T) {
 		t.Fatalf("跟随/不跟随两侧必须都有渠道（followers=%d skipped=%d）", followers, skipped)
 	}
 	// 点名守住最容易踩的几个：无签到任务的渠道绝不跟随，Qoder 双区绝不跟随。
-	for _, name := range []string{"qwenwork", "cline", "comate", "oczen", "kilo", "zcode", "gemini", "qodercn", "qodercom"} {
+	for _, name := range []string{"qwenwork", "cline", "comate", "chatgpt", "oczen", "kilo", "zcode", "gemini", "qodercn", "qodercom"} {
 		for _, b := range blocks {
 			if !strings.Contains(b, `Name: "`+name+`"`) {
 				continue
@@ -104,7 +104,7 @@ func TestMainGoFollowGlobalCheckinWiring(t *testing.T) {
 		}
 	}
 	// 有签到活动的渠道必须跟随（漏了就静默失效）。
-	for _, name := range []string{"workbuddy", "traework", "monkeycode", "raccoon", "loomy", "lingxi", "codearts", "glm"} {
+	for _, name := range []string{"workbuddy", "traework", "monkeycode", "raccoon", "loomy", "lingxi", "codearts", "glm", "modelscope", "modelscopeai"} {
 		found := false
 		for _, b := range blocks {
 			if !strings.Contains(b, `Name: "`+name+`"`) {

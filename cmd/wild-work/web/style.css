@@ -40,6 +40,12 @@
   --ch-zcode: #581c87;       /* ZCode 极客深紫檀 */
   --ch-gemini: #88117c;      /* Gemini 官方星云品紫 */
   --ch-codearts: #991b1b;    /* CodeArts 华为云深绯红 */
+  /* ModelScope 两区（D18）：国内站 柔蓝、国际站 暗岿金。
+     ⚠️ 国际站原案 #b45309 与既有 loomy 完全同色（ΔE 0），R99 「无完全同色」硬约束通不过，
+     改取同色相更暗的 #854d0e（白字对比 6.85，与最近邻 loomy ΔE 11.1）。 */
+  --ch-modelscope: #0369a1;  /* ModelScope 魔搭国内站 柔蓝（白字对比 5.93，与 traecode ΔE 10.4） */
+  --ch-modelscopeai: #854d0e; /* ModelScopeAI 魔搭国际站 暗岿金（与 loomy 同色相但更暗，避免撞色） */
+  --ch-chatgpt: #486262;     /* ChatGPT Web 石墨青（网页逆向通道；白字对比 6.56，最小 ΔE2000 12.2，不新增弱邻对） */
   --ch-doubao: #7c2742;      /* 豆包 酒红/勃艮第（ByteDance Doubao；新增色，实测最近邻 Gemini ΔE2000=15.7，避开 loomy/minimax 暖橙与 lingxi/qodercom 紫） */
 }
 
@@ -92,15 +98,17 @@ body {
 .panel-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; flex-wrap: wrap; gap: 8px; }
 .panel-head h2 { font-size: 16px; font-weight: 600; }
 
-/* 账号管理按钮区：外层 wrap 分三段 —— 左组(刷新/签到) + 弹性空白 + 右组(渠道三列 grid)。
-   左组整体靠左、右组整体靠右，中间空白自动伸缩；左组窄时 wrap 换行不溢出。 */
+/* 账号管理按钮区：渠道添加网格**占满整行宽度**（六列等宽，按钮在格内拉伸）。
+   早期写法是「弹性空白（.pa-spacer）+ 右组 grid」把按钮推到最右，移走同排的
+   「刷新积分 / 全部签到 / 视图切换」后左侧留下一条死的空白（owner 报障），已删除空档元素；
+   现在 wrap 只承载这一个网格，由网格自身的 flex:1 吃掉行宽，不再依赖「靠右」定位。
+   窄屏见下方 @media (max-width: 779px)：空档已不存在，只需换成 auto-fit 列。 */
 .panel-actions-wrap { display: flex; align-items: center; flex: 1; min-width: 0; }
-.pa-spacer { flex: 1; }
-.pa-left { display: flex; flex-direction: column; gap: 8px; }
-.pa-left .btn { white-space: nowrap; align-self: flex-start; }
 .pa-right {
   display: grid;
-  grid-template-columns: repeat(6, auto);
+  flex: 1;          /* 占满 wrap 行宽（唯一子项） */
+  min-width: 0;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
   gap: 8px 10px;
 }
 .pa-right .btn { justify-self: stretch; white-space: nowrap; }
@@ -111,6 +119,14 @@ body {
 /* 紧凑档：比标准按钮小两号（14px/8px14px → 12px/6px10px），
    PC 默认宽度下一行能放下 6 个渠道按钮（实测阈值见下方媒体查询注释）。 */
 .panel-actions-wrap .btn { font-size: 12px; padding: 6px 10px; }
+/* 过渡区（780–840px）：六列等宽把每格压到 ≤120px，最长的渠道标签（实测 ＋ WorkBuddyCN = 94px）
+   在 10px 内边距下会顶出格宽（780px 时可用宽仅 88px < 94px）而溢出。这里把内边距收紧到 6px
+   （省 8px ⇒ 780px 下可用 96px），实测 780–840 全档不换行、不溢出、不裁切。
+   断点取 840 而非实测阈值 814：给不同机器字体回退的字符宽度留 ~25px 余量；
+   840px 以上格宽 ≥120px，10px 内边距已安全，不再收紧。≤779px 走 auto-fit，不受此档影响。 */
+@media (min-width: 780px) and (max-width: 840px) {
+  .pa-right .btn { padding: 6px 6px; }
+}
 
 /* 按钮 */
 .btn { border: 1px solid var(--border); background: var(--card); color: var(--text); padding: 8px 14px; border-radius: 8px; cursor: pointer; font-size: 14px; transition: all .15s; }
@@ -147,8 +163,11 @@ body {
 .btn.primary.alt.codearts { background: var(--ch-codearts); border-color: var(--ch-codearts); }
 .btn.primary.alt.cline { background: var(--ch-cline); border-color: var(--ch-cline); }
 .btn.primary.alt.comate { background: var(--ch-comate); border-color: var(--ch-comate); }
+.btn.primary.alt.modelscope { background: var(--ch-modelscope); border-color: var(--ch-modelscope); }
+.btn.primary.alt.modelscopeai { background: var(--ch-modelscopeai); border-color: var(--ch-modelscopeai); }
 .btn.primary.alt.lingxi { background: var(--ch-lingxi); border-color: var(--ch-lingxi); }
 .btn.primary.alt.doubao { background: var(--ch-doubao); border-color: var(--ch-doubao); }
+.btn.primary.alt.chatgpt { background: var(--ch-chatgpt); border-color: var(--ch-chatgpt); }
 .btn.primary.alt.custom { background: var(--ch-custom); border-color: var(--ch-custom); }
 
 /* 智谱清言登录弹层步骤列表 */
@@ -183,6 +202,16 @@ body {
 }
 .map-editor .preset { display: inline-block; margin: 0 4px 4px 0; }
 
+/* 功能按钮条（账号页）：刷新积分 / 全部签到 / 卡片⇄列表 集中于此，
+   顶部操作行只留渠道添加按钮（避免「加账号」与「账号页级动作」混在一处）。
+   与汇总条同宽并排在它上方；窄屏随 flex-wrap 换行，不溢出。 */
+.fn-bar {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 8px;
+  margin-bottom: 10px; padding: 8px 10px;
+  background: var(--card); border: 1px solid var(--border); border-radius: var(--radius);
+}
+.fn-spacer { flex: 1; }
+
 /* 渠道积分汇总条（账号卡片上方，数据与卡片同源） */
 .credit-summary {
   display: flex; flex-wrap: wrap; gap: 8px 10px; align-items: center;
@@ -201,6 +230,8 @@ body {
 .cs-exp { color: var(--danger); font-weight: 600; font-size: 11px; }
 /* Token 计量渠道的量纲标签（与积分的「分」区分开，明示单位是 token） */
 .cs-tok { color: var(--primary); font-size: 11px; font-weight: 600; margin-left: 2px; }
+/* 渠道级显示术语（ModelScope 的「魔粒」）：只改文案，不进计量口径 */
+.cs-term { color: var(--primary); font-size: 11px; font-weight: 600; margin-left: 2px; }
 .cs-unu { color: var(--muted); font-size: 11px; }
 .cs-stale { color: var(--warn); font-size: 11px; }
 .cs-total { background: #eef4ff; border-color: #c7d9ff; }
@@ -220,6 +251,82 @@ body {
 .cs-chip.cs-na.on .cs-n { color: var(--primary); }
 /* 账号筛选后隐藏的卡片（applyAcctFilter 控制） */
 .acct-grid .acct-card.hidden { display: none; }
+
+/* ===== 列表视图（卡片的替代形态） =====
+   同一容器 #acctList 加 .list-mode 后由「两列卡片网格」退化为纵向块
+   （否则表格会被网格的两条轨道挤成半宽）。表体按渠道分段（每段一个 tbody），
+   **分组行已删除**（2026-11-16，R157 修订）：渠道合计只住汇总条，表内只有账号行。
+   表头唯一（thead 只在表顶部出现一次），列固定五列：平台 / 账号 / 积分 / 状态 / 操作。
+   窄屏由 .tbl-scroll 横向滚动展示全部列，**不**隐藏列也不降级回卡片。 */
+.acct-grid.list-mode { display: block; }
+.tbl-scroll { overflow-x: auto; }
+/* min-width：五列（平台/账号/积分/状态/操作）实测内容下限（票 04 重测 2026-11-16，
+   Chromium 156 / 57 行 × 23 渠道密集快照）：紧凑档 min-content = 606.3px，宽档 761.9px。
+   取 607px（= 紧凑档下限向上取整）：其余引擎的 min-content 算法有差异，写死下限
+   可保证一样的可读宽度，否则实际下限由内容决定、这个常量永不生效。
+   极窄视口（390px）由 .tbl-scroll 横滚 301px 展示全部五列，不裁列、不降级回卡片。 */
+.acct-table { width: 100%; border-collapse: collapse; font-size: 13px; min-width: 607px;
+  /* 积分列的「单位带」宽度（闸 2 实测：最宽单位「可用积分」11px 字号 ≈44px，留 4px 间隙）。
+     单位绝对定位在这一带内 ⇒ 不占列宽、不推移数字右缘；表头 .num 也用同一个变量对齐（见下）。 */
+  --acct-cred-unit: 48px; }
+/* 行高：闸 2 实测两行制积分格把行高拉到 45.9px（700px 视口只见 15 行）。
+   收紧上下内边距到 6px + 压两行制行高，密度更贴近表格习惯，不折行、不改结构。 */
+.acct-table th, .acct-table td { padding: 6px 10px; border-bottom: 1px solid var(--border); text-align: left; vertical-align: top; }
+/* 粘性表头（闸 2 实测结论 2026-11-14，Chromium 156 / 真实 21 账号 + 126 行密集快照）：**不实现**。
+   实测数据：文档滚动 300px 时 thead.getBoundingClientRect().top = -300（= 完全跟着滚走）。
+   原因是 .tbl-scroll 的 overflow-x:auto 让它成为最近的 scrollport，而它纵向根本不滚动
+   （scrollHeight == clientHeight）⇒ 对文档滚动不粘。加 position:sticky 后数字一模一样（仍 -300）。
+   两条能让它生效的路都被 spec 闸 2 否决：① 去掉 overflow 会失去「窄屏横滚不裁列」；
+   ② 给 .tbl-scroll 加 max-height 变成表内滚动区（改滚动上下文 = 新交互，只有它才能让 sticky 生效，
+   实测 stuck=true）。结论：维持不粘性，记在验收报告里，不靠「写了样式」冒充生效。 */
+.acct-table thead th { color: var(--muted); font-weight: 500; font-size: 12px; background: var(--card); white-space: nowrap; }
+.acct-table .num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+/* 列名「积分」与数字右缘对齐（闸 2 实测：默认两者差 46px，列名浮在单位上方而非数字上方）。
+   表头带上与数据格相同的单位带 + 自身 10px 内边距 ⇒ 差值为 0。 */
+.acct-table thead th.num { padding-right: calc(var(--acct-cred-unit) + 10px); }
+.acct-table tbody tr:last-child td { border-bottom: 0; }
+/* 平台列（只放渠道徽标一个元素）：徽标自带渠道名，故不再有重复显示名节点；
+   徽标不折行（渠道名长短不一，折行会把平台列的高度撑成账号列的两倍）。 */
+.acct-table .cell-platform { white-space: nowrap; }
+/* 账号列（昵称 + 第二行 UID）：长昵称折行而不撑破列宽（闸 2 实测 869px 阈值即按此）；
+   UID 跟着账号走（原先把徽章挤在同一格里，现在搬进独立列）。 */
+.acct-table .cell-acct { max-width: 220px; overflow-wrap: anywhere; }
+.acct-table .cell-acct .acct-name { font-weight: 600; font-size: 14px; }
+.acct-table .cell-acct .acct-name.editable { cursor: pointer; border-bottom: 1px dashed transparent; }
+.acct-table .cell-acct .acct-name.editable:hover { color: var(--primary); border-bottom-color: var(--primary); }
+.acct-table .cell-uid { font-size: 11px; color: var(--muted); }
+/* 积分格的排版在两视图下各自作用域（卡片走 .acct-card .acct-credits，既有规则勿动）：
+   同样的分层——数字 / 单位小字 / 临期红 / 不可用灰 / 待刷新脉动。
+   （.credit-na 是全局规则，两视图共用，不再重写。） */
+.acct-table .cell-credits { font-size: 14px; font-weight: 700; white-space: nowrap; line-height: 1.3; }
+.acct-table .cell-credits span { font-size: 11px; color: var(--muted); font-weight: 400; margin-left: 2px; }
+.acct-table .cell-credits .credit-num { font-size: 14px; font-weight: 700; color: var(--text); margin-left: 0; }
+.acct-table .cell-credits .credit-unusable { font-size: 12px; font-weight: 600; color: var(--muted); }
+.acct-table .cell-credits .credit-expiring { font-size: 12px; font-weight: 600; color: var(--danger); }
+.acct-table .cell-credits .credit-stale { font-size: 12px; font-weight: 600; color: var(--muted); animation: stale-pulse 1.6s ease-in-out infinite; }
+/* 积分列两行制（票 03）：第一行 .cr-main = 数字 + 单位，第二行 .cr-sub = 角标（临期/不可用）。
+   数字右缘严格对齐：数字放进 .cr-num-box（右对齐 + 等宽数字），单位小字在其**外**、
+   绝对定位进右侧预留带 ⇒ 不占列宽、不推移数字右缘（改卡片不走这套，两视图各自作用域）。 */
+.acct-table .cell-credits .cr-main { position: relative; padding-right: var(--acct-cred-unit); text-align: right; }
+/* 主文案被 待刷新 / 不适用 占据时无单位，不需要预留带，否则会白白左移。 */
+.acct-table .cell-credits .cr-main:not(.has-unit) { padding-right: 0; }
+.acct-table .cell-credits .cr-num-box { font-variant-numeric: tabular-nums; }
+.acct-table .cell-credits .cr-unit { position: absolute; right: 0; bottom: 0; font-size: 11px; color: var(--muted); font-weight: 400; }
+.acct-table .cell-credits .cr-sub { font-size: 11px; color: var(--muted); font-weight: 400; white-space: nowrap; line-height: 1.3; }
+.acct-table .cell-credits.clickable { cursor: pointer; }
+.acct-table .cell-credits.clickable:hover { text-decoration: underline dotted; text-underline-offset: 3px; }
+.acct-table .cell-credits.clickable:focus-visible { outline: 2px solid var(--primary); outline-offset: -2px; }
+.acct-table .cell-tags { white-space: nowrap; }
+/* 状态徽标封顶：闸 2 实测——126 行快照里「已停用 · 该账号没有可用模型（未…）」这类长徽标宽
+   305px，把状态列撑到 325px、整表 904px > 890px 容器 ⇒ 1440px 视口也冒出横滚条。
+   截断后悬停仍有 title 全文（徽标本身就是 title 载体），列宽不再被最长理由单点决定。 */
+.acct-table .cell-tags .tag {
+  margin-right: 4px; display: inline-block; max-width: 180px;
+  overflow: hidden; text-overflow: ellipsis; vertical-align: bottom;
+}
+.acct-table .cell-ops { white-space: nowrap; text-align: right; }
+.acct-table tr.disabled-row { opacity: .5; background: #f9fafb; }
+.acct-table tr.cooling-row td:first-child { box-shadow: inset 3px 0 0 var(--warn); }
 
 /* 账号卡片网格 */
 .acct-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
@@ -288,8 +395,11 @@ body {
 .badge.codearts { background: var(--ch-codearts); }
 .badge.cline { background: var(--ch-cline); }
 .badge.comate { background: var(--ch-comate); }
+.badge.modelscope { background: var(--ch-modelscope); }
+.badge.modelscopeai { background: var(--ch-modelscopeai); }
 .badge.lingxi { background: var(--ch-lingxi); }
 .badge.doubao { background: var(--ch-doubao); }
+.badge.chatgpt { background: var(--ch-chatgpt); }
 .badge.custom { background: var(--ch-custom); }
 
 .tag { font-size: 10px; padding: 2px 7px; border-radius: 10px; white-space: nowrap; }
@@ -1515,8 +1625,6 @@ select.input::-ms-expand, .select::-ms-expand { display: none; }
   .top-icons { order: 2; margin-left: auto; }
   .top-info { order: 3; flex: none; width: 100%; }
   .panel-actions-wrap { flex-direction: column; align-items: stretch; gap: 8px; }
-  .pa-spacer { display: none; }
-  .pa-left { flex-direction: row; flex-wrap: wrap; }
   .pa-right { grid-template-columns: repeat(auto-fit, minmax(118px, 1fr)); width: 100%; }
   .pa-right .btn { justify-self: stretch; padding: 8px 10px; }
 }
@@ -1536,6 +1644,28 @@ select.input::-ms-expand, .select::-ms-expand { display: none; }
   .acct-card .acct-mid { flex-wrap: wrap; }
   /* 签到状态 + 暂停/恢复按钮独占一行，避免窄屏被卡片右边缘裁掉。 */
   .acct-card .acct-checkin { width: 100%; justify-content: flex-start; }
+}
+/* 3b) 列表视图的紧凑档阈值 —— 按实测**溢出阈值 + 行高阈值**卡位（闸 2 重测 2026-11-16）：
+   五列版（分组行删除后）实测两档内容需求：紧凑档 min-content = 606.3px、宽档 761.9px
+   （57 行 × 23 渠道密集快照）；容器可用宽 = 视口 −85px（≤779 视口时 −70px）⇒
+   · 紧凑档 606.3 + 85 = 691.3 ⇒ 视口 ≥ 691 起不横溢（逐 5px 实测：690 溢 1px、695 为 0）；
+   · 宽档 761.9 + 85 = 846.9 < 870（宽档起点）⇒ 宽档区间恒不横溢。
+   而 855~869（innerWidth 口径）虽不横溢，却因字号/内边距已回到宽档数值、账号列被挤到
+   min-content，行高从紧凑档的 47.5px 跳到 103.5~209.5px（长昵称折成 3~4 行）⇒ 这一带的
+   密度比更窄的 845 还差，故紧凑规则仍挂在实测行高回落点 869（不是视觉档位，是两个物理阈值）。
+   判据必须是 **innerWidth**（媒体查询口径）：document.documentElement.clientWidth 少 15px
+   滚动条，拿它比对会把 870~884 误算进紧凑档。
+   卡片网格的单列断点仍独立挂在 679（第 3 条规则），两条互不影响。
+   横滚容器与 min-width: 607px 保持不变：窄屏宁可横滚也不裁列、不降级回卡片。
+   （≤690 的极窄视口仍按设计横滚：606.3px 需求 > 视口 −85。） */
+@media (max-width: 869px) {
+  .acct-table { font-size: 12px; --acct-cred-unit: 44px; }
+  .acct-table th, .acct-table td { padding: 5px 6px; }
+  .acct-table thead th { font-size: 11px; }
+  .acct-table thead th.num { padding-right: calc(var(--acct-cred-unit) + 6px); }
+  .acct-table .cell-credits { font-size: 13px; }
+  .acct-table .cell-tags { white-space: normal; }
+  .acct-table .cell-tags .tag { max-width: 150px; }
 }
 
 /* 4) 费率表：桌面每行两模型（模型|倍率|模型|倍率）；窄屏将同一 tr 的

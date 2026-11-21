@@ -76,11 +76,24 @@ const (
 	// Cookie 不轮换 ⇒ 无 RefreshToken、无保活、无签到；上游无积分查询端点（积分只能从
 	// 逐请求 usage.credits 记账）。模型面绑死上游 /models 的 items 数组原样透传。
 	Comate Kind = "comate"
+	// ModelScope 魔搭社区国内站（api-inference.modelscope.cn）：OpenAI 兼容对话面 +
+	// 异步文生图/图生图（submit + poll）；凭据是面板粘贴的 `ms-` Access Token
+	// （一枚 token = 一个账号，真多 token 池）。**两区为独立服务，token 不通用** ——
+	// 国内站与国际站的 token 不能互相使用，故拆成两个 kind、两个账号池、互不兜底。
+	ModelScope Kind = "modelscope"
+	// ModelScopeAI 魔搭国际站（api-inference.modelscope.ai）：与 ModelScope 同协议、
+	// 不同服务区域。**两区为独立服务，token 不通用**（见 ModelScope 注释）。
+	ModelScopeAI Kind = "modelscopeai"
 	// Lingxi WPS 灵犀（lingxi.kdocs.cn 网页版助手）：粘贴型渠道，凭据与 comate 同为
 	// **wps_sid Cookie**（同一 WPS 账号体系但**门禁独立**——灵犀侧开通即可用）。
 	// 有每日签到（领智点）与余额端点；对话是 sessions+completions 两段式（每请求新建
 	// session）+ 自有 SSE 帧型（非 OpenAI 形）。模型面来自 plans 端点 data.models 原样透传。
 	Lingxi Kind = "lingxi"
+	// ChatGPT ChatGPT 网页版逆向通道（chatgpt.com，非官方 API）：凭据是网页 session
+	// Cookie 族（面板粘贴或 from ww3 auths 导入），出站必须复刻浏览器 TLS 指纹；
+	// 纯文本对话 + 生图，**无工具调用**、无签到、无额度端点（积分「不适用」）。
+	// ⚠️ 本渠道**必须走代理**才能用（境内不可达），见 internal/chatgpt 包注释。
+	ChatGPT Kind = "chatgpt"
 	// Doubao 豆包（ByteDance，www.doubao.com「工作模式」）：粘贴/扫码型渠道，
 	// 凭据是网页登录 Cookie（sessionid 等）。对话走**桌面客户端身份**（aid=582478、
 	// agent_mode=1 工作模式），不需要 a_bogus 签名；上游无 refresh 端点 ⇒ 无自动续期，
@@ -112,7 +125,7 @@ func BuiltinKinds() map[string]bool {
 var builtinKindList = []Kind{
 	WorkBuddy, WorkBuddyAI, TraeWork, Qoder, QoderCN, QoderCOM,
 	QwenWork, MonkeyCode, Raccoon, Loomy, TraeCode, Oczen, GLM, Cline, OfficeAce, Kilo, Minimax, LobsterAI,
-	Gemini, CodeArts, ZCode, Comate, Lingxi, Doubao,
+	Gemini, CodeArts, ZCode, Comate, Lingxi, ModelScope, ModelScopeAI, Doubao, ChatGPT,
 }
 
 // DisplayNames 渠道**显示名**的 Go 侧真源（面板文案、`/v1/models` 之外的展示处同源）。
@@ -121,30 +134,34 @@ var builtinKindList = []Kind{
 // 两份必须逐项一致，`scripts/ui-static-check.mjs` 有跨语言一致性断言（Go 源它直接读）。
 // 顺序无关（展示序由 ChannelDisplayOrder 按值排序派生）。
 var DisplayNames = map[Kind]string{
-	WorkBuddy:   "WorkBuddyCN",
-	WorkBuddyAI: "WorkBuddyAI",
-	TraeWork:    "TraeWork",
-	TraeCode:    "TraeCode",
-	Qoder:       "Qoder",
-	QoderCN:     "QoderCN",
-	QoderCOM:    "QoderCOM",
-	QwenWork:    "千问办公",
-	GLM:         "智谱清言",
-	MonkeyCode:  "MonkeyCode",
-	Raccoon:     "小浣熊",
-	Loomy:       "Loomy",
-	Oczen:       "OpenCodeZen",
-	Kilo:        "Kilo",
-	Minimax:     "MiniMax",
-	LobsterAI:   "LobsterAI",
-	ZCode:       "ZCode",
-	Gemini:      "Gemini",
-	CodeArts:    "CodeArts",
-	Cline:       "Cline",
-	OfficeAce:   "OfficeAce",
-	Comate:      "WPS Comate",
-	Lingxi:      "WPS 灵犀",
-	Doubao:      "豆包",
+	WorkBuddy:    "WorkBuddyCN",
+	WorkBuddyAI:  "WorkBuddyAI",
+	TraeWork:     "TraeWork",
+	TraeCode:     "TraeCode",
+	Qoder:        "Qoder",
+	QoderCN:      "QoderCN",
+	QoderCOM:     "QoderCOM",
+	QwenWork:     "千问办公",
+	GLM:          "智谱清言",
+	MonkeyCode:   "MonkeyCode",
+	Raccoon:      "小浣熊",
+	Loomy:        "Loomy",
+	Oczen:        "OpenCodeZen",
+	Kilo:         "Kilo",
+	Minimax:      "MiniMax",
+	LobsterAI:    "LobsterAI",
+	ZCode:        "ZCode",
+	Gemini:       "Gemini",
+	CodeArts:     "CodeArts",
+	Cline:        "Cline",
+	OfficeAce:    "OfficeAce",
+	Comate:       "WPS Comate",
+	Lingxi:       "WPS 灵犀",
+	Doubao:       "豆包",
+	ModelScope:   "ModelScope",
+	ModelScopeAI: "ModelScopeAI",
+	// 显示名刻意写「Web」：与官方 OpenAI API 区分，说明这是网页逆向通道。
+	ChatGPT: "ChatGPT Web",
 }
 
 // DisplayName 渠道显示名；未登记时退回渠道 kind 本身（自定义渠道就走这条）。
@@ -273,6 +290,7 @@ const (
 	ErrModelBlocked                  // 11102 该后端无此模型 → (账号,模型) 负缓存避让
 	ErrPassthrough                   // 请求级拒绝（形态/地域/身体不被接受）→ 原文透传，不罚账号不轮转
 	ErrQueued                        // 上游「模型排队中」提示（qodercn 10605 isQueued）→ 换号可能命中不同队列
+	ErrUpstream                      // 上游任务级失败（如异步生图任务 FAILED/CANCELED）→ 不换号、不罚账号
 )
 
 func (k ErrKind) String() string {
@@ -307,6 +325,8 @@ func (k ErrKind) String() string {
 		return "passthrough"
 	case ErrQueued:
 		return "queued"
+	case ErrUpstream:
+		return "upstream"
 	default:
 		return "none"
 	}
@@ -385,6 +405,34 @@ func (e *Error) Error() string {
 	return fmt.Sprintf("upstream %s (http %d): %s", e.Kind, e.Status, e.Msg)
 }
 
+// TaskTimeout 上游**异步任务**（submit 拿 task_id + 轮询型，当前 modelscope 生图）
+// 在时限内未完成。
+//
+// 为什么必须与普通上游失败分开：这类请求上游**已经受理**（任务可能仍在执行并消耗额度），
+// 对外应回 504 并把 task id 交给客户端，而不是 502「生图失败」；同时它**不换号**
+// （换了号也拿不回已提交的任务），故内嵌 Err 固定 ErrUpstream。
+// Unwrap 让 handler 既能 errors.As 到 *Error 走通用处置，也能单独识别超时。
+type TaskTimeout struct {
+	// TaskID 上游任务 id（**不是凭据**，可以写进错误体与日志）。
+	TaskID  string
+	Elapsed time.Duration
+	// Err 固定 Kind=ErrUpstream（Rotatable()==false）。
+	Err *Error
+}
+
+func (e *TaskTimeout) Error() string {
+	return fmt.Sprintf("上游任务 %s 在等待 %s 后仍未完成（上游任务可能仍在执行，本工具不重试已提交任务）",
+		e.TaskID, e.Elapsed.Round(time.Second))
+}
+
+// Unwrap 让 errors.As(err, &*Error) 仍能取到 Kind（不换号、不罚账号）。
+func (e *TaskTimeout) Unwrap() error {
+	if e.Err != nil {
+		return e.Err
+	}
+	return &Error{Kind: ErrUpstream, Msg: "async task timeout"}
+}
+
 // Classified 把 *Error 包装成实现了 StreamErrorClassifier 的错误，供**流式路径**使用。
 //
 // 为什么需要包装而不是直接给 Error 加 Kind() 方法：字段名就叫 Kind，与方法同名会冲突。
@@ -443,6 +491,11 @@ type ModelInfo struct {
 	SupportsImages    bool // 支持图像输入（多模态视觉）
 	SupportsReasoning bool // 支持思考/推理模式
 	SupportsTools     bool // 支持函数/工具调用
+	// SupportsImageGeneration 标记「能出图」（文生图 / 图生图）：与 SupportsImages（能看图）
+	// 是**两个维度**，不得互相推导——Qwen2.5-VL 能看图但不出图，Qwen-Image 出图画不了图。
+	// 消费方：/v1/models 的 supports_image_generation 标记 + 面板模型行的 🎨，
+	// 让客户端能区分「画图模型」与「对话模型」。数据缺失时保持 false（不编造，R49）。
+	SupportsImageGeneration bool
 	// 思考档位（issue #96）：上游目录显式声明的可选档位表。nil = 上游未声明，
 	// 消费方不得自行编造（对齐 ContextFromAPI 哲学；参考 Buddy2api v2.1.11 的
 	// 「never invent effort lists」原则）。典型值 low/medium/high/xhigh/max。
@@ -531,6 +584,70 @@ type Upstream interface {
 	// 上游未返回 usage 时为 nil（调用方记 0 token + 请求数）。
 	Stream(w http.ResponseWriter, r io.Reader, model string) (map[string]any, error)
 	Aggregate(r io.Reader, model string) (map[string]any, error)
+}
+
+// ImageRequest 是生图/改图的入参（provider 无关形状，不绑定任何上游协议）。
+type ImageRequest struct {
+	// Model 是**客户端请求的全串**（`<kind>/<上游ID>`，如 `glm/image`、
+	// `modelscope/Qwen/Qwen-Image`）。渠道不得把它记在 Client 上——多账号并发会串号；
+	// 需要渠道差异时只看入参。粘性路由与模型级冷却的 key 也由调用方用它。
+	Model  string
+	Prompt string
+	// Size 是客户端传入的**原始像素串/比例串**（`1024x1024` / `16:9`，可能为空）。
+	// 「已知值校验」在 handler 层做；换算成上游比例的职责在渠道侧。
+	Size string
+	// N 期望张数；<=0 表示按上游默认（上游常固定回多张，由渠道自行截断）。
+	N int
+	// NegativePrompt 反向提示词（可选）：**只有客户端真的给了才非空**，渠道不得编造默认值。
+	// 不提供该字段的渠道直接忽略。
+	NegativePrompt string
+	// References 是参考图引用（改图用）：http(s) 公网直链，或 `data:image/...;base64,...`
+	// / 裸 base64。拼版与图床托管是调用方的事，渠道只负责把引用交给上游。
+	References []string
+}
+
+// ImageResult 是一张生图产物。
+type ImageResult struct {
+	// URL 产物引用（上游 CDN 直链，会过期：调用方按需立刻下载/转换）。
+	URL string
+	// B64JSON 是渠道**已经取回**的产物字节（base64）。
+	//
+	// 为什么需要它：产物直链有时必须用渠道自己的出站通道才能取（chatgpt 的 estuary
+	// 直链挂在受 Cloudflare 保护的上游域名上，且签名只有几分钟寿命）。这类渠道在内部
+	// 完成「指针 → 下载地址 → 字节」两步后把字节放这里，handler 直接转 b64_json，
+	// 省掉一次用裸 net/http 的二次下载（那一次多半会被指纹校验拦掉或撞上签名过期）。
+	// 留空的渠道行为不变（handler 仍按 URL 现下）。
+	B64JSON string
+	// RevisedPrompt 上游润色后的实际 prompt（部分渠道/路径没有该字段，留空）。
+	RevisedPrompt string
+}
+
+// ImageGenerator 由「会画图」的渠道实现（当前 glm；新增渠道按模型名路由接入）。
+//
+// 契约：
+//   - 入参 `req.Model` 是客户端请求的全串，渠道**不得**内部记忆状态；
+//   - 上游失败必须返回 `*provider.Error`——handler 靠 errors.As 取 Kind 决定惩罚
+//     （ErrSoftRate → 模型级冷却、ErrSessionDead → 标记重登、ErrContentBlocked → 不罚号）。
+//     裸 error 只会落到「非类型化 = 传输层」分支，把限流/内容拦截误记成账号错误；
+//   - 返回张数 <= req.N（req.N<=0 时按上游默认）。
+type ImageGenerator interface {
+	GenerateImage(a *auth.Auth, req ImageRequest) ([]ImageResult, error)
+	EditImage(a *auth.Auth, req ImageRequest) ([]ImageResult, error)
+}
+
+// InlineImageRefProvider 由「参考图可直传」的渠道实现（当前 modelscope）。
+//
+// 不实现本接口的渠道走默认（glm）语义：多参考图由调用方先拼版 + 图床托管成
+// 一个公网 URL（上游单图硬约束），`ImageRequest.References` 恒为 1 个 http(s) 直链。
+// 实现本接口的渠道自己吃得下多张内联参考图 ⇒ 调用方**不得**拼版、**不得**上图床
+// （拼版排版会改变语义，图床托管只对单图上游有意义）。
+//
+// 这是渠道能力声明而不是渠道类型断言：handler 只问「你能不能吃内联引用」，
+// 不需要 import 具体渠道包。
+type InlineImageRefProvider interface {
+	// InlineImageRefs 报告 EditImage 的 References 可以是多张
+	// `data:image/...;base64,...` 或 http(s) 直链（不拼版、不托管）。
+	InlineImageRefs() bool
 }
 
 // StreamErrorClassifier 由「流内业务错误可分类」的渠道实现（当前 traework 的

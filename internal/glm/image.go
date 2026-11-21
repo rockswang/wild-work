@@ -18,6 +18,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	"wild-work/internal/auth"
@@ -28,12 +29,54 @@ import (
 // 靠这里兜「上游卡死」。参考 idle.Monitor 的思路但对生图用更紧的墙钟）。
 const imageGenTimeout = 3 * time.Minute
 
-// GeneratedImage 一张生成图。
-type GeneratedImage struct {
-	// URL 产物 CDN 直链（无签名但会过期 [未知具体时长]，调用方按需立即下载）。
-	URL string
-	// RevisedPrompt 上游润色后的实际生图 prompt（文生图路径有；改图路径无此字段）。
-	RevisedPrompt string
+// 编译期断言：glm 是「会画图」的渠道（/v1/images/* 按模型名路由到本渠道）。
+var _ provider.ImageGenerator = (*Client)(nil)
+
+// ratioBySize 像素串/比例串 → 上游 aspect_ratio。
+// 与 server 层 ratioBySize 的取值域逐项一致：上游只认 1:1/3:4/4:3/9:16/16:9，
+// 非法值会**静默降级 1:1**，故调用方必须先校验；空值按 1:1。
+var ratioBySize = map[string]string{
+	"1024x1024": "1:1",
+	"864x1152":  "3:4",
+	"1152x864":  "4:3",
+	"720x1280":  "9:16",
+	"1280x720":  "16:9",
+	"auto":      "1:1",
+	"1:1":       "1:1",
+	"3:4":       "3:4",
+	"4:3":       "4:3",
+	"9:16":      "9:16",
+	"16:9":      "16:9",
+}
+
+// ratioOfSize 取 size 对应的上游比例；未知/空值回落 1:1（handler 已校验，这里只兜底）。
+func ratioOfSize(size string) string {
+	if r, ok := ratioBySize[strings.TrimSpace(size)]; ok {
+		return r
+	}
+	return "1:1"
+}
+
+// GenerateImage 实现 provider.ImageGenerator：文生图（size 换算成上游比例后走画图 agent）。
+func (c *Client) GenerateImage(a *auth.Auth, req provider.ImageRequest) ([]provider.ImageResult, error) {
+	return c.generateImage(a, req.Prompt, ratioOfSize(req.Size), req.N)
+}
+
+// EditImage 实现 provider.ImageGenerator：参考图改图。
+// 取 References[0] 作为上游可拉取的公网 URL（拼版/托管由 server 层完成，上游单图硬约束）。
+func (c *Client) EditImage(a *auth.Auth, req provider.ImageRequest) ([]provider.ImageResult, error) {
+	ref := ""
+	if len(req.References) > 0 {
+		ref = strings.TrimSpace(req.References[0])
+	}
+	if ref == "" {
+		return nil, &provider.Error{Kind: provider.ErrBadParams, Msg: "改图缺少参考图引用"}
+	}
+	url, err := c.editImage(a, ref, req.Prompt)
+	if err != nil {
+		return nil, err
+	}
+	return []provider.ImageResult{{URL: url}}, nil
 }
 
 // generateImageBody 构造文生图请求体：普通对话体换 agent + cogview.aspect_ratio。
@@ -62,12 +105,12 @@ func generateImageBody(prompt, ratio string) glmChatRequest {
 	}
 }
 
-// GenerateImage 文生图：发一次画图 agent 的对话流，收集全部产物图。
+// generateImage 文生图：发一次画图 agent 的对话流，收集全部产物图。
 // n≤0 表示收全部（上游一次 4 图）。返回的图按上游产出顺序排列。
 //
 // ratio 必须是 1:1/3:4/4:3/9:16/16:9 之一（上游对非法值静默降级 1:1，
 // 归一化与校验是 server 层的职责，这里只透传）。
-func (c *Client) GenerateImage(a *auth.Auth, prompt, ratio string, n int) ([]GeneratedImage, error) {
+func (c *Client) generateImage(a *auth.Auth, prompt, ratio string, n int) ([]provider.ImageResult, error) {
 	payload, err := json.Marshal(generateImageBody(prompt, ratio))
 	if err != nil {
 		return nil, err
@@ -86,7 +129,7 @@ func (c *Client) GenerateImage(a *auth.Auth, prompt, ratio string, n int) ([]Gen
 	defer rc.Close()
 
 	// 逐帧收集 image 内容项（part.status=finish 是该图全文；同图可能在多帧重复，去重保序）。
-	var imgs []GeneratedImage
+	var imgs []provider.ImageResult
 	seen := map[string]bool{}
 	done := false
 	werr := parseSSE(rc, func(frame []byte) error {
@@ -104,7 +147,7 @@ func (c *Client) GenerateImage(a *auth.Auth, prompt, ratio string, n int) ([]Gen
 						continue
 					}
 					seen[im.ImageURL] = true
-					imgs = append(imgs, GeneratedImage{URL: im.ImageURL, RevisedPrompt: ct.Code})
+					imgs = append(imgs, provider.ImageResult{URL: im.ImageURL, RevisedPrompt: ct.Code})
 				}
 			}
 		}
@@ -128,12 +171,12 @@ func (c *Client) GenerateImage(a *auth.Auth, prompt, ratio string, n int) ([]Gen
 	return imgs, nil
 }
 
-// EditImage 参考图改图（智能编辑）：同步长请求（实测 17~22s，HTTP client 10min 超时内）。
+// editImage 参考图改图（智能编辑）：同步长请求（实测 17~22s，HTTP client 10min 超时内）。
 //
 // imageURL 必须是上游服务器能拉到的公网 URL（data URI/境外直连返回 status=500 或 10031）；
 // 输出比例强制跟随输入图（aspect_ratio 传值无效 [实证]，恒传 1:1 占位）。
 // 返回产物 CDN 直链。会话不自动删除（用户决议：生图不自动删除）。
-func (c *Client) EditImage(a *auth.Auth, imageURL, prompt string) (string, error) {
+func (c *Client) editImage(a *auth.Auth, imageURL, prompt string) (string, error) {
 	token, err := c.acquireToken(context.Background(), a)
 	if err != nil {
 		return "", err

@@ -116,3 +116,61 @@ func TestComateNicknameFor(t *testing.T) {
 		})
 	}
 }
+
+// TestCreditsNAModelscope 守门魔搭两渠道的额度口径（2026-11-16 反转 D5）。
+//
+// 旧结论「上游没有余额/积分端点」是**把端点名猜错**了（只试了对话基址），票 01 的
+// 只读探针实测主站 `/openapi/v1/magicubes/balance` 用同一枚 `ms-` token 直接可读
+// ⇒ 必须走真实积分口径：不标 credits_na、不给 creditsUnit 发明「次数」单位，
+// 但必须有渠道级显示术语「魔粒」（面板文案对齐官网，仍是积分、并入合计）。
+func TestCreditsNAModelscope(t *testing.T) {
+	a := &App{cfg: &config.Config{}}
+	for _, k := range []provider.Kind{provider.ModelScope, provider.ModelScopeAI} {
+		if a.creditsNAKind(k.String()) {
+			t.Errorf("%s 有真实魔粒余额端点（主站 magicubes/balance），不得标 credits_na", k)
+		}
+		if got := a.creditsUnit(k.String()); got != "" {
+			t.Errorf("%s creditsUnit = %q，期望空串（魔粒仍是积分，不得引入 token/次数口径）", k, got)
+		}
+		if got := a.creditsTerm(k.String()); got != "魔粒" {
+			t.Errorf("%s creditsTerm = %q，期望「魔粒」", k, got)
+		}
+	}
+	// 渠道级术语不得满天下发：普通渠道继续用默认的「积分」。
+	for _, k := range []provider.Kind{provider.WorkBuddy, provider.ZCode, provider.Comate} {
+		if got := a.creditsTerm(k.String()); got != "" {
+			t.Errorf("%s creditsTerm = %q，期望空串（默认「积分」）", k, got)
+		}
+	}
+}
+
+// TestCreditsNAChatGPT：ChatGPT 网页套餐**没有**任何额度查询端点（余额只在限流报文里体现）
+// ⇒ 面板必须显示「不适用」，不能显示 0（0 会被读成「额度用光」）。
+// 但「无积分」≠「虚拟账号」（R130）：它必须仍可删 / 可停 / 可改名，故不参与 fixedAcct 判定。
+func TestCreditsNAChatGPT(t *testing.T) {
+	a := &App{cfg: &config.Config{}}
+	if !a.creditsNAKind(provider.ChatGPT.String()) {
+		t.Error("chatgpt 无额度端点，必须标 credits_na（否则面板显示 0，被读成额度用光）")
+	}
+	if got := a.creditsUnit(provider.ChatGPT.String()); got != "" {
+		t.Errorf("chatgpt creditsUnit = %q，期望空串（它没有任何额度口径，不能借 token/次数冒充）", got)
+	}
+	if got := a.creditsTerm(provider.ChatGPT.String()); got != "" {
+		t.Errorf("chatgpt creditsTerm = %q，期望空串（上游没有自己的额度术语，不得编造）", got)
+	}
+}
+
+// TestNoExplicitCheckinChatGPT：网页套餐没有签到/领取动作 ⇒ 必须在内建无签到名单里，
+// 否则批量签到会每天空跑一次必然失败的调用，并在面板渲染红色「签到失败」（R150）。
+// 同时它是**内建**名单项（不是靠 isCustomChannel 动态判出来的）。
+func TestNoExplicitCheckinChatGPT(t *testing.T) {
+	if !noExplicitCheckin(provider.ChatGPT) {
+		t.Fatal("chatgpt 无签到活动，必须列入 noExplicitCheckin（否则每天空跑失败签到）")
+	}
+	// 反向护栏：有真实签到的渠道不得被误列（名单是手工维护的，最容易多写一行）。
+	for _, k := range []provider.Kind{provider.MonkeyCode, provider.Loomy, provider.Raccoon, provider.Lingxi, provider.WorkBuddy} {
+		if noExplicitCheckin(k) {
+			t.Errorf("%s 有签到活动，不得列入 noExplicitCheckin", k)
+		}
+	}
+}

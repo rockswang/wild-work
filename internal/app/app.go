@@ -48,6 +48,7 @@ import (
 	"wild-work/internal/login_wbai"
 	loginzcode "wild-work/internal/login_zcode"
 	"wild-work/internal/loopguard"
+	"wild-work/internal/modelscope"
 	"wild-work/internal/oczen"
 	"wild-work/internal/officeace"
 	"wild-work/internal/platform"
@@ -138,6 +139,11 @@ type App struct {
 	// 必须把真实结果带出去（否则用户只看到「登录完成」但账号没加进来）。
 	loginErr  string
 	pricingFP string
+
+	// msValidate 面板粘贴魔搭 Access Token 时的上游校验函数（**测试注入点**）。
+	// nil = modelscope.ValidateToken（真实上游）；生产**不得**设置。整机级离线测试
+	// 用它把「粘贴即接入」成功链路接到 httptest 假上游，产品行为零变化。
+	msValidate func(kind provider.Kind, token string) (string, error)
 
 	// 智谱清言自动登录会话（独立于通用 OAuth 登录流程：
 	// 它不轮询 state 文件，而是经 CDP 从浏览器 Cookie 捕获凭据）。
@@ -282,6 +288,15 @@ func (a *App) healRaccoonProtocol() {
 		log.Printf("启动自愈：残留备份存在但注册表已被官方客户端重写，仅清理备份文件")
 	}
 	_ = raccoon.ClearCallback(dir)
+}
+
+// closing 报告是否已进入关闭流程。closed 由 refreshMu 保护；判定与后续写入
+// 不在同一把锁里会留下「刚判完就被 Close 置位」的窗口，故只用于「整段工作都不该做」的场景
+// （写入本身必须在 refreshMu 之下重判，见 savePricingCache）。
+func (a *App) closing() bool {
+	a.refreshMu.Lock()
+	defer a.refreshMu.Unlock()
+	return a.closed
 }
 
 // waitRefresh 等在跑的 RefreshAll 收尾（没有在跑就立即返回）。
@@ -463,6 +478,11 @@ func sortChannelsByOrder[T any](items []T, kindOf func(T) provider.Kind) {
 //     属于「查不到」。把这种情况显示成 0 会被误读成「额度已用光」，故同样走 NA。
 //   - 自定义渠道（R66）：无积分与额度接口，同样走 NA。
 //
+// ⚠️ modelscope / modelscopeai **不在此列**（2026-11-16 起）：票 01 的只读探针实测
+// 魔粒余额端点在**主站** `/openapi/v1/magicubes/balance`（同一枚 `ms-` token 直接可读），
+// 当初「上游没有余额/积分端点（只有 token 用量）」只试了对话基址，是**错的** ——
+// 现已接入真实魔粒（见 internal/modelscope/credits.go），面板显示可用余额。
+//
 // ⚠️ comate **不在此列**（R136 起）：R130 曾据「/credits /userinfo /me 全 404」
 // 判成 NA，但真实额度端点是 `/llmproxy/v1/user/token-usage`（每日额度
 // limit/remain/used + 周期明细），额度只有「每日」一种口径
@@ -471,9 +491,13 @@ func sortChannelsByOrder[T any](items []T, kindOf func(T) provider.Kind) {
 //
 // 注意：**ZCode 不走这里**（尽管它的额度也不是积分）——它有真实的 token 桶要展示，
 // 走 creditsUnit="token" 的「Token 计数」面板，而不是「不适用」（见 creditsUnit）。
+//
+// ⚠️ ChatGPT 在此列（2026-11-17）：网页套餐的额度是窗口内的用量上限，**没有任何接口**
+// 能读出剩余数字（只在对话流的限流报文里体现）⇒ 只能说「不适用」。但「无积分」≠「虚拟账号」
+// （R130）：它能删 / 能停 / 能改名，飞行**不入** VIRTUAL_ACCOUNTS。
 func (a *App) creditsNAKind(group string) bool {
 	if group == provider.Oczen.String() || group == provider.Kilo.String() ||
-		group == provider.Cline.String() {
+		group == provider.Cline.String() || group == provider.ChatGPT.String() {
 		return true
 	}
 	return a.isCustomChannel(group)
@@ -492,6 +516,19 @@ func (a *App) creditsUnit(group string) string {
 		return "token"
 	}
 	return "" // 积分（credits）
+}
+
+// creditsTerm 该渠道额度的**显示术语**（空串 = 用默认的「积分」）。
+//
+// 为什么需要与 creditsUnit 并列的第二个字段：ModelScope 站内把积分叫「魔粒」
+// （magicubes），面板上写「可用积分」会让用户对不上官网；但它**仍是积分**（并入
+// 积分合计与积分折线图），所以**不得**改 creditsUnit —— 改单位会被前端当成 token
+// 口径踢出合计。单一来源在后端：前端只渲染 credits_term，不维护渠道名单。
+func (a *App) creditsTerm(group string) string {
+	if group == provider.ModelScope.String() || group == provider.ModelScopeAI.String() {
+		return "魔粒"
+	}
+	return ""
 }
 
 // isCustomChannel 报告该分组名是否是自定义渠道。先查运行时表（热更新后的权威态），
@@ -554,8 +591,9 @@ func (a *App) SetCustomChannelsSyncer(fn func(channels []custom.ChannelConfig)) 
 // Kilo 免费池同为免密渠道：无账号、无签到、无积分。
 // 自定义渠道无签到活动（R66）；内建名单固定，故抽成无状态的包级函数（可脱离 App 断言），
 // 方法体仅补上「是否自定义渠道」这一动态判定。
+// ChatGPT 网页逆向通道：网页套餐无签到/领取动作，也无额度查询端点。
 func noExplicitCheckin(k provider.Kind) bool {
-	return k == provider.WorkBuddyAI || k == provider.QwenWork || k == provider.Oczen || k == provider.Kilo || k == provider.ZCode || k == provider.Gemini || k == provider.Cline || k == provider.Comate
+	return k == provider.WorkBuddyAI || k == provider.QwenWork || k == provider.Oczen || k == provider.Kilo || k == provider.ZCode || k == provider.Gemini || k == provider.Cline || k == provider.Comate || k == provider.ChatGPT
 }
 
 func (a *App) noExplicitCheckinKind(k provider.Kind) bool {
@@ -924,6 +962,20 @@ func init() {
 	}
 	loginFlows[provider.OfficeAce] = &loginFlow{
 		noFlowReason: "OfficeAce 登录是两步流程（华为云授权码 + 云端轮询捕获），请用面板的「浏览器登录」入口",
+	}
+	// ModelScope 两区：凭据是网页自助生成的 `ms-` Access Token，没有编程式登录，
+	// 也没有 cookie 换 token 的路（D4）——只引导用户去面板的粘贴层。
+	loginFlows[provider.ModelScope] = &loginFlow{
+		noFlowReason: "ModelScope 凭据需在面板粘贴 ms- Access Token（「＋ ModelScope」入口），本工具不代登录",
+	}
+	loginFlows[provider.ModelScopeAI] = &loginFlow{
+		noFlowReason: "ModelScopeAI 凭据需在面板粘贴 ms- Access Token（「＋ ModelScopeAI」入口）；两区 token 不通用，本工具不代登录",
+	}
+	// ChatGPT：凭据是浏览器里的网页 session（Cookie 族），本工具**不代登录**（网页登录有
+	// 人机验证与地区限制）；另：本渠道必须配代理才能接通上游。
+	loginFlows[provider.ChatGPT] = &loginFlow{
+		noFlowReason: "ChatGPT 无浏览器登录流程：凭据需从浏览器登录后粘贴（「＋ ChatGPT Web」入口，导入见后续），" +
+			"本工具不代登录；本渠道必须配置代理才能连通上游",
 	}
 
 	// 自检：每条记录必须恰好表达一种「发起方式」，防止将来加渠道时漏填。
@@ -2001,6 +2053,109 @@ func (a *App) persistLingxiAccount(sid string, uid string) (string, error) {
 	return warn, nil
 }
 
+// modelscopeKindOK 粘贴登录的 kind 白名单（App 方法与 HTTP 路由共用的唯一判据）。
+//
+// 两个 kind 是**两个独立服务区域**（token 不通用），故 kind 与端点必须一一对应：
+// 只接受 modelscope / modelscopeai，其余一律拒，绝不利旧把别的 kind 塞进同一个白名单。
+func modelscopeKindOK(kind provider.Kind) bool {
+	return kind == provider.ModelScope || kind == provider.ModelScopeAI
+}
+
+// modelscopeAuths 按 kind 读已入库账号（两区各一个目录前缀，互不吞噬）。
+func modelscopeAuths(kind provider.Kind, dir string) ([]*auth.Auth, error) {
+	if kind == provider.ModelScopeAI {
+		return auth.LoadModelscopeAIDir(dir)
+	}
+	return auth.LoadModelscopeDir(dir)
+}
+
+// SubmitModelScopeToken 提交面板粘贴的魔搭 `ms-` Access Token（票 04）。
+//
+// 与 comate/lingxi 的粘贴路径同构：规整 → 校验（零费用，走 GET /v1/models）→ 落盘 → 重载池。
+// 与它们的差异：本渠道凭据是**一枚 token = 一个账号**的自助 Access Token，不存在
+// Cookie/refresh 概念，token 失效只能人工重贴（走 SessionDead 标记，不 Disable，R76）。
+func (a *App) SubmitModelScopeToken(kind provider.Kind, token string) (string, string, error) {
+	if !modelscopeKindOK(kind) {
+		return "", "", fmt.Errorf("不支持的渠道 %q：只接受 modelscope / modelscopeai", kind)
+	}
+	tok := modelscope.NormalizeToken(token)
+	if tok == "" {
+		return "", "", errors.New("Access Token 不能为空")
+	}
+	uid, err := a.modelScopeValidate()(kind, tok)
+	if err != nil {
+		return "", "", err
+	}
+	return a.persistModelScopeAccount(kind, tok, uid)
+}
+
+// modelScopeValidate 返回生效的粘贴校验函数：默认是包级 modelscope.ValidateToken
+// （真实上游），测试可经 a.msValidate 注入 httptest 假上游（见 e2e-findings §5.1）。
+func (a *App) modelScopeValidate() func(provider.Kind, string) (string, error) {
+	if a.msValidate != nil {
+		return a.msValidate
+	}
+	return modelscope.ValidateToken
+}
+
+// persistModelScopeAccount 魔搭账号入库的唯一路径：同 token 检测 → 落盘 → 重载账号池。
+//
+// 三条纪律：
+//   - 文件名前缀按 kind 二选一（modelscope-* / modelscopeai-*），与 auth 加载器的 glob 一一对应；
+//   - ExpiresAt 必须远期（token 无过期字段，0 会让 NeedsRefresh 恒真 → 反复刷新 + 冷却）；
+//   - 昵称默认「渠道名 + token 尾 4 位」，但**用户改过的名字不得被重贴冲掉**（同 uid 复用旧昵称）。
+func (a *App) persistModelScopeAccount(kind provider.Kind, token, uid string) (string, string, error) {
+	// 同 token 检测：两区 token 不通用，但同一区里重复粘贴同一枚 token 不扩额度（它就是同一个账号）。
+	warn := ""
+	prevNick := ""
+	if existing, lerr := modelscopeAuths(kind, a.cfg.AuthDir); lerr == nil {
+		for _, e := range existing {
+			if e.AccessTokenValue() == token {
+				warn = fmt.Sprintf("这枚 Access Token 与已添加的账号 %s 相同（一枚 token 就是一个账号），"+
+					"重复添加不会增加额度。请换另一枚 token。", e.UID)
+				break
+			}
+		}
+		for _, e := range existing {
+			if e.UID == uid {
+				prevNick = e.Nickname
+				break
+			}
+		}
+	}
+
+	_ = os.MkdirAll(a.cfg.AuthDir, 0o755)
+	aa := &auth.Auth{
+		Kind:        kind.String(),
+		UID:         uid,
+		Nickname:    modelscopeNickname(kind, token, prevNick),
+		AccessToken: token,
+		// token 无过期字段：ExpiresAt 必须远期（0 会让 NeedsRefresh 恒真，不变量 21 同款陷阱）
+		ExpiresAt: modelscope.FarFutureExpiry(),
+		FilePath:  filepath.Join(a.cfg.AuthDir, kind.String()+"-"+uid+".json"),
+	}
+	if err := aa.SaveAtomic(); err != nil {
+		return "", "", fmt.Errorf("保存 ModelScope 凭据失败：%w", err)
+	}
+	a.reloadAccounts()
+	a.afterAccountAdded(kind)
+	// 日志零 token（不变量 2）：只打 uid 与渠道，绝不打完整 token
+	log.Printf("%s 账号已添加（粘贴 Access Token）uid=%s 同账号告警=%v", kind, uid, warn != "")
+	return uid, warn, nil
+}
+
+// modelscopeNickname 决定保存凭据时写的昵称：用户改过的名字优先，否则默认名（token 尾 4 位）。
+//
+// 判据是「旧昵称 ≠ 默认名」而不是「有旧昵称」：同一枚 token 重贴时旧值恰好等于默认名，
+// 那不算用户改名（否则多区/多 token 场景会把默认名当成用户定制而永不更新）。
+func modelscopeNickname(kind provider.Kind, token, prev string) string {
+	def := modelscope.DefaultNickname(kind, token)
+	if p := strings.TrimSpace(prev); p != "" && p != def {
+		return p
+	}
+	return def
+}
+
 // StartComateQRLogin 发起 WPS Comate「扫码登录」：服务端向 qr.wps.cn 申请二维码，
 // 面板显示二维码，用户用手机 WPS 扫码确认后，服务端自己换出 wps_sid 并落盘。
 //
@@ -2711,6 +2866,35 @@ func (a *App) reloadAccounts() {
 			rt.Pool.SyncToDir(auths)
 		}
 	}
+	// ModelScope / ModelScopeAI：一枚 `ms-` token = 一个账号，凭据由面板「粘贴 Access Token」写入。
+	// 两条都要接：两区各自成池（R159），漏掉任一分支的后果就是「粘贴成功但账号不出现，
+	// 必须重启 daemon」——同一类「声明了却没接线」缺陷（2026-11-14 e2e-findings §5.1 开缝后发现）。
+	if rt := a.runtime(provider.ModelScope); rt != nil && rt.Pool != nil {
+		auths, err := auth.LoadModelscopeDir(a.cfg.AuthDir)
+		if err != nil {
+			log.Printf("reload modelscope accounts: %v", err)
+		} else {
+			rt.Pool.SyncToDir(auths)
+		}
+	}
+	if rt := a.runtime(provider.ModelScopeAI); rt != nil && rt.Pool != nil {
+		auths, err := auth.LoadModelscopeAIDir(a.cfg.AuthDir)
+		if err != nil {
+			log.Printf("reload modelscopeai accounts: %v", err)
+		} else {
+			rt.Pool.SyncToDir(auths)
+		}
+	}
+	// ChatGPT：凭据落在 auths/chatgpt-*.json（面板粘贴或从 ww3 客户端导入写入）。
+	// 缺本分支就是「导入说成功、面板就是没有账号」（doubao 同款事故）。
+	if rt := a.runtime(provider.ChatGPT); rt != nil && rt.Pool != nil {
+		auths, err := auth.LoadChatGPTDir(a.cfg.AuthDir)
+		if err != nil {
+			log.Printf("reload chatgpt accounts: %v", err)
+		} else {
+			rt.Pool.SyncToDir(auths)
+		}
+	}
 }
 
 // CheckinAccount 单个账号立即签到。
@@ -2843,6 +3027,9 @@ func (a *App) creditSnapshot(rt *Runtime, au *auth.Auth) (remain int64, items []
 		remain, items, err = rt.Upstream.UserResourceDetail(au)
 	}
 	if err != nil {
+		// 保留上次快照的旧值，但标记为「待刷新」（D5）：只留旧数字会让用户把它当实时余额，
+		// 而「刷新积分」失败只有一条瞬时的 toast。**不得**写 0（会被读成「额度用光」）。
+		rt.Pool.MarkCreditStale(au.UID)
 		return 0, nil, 0, 0, err
 	}
 	_, unusable = provider.Summarize(items)
@@ -4015,6 +4202,9 @@ type AccountView struct {
 	// 前端据此把它渲染成「Token 计数」面板（文案/单位/合计口径都随之切换），
 	// 且**不并入积分合计**——即「与积分分开统计和显示」（用户 2026-10-17 的要求）。
 	CreditsUnit string `json:"credits_unit,omitempty"`
+	// CreditsTerm 渠道级**显示术语**（空 = 「积分」）：ModelScope 站内叫「魔粒」。
+	// 只改文案，不改计量口径（仍是积分，并入合计）；与 credits_unit 并列的单一来源。
+	CreditsTerm string `json:"credits_term,omitempty"`
 	Cooling     bool   `json:"cooling"`
 	Until       string `json:"until"`
 	// UntilTS 解冻时刻的 unix 秒（0 = 无）。面板用它实时算「剩 X 时 X 分」——
@@ -4188,6 +4378,7 @@ func (a *App) accountViews() []AccountView {
 			// 匿名与自定义渠道无积分：前端据此显示「不适用」
 			CreditsNA:                 a.creditsNAKind(group),
 			CreditsUnit:               a.creditsUnit(group),
+			CreditsTerm:               a.creditsTerm(group),
 			Cooling:                   s.Cooling,
 			Until:                     fmtTime(s.Until),
 			UntilTS:                   unixOrZero(s.Until),
@@ -4495,12 +4686,15 @@ func (a *App) HandleAPI(mux *http.ServeMux) {
 	// 导入型渠道（MonkeyCode）：从本机已登录的官方客户端读取凭据并写入 auths/。
 	// 导入型渠道（小浣熊）：从本机已登录的官方客户端读取凭据并写入 auths/。
 	// 导入型渠道（Loomy）：从本机已登录的官方客户端读取凭据并写入 auths/。
+	// 导入型渠道（ChatGPT Web）：扫面板填写的 ww3 客户端数据目录，逐文件校验后导入（票 08）。
 	mux.HandleFunc("POST /api/account/import_local", func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
 			Channel string `json:"channel"`
+			// Dir 仅多文件导入渠道（chatgpt）使用：用户指点的 ww3 客户端数据目录。
+			Dir string `json:"dir"`
 		}
 		_ = json.NewDecoder(r.Body).Decode(&req)
-		res, err := a.ImportLocalCredentials(req.Channel)
+		res, err := a.ImportLocalCredentials(req.Channel, req.Dir)
 		if err != nil {
 			apiError(w, http.StatusBadRequest, err.Error())
 			return
@@ -4607,6 +4801,47 @@ func (a *App) HandleAPI(mux *http.ServeMux) {
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "uid": uid, "warning": warn})
+	})
+	// ChatGPT 网页逆向通道：凭据是**整组网页会话**（Cookie 头 + Authorization 头），
+	// 两段缺一不可 —— 只给一段会得到「校验也过、每次请求都 403」的账号（票 05）。
+	mux.HandleFunc("POST /api/login/chatgpt_auth", func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Cookie        string `json:"cookie"`
+			Authorization string `json:"authorization"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			apiError(w, http.StatusBadRequest, "请求体解析失败")
+			return
+		}
+		uid, warn, err := a.SubmitChatGPTAuth(req.Cookie, req.Authorization)
+		if err != nil {
+			apiError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "uid": uid, "warning": warn})
+	})
+	// ModelScope 两区：粘贴 `ms-` Access Token（无 CDP、无 cookie 换取，D4）。
+	// 两个端点各自绑定一个 kind —— 区域写死在路由上，前端不可能把国际站 token 提交给国内站池。
+	modelscopeToken := func(w http.ResponseWriter, r *http.Request, kind provider.Kind) {
+		var req struct {
+			Token string `json:"token"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			apiError(w, http.StatusBadRequest, "请求体解析失败")
+			return
+		}
+		uid, warn, err := a.SubmitModelScopeToken(kind, req.Token)
+		if err != nil {
+			apiError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "uid": uid, "warning": warn})
+	}
+	mux.HandleFunc("POST /api/login/modelscope_token", func(w http.ResponseWriter, r *http.Request) {
+		modelscopeToken(w, r, provider.ModelScope)
+	})
+	mux.HandleFunc("POST /api/login/modelscopeai_token", func(w http.ResponseWriter, r *http.Request) {
+		modelscopeToken(w, r, provider.ModelScopeAI)
 	})
 	// Comate 扫码登录（服务端申请二维码，手机确认后自动拿 wps_sid）：三段式。
 	mux.HandleFunc("POST /api/login/doubao_qr", func(w http.ResponseWriter, r *http.Request) {
@@ -5192,6 +5427,9 @@ type feesModelRow struct {
 	SupportsImages    bool `json:"supports_images"`
 	SupportsReasoning bool `json:"supports_reasoning"`
 	SupportsTools     bool `json:"supports_tools"`
+	// SupportsImageGeneration 标记「能出图」（文生图/图生图）：与 supports_images（能看图）
+	// 正交，前端据此显示 🎨 图标，让面板与 /v1/models 的 supports_image_generation 同源。
+	SupportsImageGeneration bool `json:"supports_image_generation,omitempty"`
 	// 思考档位（issue #96，与 /v1/models 同源）：上游声明的可选档位与默认档，
 	// 空表 = 上游未声明（前端不展示，不编造）。
 	ReasoningEfforts       []string `json:"reasoning_efforts,omitempty"`
@@ -5264,6 +5502,8 @@ func buildFeesChannels(modelsByKind map[provider.Kind][]provider.ModelInfo,
 				SupportsImages:    mi.SupportsImages,
 				SupportsReasoning: mi.SupportsReasoning,
 				SupportsTools:     mi.SupportsTools,
+				// 能出图与能看图正交（D12）：面板模型行据此显示 🎨
+				SupportsImageGeneration: mi.SupportsImageGeneration,
 				// 思考档位（issue #96）与 /v1/models 同源透传
 				ReasoningEfforts:       mi.ReasoningEfforts,
 				DefaultReasoningEffort: mi.DefaultReasoningEffort,
@@ -5398,6 +5638,12 @@ func (a *App) staticModelFallback() map[provider.Kind][]provider.ModelInfo {
 // RefreshPricing 从所有已接入渠道拉取最新定价并更新缓存。
 // 并发调用会被丢弃（已有一次在跑）——启动刷新与面板「刷新」可能重叠。
 func (a *App) RefreshPricing() {
+	// 关闭流程中不再发起刷新：所有触发点都是 `go` 出去的，Close 之后才被调度到的那一个
+	// 会做无谓的上游请求并落盘，与退出/测试目录清理抢文件（R112b 同源纪律：
+	// 异步刷新不得跑过 Close）。
+	if a.closing() {
+		return
+	}
 	a.pricingMu.Lock()
 	if a.pricingBusy {
 		a.pricingMu.Unlock()
@@ -5515,6 +5761,13 @@ func (a *App) savePricingCache() {
 	a.pricingMu.Unlock()
 	raw, err := json.MarshalIndent(cache, "", "  ")
 	if err != nil {
+		return
+	}
+	// 判定与写入必须同在 refreshMu 之下：先判后放锁会留下「刚判完就被 Close 置位」的窗口，
+	// 而 Close 之后写文件就是「与退出/测试目录清理抢文件」的根因（见 waitRefresh 的说明）。
+	a.refreshMu.Lock()
+	defer a.refreshMu.Unlock()
+	if a.closed {
 		return
 	}
 	_ = os.WriteFile(a.pricingFP, raw, 0o644)

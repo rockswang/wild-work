@@ -38,7 +38,7 @@ func loadUIDs(t *testing.T, dir string) []string {
 	return out
 }
 
-// TestSaveAuthTwoAccountsDoNotOverwrite 是本轮修复的**核心回归**（R159）：
+// TestSaveAuthTwoAccountsDoNotOverwrite 是本轮修复的**核心回归**（R167）：
 //
 // 旧实现（方案 B）在「拿不到身份字段」时会复用**第一条已有账号的 UID**，于是第二个华为账号
 // 无论登的是谁，都会写进第一个账号的文件 —— 真机事故里表现为「登录成功、账号数还是 2、

@@ -171,6 +171,34 @@ func openAIUnsupportedBody(msg string) []byte {
 	return b
 }
 
+// isImageModelName 判断请求的模型名是否是本渠道的生图模型 `image`（容忍 `glm/` 前缀与
+// `:moe_53f` 类上游代号后缀）。与 StaticModels 里的 `glm/image` 条目同一判据。
+func isImageModelName(model string) bool {
+	m := strings.ToLower(strings.TrimSpace(model))
+	if i := strings.LastIndex(m, "/"); i >= 0 {
+		m = m[i+1:]
+	}
+	if i := strings.LastIndex(m, ":"); i >= 0 {
+		m = m[:i]
+	}
+	return m == "image"
+}
+
+// imageModelNotChatBody 生图模型被丢进对话路径时的 400 体（`image_model_not_chat`
+// 与 modelscope 渠道同名，客户端可按同一 code 分支）。
+func imageModelNotChatBody(model string) []byte {
+	msg := strings.TrimSpace(model) + " 是生图模型，不支持对话；请改用 POST /v1/images/generations"
+	b, err := json.Marshal(map[string]any{"error": map[string]any{
+		"message": msg,
+		"type":    "invalid_request_error",
+		"code":    "image_model_not_chat",
+	}})
+	if err != nil { // 不可能失败：纯字面量 map
+		return []byte(`{"error":{"message":"image model not supported for chat","code":"image_model_not_chat"}}`)
+	}
+	return b
+}
+
 // glmChatRequest 清言（IDE 通道）对话请求体。
 // 字段形状对齐 chatglm-cli ChatBody（抓包 sid 356/480 [实证]）。
 type glmChatRequest struct {
@@ -197,7 +225,7 @@ type glmChatMeta struct {
 }
 
 type glmCogview struct {
-	RmLabelWatermark bool   `json:"rm_label_watermark"`
+	RmLabelWatermark bool `json:"rm_label_watermark"`
 	// AspectRatio 生图比例（1:1/3:4/4:3/9:16/16:9）；对话路径不设（omitempty 不出现）。
 	AspectRatio string `json:"aspect_ratio,omitempty"`
 }
@@ -211,6 +239,12 @@ func (c *Client) ChatStream(a *auth.Auth, body []byte) (io.ReadCloser, int, []by
 	}
 	if err := json.Unmarshal(body, &req); err != nil {
 		return nil, 0, nil, fmt.Errorf("glm: 解析请求体失败: %w", err)
+	}
+	// `image` 是生图模型（StaticModels 会把它透出，带 supports_image_generation）：
+	// 它不参与对话路由——上游没有 cogview 参数时只会回普通文本。本地 400，
+	// 与 modelscope 的 image_model_not_chat 同口径（请求级：不罚号、不轮转）。
+	if isImageModelName(req.Model) {
+		return nil, http.StatusBadRequest, imageModelNotChatBody(req.Model), nil
 	}
 
 	// 提取唯一 user 提问；不支持多轮/tool_calls（见函数注释，报错即 400 透传）。

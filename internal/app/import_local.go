@@ -41,11 +41,28 @@ import (
 //   - **绝不打印凭据值**（日志只记文件名与 uid）。
 
 // ImportLocalResult 导入结果（供面板展示）。
+//
+// 单文件渠道（MonkeyCode / 小浣熊 / Loomy / OfficeAce）用 Channel/UID/File/Note；
+// chatgpt 是**多文件**导入（一个数据目录里可能有好几个账号），故逐文件结果进
+// Accounts / Imported / Skipped / Failed，顶层 Note 给一句汇总。
 type ImportLocalResult struct {
 	Channel string `json:"channel"`
 	UID     string `json:"uid"`
 	File    string `json:"file"`
 	Note    string `json:"note,omitempty"`
+	// Accounts 仅多文件导入渠道使用（chatgpt）；单文件渠道恒空。
+	Accounts []ImportLocalAccount `json:"accounts,omitempty"`
+	Imported int                  `json:"imported,omitempty"`
+	Skipped  int                  `json:"skipped,omitempty"`
+	Failed   int                  `json:"failed,omitempty"`
+}
+
+// ImportLocalAccount 是单个凭据文件的导入结果（零明文：只有文件名与短 uid）。
+type ImportLocalAccount struct {
+	File   string `json:"file"`             // 文件名（不含目录）
+	UID    string `json:"uid,omitempty"`    // 短 uid（尾号），失败时为空
+	Status string `json:"status"`           // imported / duplicate / invalid / failed
+	Reason string `json:"reason,omitempty"` // 失败/跳过原因（已做凭据掩码）
 }
 
 // authDoc / authSection / accountSection 与 internal/auth.Parse 的嵌套分支严格对应。
@@ -90,8 +107,12 @@ type accountSection struct {
 //     客户端配置落在标准目录即可命中，非 Windows 上找不到时给出明确报错。
 //     注：真正仅 Windows 的是「浏览器授权登录」（raccoon 依赖 HKCU 的
 //     office-raccoon:// 协议注册，见 protocol_windows.go）。
-func (a *App) ImportLocalCredentials(channel string) (*ImportLocalResult, error) {
+func (a *App) ImportLocalCredentials(channel, dir string) (*ImportLocalResult, error) {
 	switch provider.Kind(strings.TrimSpace(channel)) {
+	case provider.ChatGPT:
+		// 本渠道的凭据由 ww3 客户端按 `auths/*.json` 一账号一文件维护，
+		// 故走「扫目录 + 逐文件校验」这条多文件路径（dir 由面板填写）。
+		return a.importChatGPT(dir)
 	case provider.MonkeyCode:
 		return a.importMonkeyCode()
 	case provider.Raccoon:

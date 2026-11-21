@@ -613,6 +613,11 @@ func buildModelEntry(k provider.Kind, mi provider.ModelInfo) map[string]any {
 	if mi.SupportsTools {
 		entry["supports_tools"] = true
 	}
+	// 能出图（文生图/图生图）单独一个标记：与 architecture.input_modalities（能看图）
+	// 是两个维度，客户端靠它区分「画图模型」与「对话模型」（D12）。
+	if mi.SupportsImageGeneration {
+		entry["supports_image_generation"] = true
+	}
 	entry["architecture"] = map[string]any{
 		"input_modalities": mi.InputModalities(),
 		"modality":         mi.Modality(),
@@ -1593,7 +1598,7 @@ func (h *Handler) runtimeForModel(model string) (*Runtime, string, error) {
 	// 直通形态（`cline-free/*`）——后者首段不是渠道名，必须整串当上游模型名（决议 R59）。
 	kind, upstream, ok := provider.SplitModelID(model)
 	if !ok {
-		return nil, "", fmt.Errorf("model must use explicit prefix: workbuddy/<model> / workbuddyai/<model> / traework/<model> / qoder/<model> / qodercn/<model> / qodercom/<model> / qwenwork/<model> / glm/<model> / oczen/<model> / kilo/<model> / minimax/<model> / lobsterai/<model> / zcode/<model> / gemini/<model> / codearts/<model>；Cline 免费池直接用上游 ID（cline-free/<model>）%s", h.aliasHint())
+		return nil, "", fmt.Errorf("model must use explicit prefix: workbuddy/<model> / workbuddyai/<model> / traework/<model> / qoder/<model> / qodercn/<model> / qodercom/<model> / qwenwork/<model> / glm/<model> / oczen/<model> / kilo/<model> / minimax/<model> / lobsterai/<model> / zcode/<model> / gemini/<model> / codearts/<model> / chatgpt/<model>；Cline 免费池直接用上游 ID（cline-free/<model>）%s", h.aliasHint())
 	}
 	rt := h.getRuntime(kind)
 	if rt == nil || rt.Pool == nil || rt.Upstream == nil {

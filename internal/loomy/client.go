@@ -139,11 +139,24 @@ func traceparent() string {
 }
 
 // applyAuth 写鉴权与追踪头（官方客户端 session 模式是 token 头 + Authorization **双写**）。
+// traceparent 每次现生成——非流式路径与别的调用点都走这一条，行为不变。
 func applyAuth(req *http.Request, a *auth.Auth) {
+	applyAuthTrace(req, a, "")
+}
+
+// applyAuthTrace 同 applyAuth，但允许调用方**显式指定** traceparent。
+//
+// tp == "" 时仍现生成（既有调用点逐字不变）；非空则原样使用。
+// 存在的理由：重试循环需要让同一次逻辑请求的多次尝试共用同一个链路标识，
+// 而 traceparent 在既有实现里是「发请求时现生成」，循环接不上。
+func applyAuthTrace(req *http.Request, a *auth.Auth, tp string) {
 	tok := session(a)
 	req.Header.Set("Authorization", "Bearer "+tok)
 	req.Header.Set("token", tok)
-	req.Header.Set("traceparent", traceparent())
+	if tp == "" {
+		tp = traceparent()
+	}
+	req.Header.Set("traceparent", tp)
 	req.Header.Set("loomy-version", AppVersion)
 	req.Header.Set("Accept", "application/json")
 }
@@ -191,6 +204,15 @@ func (c *Client) RefreshToken(a *auth.Auth) error {
 // ---------------------------------------------------------------------------
 
 // ChatStream 实现 provider.Upstream。
+//
+// 结构 = 「校验一次 → 重试循环 → 单次请求函数」三段：
+//   - 本地模型校验与拒绝文案、档位投影与 logReasoningOnce 留在入口（模型面行为不变）；
+//   - 重试循环负责判据、退避、总预算、逐次判定与日志（策略见 retry.go）；
+//   - chatStreamOnce 只负责「发一次」，不含任何重试判断。
+//
+// 上游瞬时失败（502/503 + 快速传输层抖动）在**本函数内**被吸收：固定同一账号、
+// 不计账号错误、不轮换、不触发降级链（对 handler / 挑号 / 粘性路由完全无感）。
+// 预算耗尽后把**最后一次**尝试的上游错误原样返回（既有透传语义，不包装）。
 func (c *Client) ChatStream(a *auth.Auth, body []byte) (rc io.ReadCloser, status int, respBody []byte, err error) {
 	// 校验集合 = 静态表 ∪ 已拉取到的动态目录（见 knownModel）。
 	if m := modelOf(body); m != "" && !c.knownModel(m) {
@@ -199,12 +221,55 @@ func (c *Client) ChatStream(a *auth.Auth, body []byte) (rc io.ReadCloser, status
 	projected := projectEffort(body)
 	logReasoningOnce(body, projected)
 
+	// traceparent 在入口生成一次：同一次逻辑请求的多次尝试共用同一个链路标识（D8）。
+	tp := traceparent()
+	uid, model := "", modelOf(projected)
+	if a != nil {
+		uid = a.UID
+	}
+	start := time.Now()
+	deadline := start.Add(chatRetryDeadline)
+
+	attempts := 0
+	for {
+		attempts++
+		rc, status, respBody, err = c.chatStreamOnce(a, projected, tp)
+		// 逐次独立判定：任何非重试结果（成功 / 429 / 4xx / 500 / 504）立即返回。
+		if !chatRetryable(status, err) || attempts >= chatMaxAttempts {
+			break
+		}
+		wait := chatBackoff(attempts)
+		// 死线前置检查：越线即放弃，不睡半个退避、不再发起尝试。
+		if time.Now().Add(wait).After(deadline) {
+			break
+		}
+		log.Printf("loomy chat_stream retry: uid=%s model=%s attempt=%d/%d cause=%q wait=%v",
+			uid, model, attempts, chatMaxAttempts, chatAttemptReason(status, respBody, err), wait.Round(time.Millisecond))
+		time.Sleep(wait)
+	}
+	if chatRetryable(status, err) {
+		log.Printf("loomy chat_stream retry-exhausted: uid=%s model=%s attempts=%d elapsed=%v last=%q",
+			uid, model, attempts, time.Since(start).Round(time.Millisecond), chatAttemptReason(status, respBody, err))
+	}
+	return rc, status, respBody, err
+}
+
+// chatStreamOnce 发一次对话请求，并按既有 ChatStream 契约返回。
+//
+// 无任何重试判断；返回签名与 ChatStream 对外契约一致：
+//   - 成功：非 nil 流（已包空闲看门狗）+ 200 + nil 响应体 + nil 错误
+//   - 上游非 2xx：nil 流 + 该状态码 + 响应体（≤64KiB）+ nil 错误
+//   - 传输层失败：nil + 0 + nil + 原始错误
+//
+// projected 是**已投影**后的请求体：每次尝试都用同一个字节切片重建 reader，
+// 故不复用「已被消费过的 reader」。
+func (c *Client) chatStreamOnce(a *auth.Auth, projected []byte, tp string) (io.ReadCloser, int, []byte, error) {
 	req, err := http.NewRequest(http.MethodPost, c.baseURL()+EpChat, bytes.NewReader(projected))
 	if err != nil {
 		return nil, 0, nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	applyAuth(req, a)
+	applyAuthTrace(req, a, tp)
 	// 用无总超时的 client：长思考请求不受整请求上限约束（见 Client.StreamHTTP）。
 	resp, err := c.streamClient().Do(req)
 	if err != nil {
