@@ -17,6 +17,11 @@
 // 为什么精确额度码排在「独立数字 429」**之前**：额度失败方向最贵（误判成可重试 =
 // 30 分钟静默重试），而华为的响应里带 requestId/traceId 这类十六进制串，
 // 随机出现的 `429` 三个数字（如 `...429a...`）会被独立数字正则命中。
+//
+// ② 是**两个池子**（2026-11-18，R166）：`4291` 是 benefit **免费额度**（按 UTC+8 自然日
+// 重置），`TM.00001050` 是**积分账户**耗尽（靠「领取活动积分」入账，**不会**自动重置）。
+// 两者的**处置完全相同**（账号级长冷却 + 换号），故共用 ErrHardCredit、不新增 ErrKind；
+// 但给用户看的恢复说明必须分开，判据就是这两条正则（见 sse.go 的两个 hint）。
 // 反过来 ① 在 ② 之前，保证排队报文里若同时出现额度字样也仍按排队处理——这与
 // AGENTS.md 不变量 15「429 优先于 hardMarkers」同向（`4291` 是**精确码**而非泛化词）。
 package codearts
@@ -33,7 +38,17 @@ var (
 	// reQueueCode 精确排队码：TM.00001041（排队）/ 81111（APIG 限流）。
 	reQueueCode = regexp.MustCompile(`TM\.00001041|81111`)
 	// reQuotaCode 精确额度码：4291（InferHub.4291.200）+ insufficient quota 措辞。
+	// 语义 = **benefit 免费额度**耗尽（按 UTC+8 自然日重置）。
 	reQuotaCode = regexp.MustCompile(`(?i)4291|insufficient quota|quota[ _-]?exhausted`)
+	// reCreditExhausted 积分账户耗尽：TM.00001050（HTTP 400 + `您的积分已耗尽，请关注活动
+	// 积分领取活动或者[升级套餐]`）+ 中文措辞兜底。
+	//
+	// 为什么单独一条正则而不是并进 reQuotaCode：两者的**恢复方式不同**（见文件头 ② 与
+	// sse.go 的两个 hint）。分类结果仍是同一种 ErrHardCredit（处置一样），这里只为让
+	// 「怎么才能恢复」的说明能按池子分支——对积分账户说「预计明早 00:00 自动恢复」是编造。
+	//
+	// 码后面必须跟非数字（R75 纪律）：`TM.000010500` 之类不得被前缀命中。
+	reCreditExhausted = regexp.MustCompile(`(?i)TM\.00001050(?:[^0-9]|$)|积分已耗尽`)
 	// reStandalone429 独立数字 429：前后都不得是数字（`4291` 不得命中）。
 	reStandalone429 = regexp.MustCompile(`(?:^|[^0-9])429(?:[^0-9]|$)`)
 	// reRateWord 泛化限流词表。
@@ -65,6 +80,11 @@ func Classify(status int, body string) provider.ErrKind {
 		return provider.ErrSoftRate
 	case reQuotaCode.MatchString(low):
 		// 免费额度用尽：**不可重试**（重试到天亮也没用），按长冷却处理。
+		return provider.ErrHardCredit
+	case reCreditExhausted.MatchString(low):
+		// 积分账户耗尽（TM.00001050）：与 benefit 额度**同一种处置**（账号级长冷却 + 换号），
+		// 否则它会被下面的 `status == 400 → ErrBadParams` 接走 ⇒ 不冷却、不计错、不换号、
+		// 降级链也不触发，已耗尽的账号永远「健康」并被反复挑中（R166）。
 		return provider.ErrHardCredit
 	case status == http.StatusTooManyRequests || reStandalone429.MatchString(body):
 		return provider.ErrSoftRate
@@ -102,8 +122,8 @@ func Classify(status int, body string) provider.ErrKind {
 func statusOfPayload(body string) int {
 	low := strings.ToLower(body)
 	switch {
-	case reQuotaCode.MatchString(low):
-		return http.StatusPaymentRequired // 402 权益不足
+	case reQuotaCode.MatchString(low), reCreditExhausted.MatchString(low):
+		return http.StatusPaymentRequired // 402 权益不足（benefit 额度 / 积分账户两种池子同码）
 	case reQueueCode.MatchString(body) || reStandalone429.MatchString(body) || reRateWord.MatchString(low):
 		return http.StatusTooManyRequests
 	case reAuthText.MatchString(low):

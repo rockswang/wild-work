@@ -1,0 +1,461 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>闸 1 演示件 v3 · 账号管理列表模式（全表唯一表头 + 账号行 only + 平台列徽标）</title>
+<!--
+  UI 闸 1 静态演示件（票 01）·v3（owner 2026-11-16 三次修订后重出：msg b8af5a28 + be889cd0 + d0a43eba）。
+  · 单文件自包含：内联 CSS、内联自检脚本，无外部依赖、无网络请求、无后端、无仓库构建链。
+  · 数据与 DOM 均为**假数据 / 简化结构**，仅用于确认版式，**不得搬进生产文件**（真实实现走票 02）。
+  · 版式要点：全表**恰好一行**列名表头（<thead>）在最顶部；表格里**只有账号行**
+    （没有分组行、没有渠道标题、没有「N 号」、没有渠道小计 / 魔粒 / 临期 / 不可用）；
+    渠道合计只住在**表格上方**的既有汇总条；平台列 = **渠道徽标一个元素**（不再右侧重复显示名）。
+  · 相对上一版（commit 5ba85fc）的两处变化：
+      ① 分组行（<tr class="group-row">）整体删除 → 每个渠道块只剩账号行；
+      ② 平台格去掉 <span class="p-name">（徽标自带渠道名，消除「ModelScopeAI ModelScopeAI」重复）。
+  · 断点(869px)与 min-width(720px) 为演示值，票 04 闸 2 实测重定。
+  · 配色 / class 名照抄生产 style.css / app.js 的既有真源（--ch-* + .badge + .acct-table）。
+-->
+<style>
+:root {
+  --bg: #f5f6f8; --card: #ffffff; --border: #e4e7ec; --text: #1f2329; --muted: #8a919f;
+  --primary: #2563eb; --danger: #dc2626; --ok: #16a34a; --warn: #d97706; --radius: 10px;
+  --shadow: 0 1px 3px rgba(0,0,0,.06);
+  --ch-wb: #2563eb; --ch-trae: #047857; --ch-qwenwork: #4f46e5; --ch-raccoon: #8e6bf2;
+  --ch-oczen: #475569; --ch-cline: #15803d; --ch-comate: #d97706; --ch-kilo: #164e63;
+  --ch-zcode: #581c87; --ch-codearts: #991b1b; --ch-modelscopeai: #854d0e;
+}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif; background: var(--bg); color: var(--text); line-height: 1.5; }
+#app { max-width: 960px; margin: 0 auto; padding: 20px 16px 60px; }
+
+/* ===== 演示件自身的说明条（非生产样式，仅闸 1 用） ===== */
+.demo-banner { border: 1px dashed var(--primary); background: #eff6ff; border-radius: var(--radius); padding: 12px 14px; margin-bottom: 14px; font-size: 12.5px; }
+.demo-banner h1 { font-size: 15px; margin-bottom: 6px; }
+.demo-banner ol { margin: 6px 0 0 18px; }
+.demo-banner li { margin: 2px 0; }
+.demo-banner code { font-family: ui-monospace, Consolas, monospace; background: #fff; border: 1px solid var(--border); border-radius: 4px; padding: 0 4px; }
+.demo-delta { margin-top: 8px; padding-top: 8px; border-top: 1px dashed #bfd3f7; }
+.demo-ctrl { display: flex; align-items: center; gap: 8px; margin-bottom: 14px; font-size: 13px; }
+.demo-toggle { user-select: none; cursor: pointer; border: 1px solid var(--border); background: var(--card); border-radius: 8px; padding: 6px 12px; font-size: 13px; }
+.demo-toggle:hover { background: #f0f2f5; }
+#forceCompact:checked ~ #app .demo-toggle { border-color: var(--primary); background: #eff6ff; color: var(--primary); }
+.demo-note { font-size: 11.5px; color: var(--muted); }
+/* 自检结果条（闸 1 演示件自带反向护栏检查，非生产） */
+.demo-check { margin-top: 8px; padding: 8px 10px; border-radius: 8px; font-size: 12px; font-family: ui-monospace, Consolas, monospace; }
+.demo-check.pass { background: #f0fdf4; border: 1px solid #bbf7d0; color: #15803d; }
+.demo-check.fail { background: #fef2f2; border: 1px solid #fecaca; color: #b91c1c; }
+.demo-check .ck-line { display: block; }
+
+/* ===== 以下为照抄生产的既有样式（面板外壳 / 汇总条 / 列表视图） ===== */
+.panel { background: var(--card); border: 1px solid var(--border); border-radius: var(--radius); padding: 16px 18px; margin-bottom: 16px; box-shadow: var(--shadow); }
+.panel-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; flex-wrap: wrap; gap: 8px; }
+.panel-head h2 { font-size: 16px; font-weight: 600; }
+.btn { border: 1px solid var(--border); background: var(--card); color: var(--text); padding: 8px 14px; border-radius: 8px; cursor: pointer; font-size: 14px; transition: all .15s; }
+.btn:hover { background: #f0f2f5; }
+.btn.primary { background: var(--primary); border-color: var(--primary); color: #fff; }
+.btn.small { padding: 5px 10px; font-size: 13px; }
+
+.fn-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-bottom: 10px; padding: 8px 10px; background: var(--card); border: 1px solid var(--border); border-radius: var(--radius); }
+.fn-spacer { flex: 1; }
+
+.credit-summary { display: flex; flex-wrap: wrap; gap: 8px 10px; align-items: center; margin-bottom: 12px; padding: 10px 12px; background: var(--card); border: 1px solid var(--border); border-radius: var(--radius); }
+.cs-title { font-size: 12px; color: var(--muted); font-weight: 600; margin-right: 2px; }
+.cs-chip { display: inline-flex; align-items: center; gap: 6px; padding: 3px 10px 3px 4px; border-radius: 999px; background: var(--bg); border: 1px solid var(--border); font-size: 12px; white-space: nowrap; }
+.cs-chip .badge { font-size: 10px; }
+.cs-n { color: var(--muted); font-size: 11px; }
+.cs-num { font-weight: 700; color: var(--text); font-variant-numeric: tabular-nums; }
+.cs-exp { color: var(--danger); font-weight: 600; font-size: 11px; }
+.cs-tok { color: var(--primary); font-size: 11px; font-weight: 600; margin-left: 2px; }
+.cs-term { color: var(--primary); font-size: 11px; font-weight: 600; margin-left: 2px; }
+.cs-unu { color: var(--muted); font-size: 11px; }
+.cs-total { background: #eef4ff; border-color: #c7d9ff; }
+.cs-total .cs-title { color: var(--primary); }
+.cs-chip.clickable { cursor: pointer; }
+.cs-chip.clickable:hover { border-color: var(--primary); }
+.cs-chip.clickable.on { border-color: var(--primary); background: #eff6ff; }
+
+.acct-grid.list-mode { display: block; }
+.tbl-scroll { overflow-x: auto; }
+.acct-table { width: 100%; border-collapse: collapse; font-size: 13px; min-width: 720px; --acct-cred-unit: 48px; }
+.acct-table th, .acct-table td { padding: 6px 10px; border-bottom: 1px solid var(--border); text-align: left; vertical-align: top; }
+.acct-table .num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.acct-table tbody tr:last-child td { border-bottom: 0; }
+.acct-table .cell-uid { font-size: 11px; color: var(--muted); }
+
+/* 列名表头：**全表唯一一行**（<thead>），在最顶部；任何渠道块内不再出现列名行，
+   表格里也不再有任何分隔/岗哨行。
+   （R157 闸 2 已实测粘性表头在本页滚动上下文恒失效 ⇒ 不做 sticky。） */
+.acct-table thead th { color: var(--muted); font-weight: 500; font-size: 12px; background: var(--card); white-space: nowrap; border-bottom: 2px solid var(--border); vertical-align: middle; }
+.acct-table thead th.num { padding-right: calc(var(--acct-cred-unit) + 10px); }
+
+/* 平台列 = 渠道徽标**一个元素**（徽标自带渠道名；不再有右侧重复显示名，无宽窄档切换）。 */
+.acct-table .cell-platform { white-space: nowrap; }
+
+.acct-table .cell-acct { max-width: 220px; overflow-wrap: anywhere; }
+.acct-name { font-weight: 600; font-size: 14px; }
+.acct-name.editable { cursor: pointer; border-bottom: 1px dashed transparent; }
+.acct-name.editable:hover { color: var(--primary); border-bottom-color: var(--primary); }
+
+.acct-table .cell-credits { font-size: 14px; font-weight: 700; white-space: nowrap; line-height: 1.3; }
+.acct-table .cell-credits span { font-size: 11px; color: var(--muted); font-weight: 400; margin-left: 2px; }
+.acct-table .cell-credits .credit-num { font-size: 14px; font-weight: 700; color: var(--text); margin-left: 0; }
+.acct-table .cell-credits .credit-unusable { font-size: 12px; font-weight: 600; color: var(--muted); }
+.acct-table .cell-credits .credit-expiring { font-size: 12px; font-weight: 600; color: var(--danger); }
+.acct-table .cell-credits .cr-main { position: relative; padding-right: var(--acct-cred-unit); text-align: right; }
+.acct-table .cell-credits .cr-main:not(.has-unit) { padding-right: 0; }
+.acct-table .cell-credits .cr-num-box { font-variant-numeric: tabular-nums; }
+.acct-table .cell-credits .cr-unit { position: absolute; right: 0; bottom: 0; font-size: 11px; color: var(--muted); font-weight: 400; }
+.acct-table .cell-credits .cr-sub { font-size: 11px; color: var(--muted); font-weight: 400; white-space: nowrap; line-height: 1.3; }
+.acct-table .cell-credits.clickable { cursor: pointer; }
+.credit-na { color: var(--muted); font-style: italic; }
+
+.acct-table .cell-tags { white-space: nowrap; }
+.acct-table .cell-tags .tag { margin-right: 4px; display: inline-block; max-width: 180px; overflow: hidden; text-overflow: ellipsis; vertical-align: bottom; }
+.acct-table .cell-ops { white-space: nowrap; text-align: right; }
+.acct-table tr.disabled-row { opacity: .5; background: #f9fafb; }
+.acct-table tr.cooling-row td:first-child { box-shadow: inset 3px 0 0 var(--warn); }
+
+.badge { font-size: 10px; padding: 2px 7px; border-radius: 10px; color: #fff; white-space: nowrap; }
+.tag { font-size: 10px; padding: 2px 7px; border-radius: 10px; white-space: nowrap; }
+.tag.bad { background: #fee2e2; color: var(--danger); }
+.tag.ok { background: #dcfce7; color: var(--ok); }
+.tag.neutral { background: #f0f2f5; color: var(--muted); }
+.tag.warn { background: #fef3c7; color: var(--warn); }
+.icon-op { display: inline-flex; align-items: center; justify-content: center; width: 28px; height: 28px; border: 1px solid var(--border); border-radius: 6px; background: var(--card); color: var(--muted); cursor: pointer; font-size: 14px; margin: 0 1px; }
+.icon-op.danger:hover { color: var(--danger); border-color: var(--danger); background: #fef2f2; }
+.icon-op.warn:hover { color: var(--warn); border-color: var(--warn); background: #fffbeb; }
+.icon-op.off { cursor: not-allowed; color: #cbd5e1; opacity: .55; }
+.icon-op.help { cursor: help; font-weight: 600; }
+
+/* ===== 紧凑档（≤869px）：字号/内边距收紧。断点数值沿用四列旧值，票 04 实测重定。 ===== */
+@media (max-width: 869px) {
+  .acct-table { font-size: 12px; --acct-cred-unit: 44px; }
+  .acct-table th, .acct-table td { padding: 5px 6px; }
+  .acct-table thead th { font-size: 11px; }
+  .acct-table thead th.num { padding-right: calc(var(--acct-cred-unit) + 6px); }
+  .acct-table .cell-credits { font-size: 13px; }
+  .acct-table .cell-tags { white-space: normal; }
+  .acct-table .cell-tags .tag { max-width: 150px; }
+}
+/* 「模拟紧凑档」开关：不缩放窗口也能比对这两档（纯 CSS，无 JS；等价于上面的媒体查询）。 */
+#forceCompact:checked ~ #app .acct-table { font-size: 12px; --acct-cred-unit: 44px; }
+#forceCompact:checked ~ #app .acct-table th,
+#forceCompact:checked ~ #app .acct-table td { padding: 5px 6px; }
+#forceCompact:checked ~ #app .acct-table thead th { font-size: 11px; }
+#forceCompact:checked ~ #app .acct-table thead th.num { padding-right: calc(var(--acct-cred-unit) + 6px); }
+#forceCompact:checked ~ #app .acct-table .cell-credits { font-size: 13px; }
+#forceCompact:checked ~ #app .acct-table .cell-tags { white-space: normal; }
+#forceCompact:checked ~ #app .acct-table .cell-tags .tag { max-width: 150px; }
+
+/* 窄屏（≤779px）外壳换行，与生产一致 */
+@media (max-width: 779px) {
+  .panel-head { flex-direction: column; align-items: stretch; }
+}
+</style>
+</head>
+<body>
+<input type="checkbox" id="forceCompact" style="position:absolute;left:-9999px" aria-hidden="true">
+<div id="app">
+
+  <div class="demo-banner">
+    <h1>闸 1 演示件 v3 · 账号管理「列表模式」版式确认（全表唯一表头 + 账号行 only）</h1>
+    <div>本页是<b>自包含静态演示件</b>（假数据 / 无后端 / 无网络请求），仅用于确认版式，<b>不是实现分支</b>。</div>
+    <ol>
+      <li>五列字面序：<code>平台 / 账号 / 积分 / 状态 / 操作</code>，<b>全表只有最顶部一行列名表头</b>。</li>
+      <li><b>表格里只有账号行</b>：没有分组行、没有渠道标题、没有「N 号」、没有渠道小计 / 魔粒 / 临期 / 不可用。</li>
+      <li>渠道合计只住在<b>表格上方</b>的既有汇总条（本页静态呈现，与分组数逐字同源）。</li>
+      <li>平台列 = <b>渠道徽标一个元素</b>（徽标自带渠道名，右侧<b>不再</b>重复显示名）。</li>
+      <li>账号列 = 昵称（可点改名）+ 第二行 <code>UID: &lt;短 uid&gt;</code>。</li>
+    </ol>
+    <div class="demo-delta">
+      <b>本版相对上一版（commit 5ba85fc）的两处变化</b>（owner msg be889cd0 + d0a43eba）：
+      ① <b>分组行整体删除</b>（原「徽标 + 渠道名 + N 号 + 小计」那一行）→ 每个渠道块只剩账号行；
+      ② 平台格去掉右侧的重复显示名（原「ModelScopeAI ModelScopeAI」）。
+    </div>
+    <div id="demoCheck" class="demo-check"></div>
+  </div>
+
+  <div class="demo-ctrl">
+    <label for="forceCompact" class="demo-toggle">模拟紧凑档（≤869px）</label>
+    <span class="demo-note">—— 点击切换（按钮高亮 = 已开启）；也可直接缩放窗口，≤869px 自动进入紧凑档。平台列在宽窄两档都是徽标，不随档位变化。</span>
+  </div>
+
+  <div class="panel">
+    <div class="panel-head">
+      <h2>账号管理</h2>
+      <div class="demo-note">演示状态：列表模式 ·「不适用」渠道已展开</div>
+    </div>
+
+    <!-- 功能按钮条（与生产同构；本演示件不接逻辑） -->
+    <div class="fn-bar">
+      <span class="btn small">刷新积分</span>
+      <span class="btn small">全部签到</span>
+      <span class="fn-spacer"></span>
+      <span class="btn small">卡片</span>
+      <span class="btn small primary">● 列表</span>
+    </div>
+
+    <!-- 积分汇总条：渠道合计的**唯一**居住地（在表格上方；表格里不再有任何渠道级数字） -->
+    <div class="credit-summary">
+      <span class="cs-title">积分汇总</span>
+      <span class="cs-chip clickable"><span class="badge cline" style="background:#15803d">Cline</span><span class="cs-n">1号</span><span class="credit-na">不适用</span></span>
+      <span class="cs-chip clickable"><span class="badge codearts" style="background:#991b1b">CodeArts</span><span class="cs-n">1号</span><span class="cs-num">1,200</span><span class="cs-exp" title="今日到期，选号时优先消耗">临期200</span></span>
+      <span class="cs-chip clickable"><span class="badge modelscopeai" style="background:#854d0e">ModelScopeAI</span><span class="cs-n">2号</span><span class="cs-num">8,700</span><span class="cs-term">魔粒</span><span class="cs-exp">临期400</span><span class="cs-unu">不可用50</span></span>
+      <span class="cs-chip clickable"><span class="badge oczen" style="background:#475569">OpenCodeZen</span><span class="cs-n">1号</span><span class="credit-na">不适用</span></span>
+      <span class="cs-chip clickable"><span class="badge comate" style="background:#d97706">WPS Comate</span><span class="cs-n">1号</span><span class="cs-num">1,000</span></span>
+      <span class="cs-chip clickable"><span class="badge wb" style="background:#2563eb">WorkBuddyCN</span><span class="cs-n">2号</span><span class="cs-num">5,500</span><span class="cs-exp">临期100</span></span>
+      <span class="cs-chip clickable"><span class="badge zcode" style="background:#581c87">ZCode</span><span class="cs-n">1号</span><span class="cs-num">800万</span><span class="cs-tok">tokens</span></span>
+      <span class="cs-chip cs-total"><span class="cs-title">合计</span><span class="cs-num">16,400</span><span class="cs-exp">临期700</span></span>
+    </div>
+
+    <div class="acct-grid list-mode">
+      <div class="tbl-scroll">
+      <table class="acct-table" id="acctTable">
+        <!-- ============ 全表唯一一行列名表头（最顶部） ============ -->
+        <thead>
+          <tr>
+            <th scope="col" class="col-platform">平台</th>
+            <th scope="col" class="col-acct">账号</th>
+            <th scope="col" class="num col-credits">积分</th>
+            <th scope="col" class="col-status">状态</th>
+            <th scope="col" class="col-ops">操作</th>
+          </tr>
+        </thead>
+
+        <!-- ===== Cline：单账号 · 真实账号却无积分（不适用）· 无签到 · 可停用/删除 ===== -->
+        <tbody class="acct-group" data-group="cline">
+          <tr class="acct-row" data-group="cline" data-na="0">
+            <td class="cell-platform"><span class="badge cline" style="background:#15803d">Cline</span></td>
+            <td class="cell-acct"><span class="acct-name editable" title="点击修改显示名">cline-main</span><div class="cell-uid">UID: sk_cli…e8b0</div></td>
+            <td class="num cell-credits acct-credits"><div class="cr-main"><span class="credit-na" title="该渠道无积分概念">不适用</span></div></td>
+            <td class="cell-tags"><span class="tag neutral" title="Cline 不支持手动签到">无签到</span></td>
+            <td class="cell-ops">
+              <span class="icon-op off" title="Cline 不支持手动签到">✓</span>
+              <span class="icon-op warn" title="停用">⏸</span>
+              <span class="icon-op danger" title="删除账号">✕</span>
+            </td>
+          </tr>
+        </tbody>
+
+        <!-- ===== CodeArts：单账号 · 长昵称折行 · 登录态失效（需重新登录 + ⟳） ===== -->
+        <tbody class="acct-group" data-group="codearts">
+          <tr class="acct-row" data-group="codearts" data-na="0">
+            <td class="cell-platform"><span class="badge codearts" style="background:#991b1b">CodeArts</span></td>
+            <td class="cell-acct"><span class="acct-name editable" title="点击修改显示名">企业版-生产环境-主账号-北京-华北二-用于长昵称折行测试</span><div class="cell-uid">UID: abcdef…abcd</div></td>
+            <td class="num cell-credits acct-credits clickable" title="点击查看积分明细（含分页）">
+              <div class="cr-main has-unit"><span class="cr-num-box"><span class="credit-num">1,200</span></span><span class="cr-unit">可用积分</span></div>
+              <div class="cr-sub"><span class="credit-expiring"> (临期200)</span></div>
+            </td>
+            <td class="cell-tags"><span class="tag bad" title="登录态已失效，请重新登录">需重新登录</span></td>
+            <td class="cell-ops">
+              <span class="icon-op" title="签到">✓</span>
+              <span class="icon-op" title="重新登录（跳转登录页换新凭据，成功后自动补签）">⟳</span>
+              <span class="icon-op" title="刷新积分">↻</span>
+              <span class="icon-op warn" title="停用">⏸</span>
+              <span class="icon-op danger" title="删除账号">✕</span>
+            </td>
+          </tr>
+        </tbody>
+
+        <!-- ===== ModelScopeAI：多账号 · 长渠道名 · 渠道术语「魔粒」 · 不可用角标 ===== -->
+        <tbody class="acct-group" data-group="modelscopeai">
+          <tr class="acct-row" data-group="modelscopeai" data-na="0">
+            <td class="cell-platform"><span class="badge modelscopeai" style="background:#854d0e">ModelScopeAI</span></td>
+            <td class="cell-acct"><span class="acct-name editable" title="点击修改显示名">魔搭国际站-主号</span><div class="cell-uid">UID: msai-6…5e3f</div></td>
+            <td class="num cell-credits acct-credits clickable" title="点击查看积分明细（含分页）">
+              <div class="cr-main has-unit"><span class="cr-num-box"><span class="credit-num">8,400</span></span><span class="cr-unit">可用魔粒</span></div>
+              <div class="cr-sub"><span class="credit-expiring"> (临期400)</span></div>
+            </td>
+            <td class="cell-tags"><span class="tag neutral" title="ModelScopeAI 无签到">无签到</span></td>
+            <td class="cell-ops">
+              <span class="icon-op off" title="ModelScopeAI 不支持手动签到">✓</span>
+              <span class="icon-op" title="刷新积分">↻</span>
+              <span class="icon-op warn" title="停用">⏸</span>
+              <span class="icon-op danger" title="删除账号">✕</span>
+            </td>
+          </tr>
+          <tr class="acct-row" data-group="modelscopeai" data-na="0">
+            <td class="cell-platform"><span class="badge modelscopeai" style="background:#854d0e">ModelScopeAI</span></td>
+            <td class="cell-acct"><span class="acct-name editable" title="点击修改显示名">备用量</span><div class="cell-uid">UID: msai-0…6071</div></td>
+            <td class="num cell-credits acct-credits clickable" title="点击查看积分明细（含分页）">
+              <div class="cr-main has-unit"><span class="cr-num-box"><span class="credit-num">300</span></span><span class="cr-unit">可用魔粒</span></div>
+              <div class="cr-sub"><span class="credit-unusable"> (不可用50)</span></div>
+            </td>
+            <td class="cell-tags"><span class="tag neutral" title="ModelScopeAI 无签到">无签到</span></td>
+            <td class="cell-ops">
+              <span class="icon-op off" title="ModelScopeAI 不支持手动签到">✓</span>
+              <span class="icon-op" title="刷新积分">↻</span>
+              <span class="icon-op warn" title="停用">⏸</span>
+              <span class="icon-op danger" title="删除账号">✕</span>
+            </td>
+          </tr>
+        </tbody>
+
+        <!-- ===== OpenCodeZen：虚拟账号（🔒 只读、无停用/删除）· 不适用 ===== -->
+        <tbody class="acct-group" data-group="oczen">
+          <tr class="acct-row" data-group="oczen" data-na="1">
+            <td class="cell-platform"><span class="badge oczen" style="background:#475569">OpenCodeZen</span></td>
+            <td class="cell-acct"><span class="acct-name">匿名</span><div class="cell-uid">UID: oczen-anonymous</div></td>
+            <td class="num cell-credits acct-credits"><div class="cr-main"><span class="credit-na" title="该渠道无积分概念">不适用</span></div></td>
+            <td class="cell-tags"><span class="tag neutral" title="OpenCodeZen 不支持手动签到">不支持</span></td>
+            <td class="cell-ops">
+              <span class="icon-op help" title="关于 OpenCodeZen 通道：&#10;1. 本工具仅反代其免费模型（绕过官方客户端限制）&#10;2. 在 OpenCodeZen 获取的 API-Key 可在设置中配置&#10;3. 地域受限的免费模型会经「备用上游通道」自动重发">?</span>
+              <span class="icon-op off" title="固定账号，不可停用/删除">🔒</span>
+            </td>
+          </tr>
+        </tbody>
+
+        <!-- ===== WPS Comate：单账号 · 已停用 + 长原因（状态列截断） ===== -->
+        <tbody class="acct-group" data-group="comate">
+          <tr class="acct-row disabled-row" data-group="comate" data-na="0">
+            <td class="cell-platform"><span class="badge comate" style="background:#d97706">WPS Comate</span></td>
+            <td class="cell-acct"><span class="acct-name editable" title="点击修改显示名">wps-企业号</span><div class="cell-uid">UID: 7c1e9…22a4</div></td>
+            <td class="num cell-credits acct-credits clickable" title="点击查看积分明细（含分页）">
+              <div class="cr-main has-unit"><span class="cr-num-box"><span class="credit-num">1,000</span></span><span class="cr-unit">可用积分</span></div>
+            </td>
+            <td class="cell-tags">
+              <span class="tag neutral" title="该账号没有可用模型（未开通 Comate），已自动停用">已停用 · 该账号没有可用模型（未开通 C…</span>
+              <span class="tag neutral" title="WPS Comate 无签到">无签到</span>
+            </td>
+            <td class="cell-ops">
+              <span class="icon-op off" title="WPS Comate 无签到">✓</span>
+              <span class="icon-op" title="刷新积分">↻</span>
+              <span class="icon-op warn" title="启用">▶</span>
+              <span class="icon-op danger" title="删除账号">✕</span>
+            </td>
+          </tr>
+        </tbody>
+
+        <!-- ===== WorkBuddyCN：多账号 · 正常 + 冷却（冷却至 + 相对时长） ===== -->
+        <tbody class="acct-group" data-group="workbuddy">
+          <tr class="acct-row" data-group="workbuddy" data-na="0">
+            <td class="cell-platform"><span class="badge wb" style="background:#2563eb">WorkBuddyCN</span></td>
+            <td class="cell-acct"><span class="acct-name editable" title="点击修改显示名">主号</span><div class="cell-uid">UID: 295d15…1d00</div></td>
+            <td class="num cell-credits acct-credits clickable" title="点击查看积分明细（含分页）">
+              <div class="cr-main has-unit"><span class="cr-num-box"><span class="credit-num">3,500</span></span><span class="cr-unit">可用积分</span></div>
+              <div class="cr-sub"><span class="credit-expiring"> (临期100)</span></div>
+            </td>
+            <td class="cell-tags"><span class="tag ok">签到成功</span></td>
+            <td class="cell-ops">
+              <span class="icon-op" title="签到">✓</span>
+              <span class="icon-op" title="刷新积分">↻</span>
+              <span class="icon-op warn" title="停用">⏸</span>
+              <span class="icon-op danger" title="删除账号">✕</span>
+            </td>
+          </tr>
+          <tr class="acct-row cooling-row" data-group="workbuddy" data-na="0">
+            <td class="cell-platform"><span class="badge wb" style="background:#2563eb">WorkBuddyCN</span></td>
+            <td class="cell-acct"><span class="acct-name editable" title="点击修改显示名">备用号</span><div class="cell-uid">UID: 0ff90b…0b8a</div></td>
+            <td class="num cell-credits acct-credits clickable" title="点击查看积分明细（含分页）">
+              <div class="cr-main has-unit"><span class="cr-num-box"><span class="credit-num">2,000</span></span><span class="cr-unit">可用积分</span></div>
+            </td>
+            <td class="cell-tags">
+              <span class="tag warn" title="上游按模型限流">冷却至 11-16 14:20（剩 2 时 05 分）</span>
+              <span class="tag ok">签到成功</span>
+            </td>
+            <td class="cell-ops">
+              <span class="icon-op" title="签到">✓</span>
+              <span class="icon-op" title="刷新积分">↻</span>
+              <span class="icon-op warn" title="停用">⏸</span>
+              <span class="icon-op danger" title="删除账号">✕</span>
+            </td>
+          </tr>
+        </tbody>
+
+        <!-- ===== ZCode：单账号 · Token 计量（额度以 tokens 计，与积分分开统计） ===== -->
+        <tbody class="acct-group" data-group="zcode">
+          <tr class="acct-row" data-group="zcode" data-na="0">
+            <td class="cell-platform"><span class="badge zcode" style="background:#581c87">ZCode</span></td>
+            <td class="cell-acct"><span class="acct-name editable" title="点击修改显示名">ZCode-Pro</span><div class="cell-uid">UID: zc-1a2…7a8b</div></td>
+            <td class="num cell-credits acct-credits clickable" title="点击查看积分明细（含分页）">
+              <div class="cr-main has-unit"><span class="cr-num-box"><span class="credit-num">800万</span></span><span class="cr-unit" title="本渠道额度以 token 计量，与积分分开统计">tokens</span></div>
+            </td>
+            <td class="cell-tags"><span class="tag neutral" title="ZCode 不支持手动签到">不支持</span></td>
+            <td class="cell-ops">
+              <span class="icon-op off" title="ZCode 不支持手动签到">✓</span>
+              <span class="icon-op" title="刷新积分">↻</span>
+              <span class="icon-op warn" title="停用">⏸</span>
+              <span class="icon-op danger" title="删除账号">✕</span>
+            </td>
+          </tr>
+        </tbody>
+      </table>
+      </div>
+    </div>
+
+    <div class="demo-note" style="margin-top:10px">
+      渠道块顺序 = R142 唯一规则（内建按显示名 UTF-8 字节序；自定义垫底）：Cline → CodeArts → ModelScopeAI →
+      OpenCodeZen → WPS Comate → WorkBuddyCN → ZCode。本演示件无自定义渠道。7 个渠道块 / 9 个账号行。
+    </div>
+    <div class="demo-note" style="margin-top:6px">
+      已覆盖用例：长渠道名（ModelScopeAI）、长昵称折行（CodeArts）、单账号（Cline/CodeArts/WPS Comate/OpenCodeZen/ZCode）、
+      多账号（ModelScopeAI/WorkBuddyCN）、虚拟账号（OpenCodeZen：🔒 只读、无停用/删除）、已停用·原因、冷却至、
+      需重新登录、Token 计量、无积分「不适用」（真实账号可删可停 vs 虚拟账号只读）。
+    </div>
+    <div class="demo-note" style="margin-top:6px">
+      结构说明：全表<b>唯一一行列名表头</b>在 <code>&lt;thead&gt;</code>（最顶部）；每个 <code>&lt;tbody class="acct-group"&gt;</code>
+      内<b>只有账号行</b>；窄屏（列表区域）横向滚动，不裁列、不降级回卡片。
+    </div>
+  </div>
+
+</div>
+
+<!--
+  演示件自带的反向护栏自检（仅闸 1 用，非生产代码）。
+  检查三条：① 全表恰好一行 thead；② 表格内无分组行 / 岗哨行 / 渠道级求和；
+  ③ 平台格只含徽标一个元素，且渠道名字符串在该格内恰好出现一次。
+-->
+<script>
+(function () {
+  var box = document.getElementById("demoCheck");
+  var table = document.getElementById("acctTable");
+  // 演示件专用的渠道显示名映射（生产真源是 app.js 的 CH_LABEL；此处仅为自检少依赖）
+  var LABEL = {
+    cline: "Cline", codearts: "CodeArts", modelscopeai: "ModelScopeAI",
+    oczen: "OpenCodeZen", comate: "WPS Comate", workbuddy: "WorkBuddyCN", zcode: "ZCode",
+  };
+  var lines = [], ok = true;
+
+  function check(name, pass, detail) {
+    lines.push((pass ? "✅ " : "❌ ") + name + (detail ? "　" + detail : ""));
+    if (!pass) ok = false;
+  }
+
+  var theads = table.querySelectorAll("thead");
+  check("全表恰好一行列名表头（thead 出现次数 = 1）", theads.length === 1, "实测 " + theads.length);
+
+  var heads = theads.length === 1 ? theads[0].querySelectorAll("tr > th") : [];
+  var want = ["平台", "账号", "积分", "状态", "操作"];
+  var got = Array.prototype.map.call(heads, function (th) { return th.textContent.trim(); });
+  check("表头五列逐字按序 = 平台 / 账号 / 积分 / 状态 / 操作", got.join("/") === want.join("/"), "实测 " + got.join("/"));
+
+  var sentinels = table.querySelectorAll("tr.group-row, .acct-group-head, tbody th, [colspan]");
+  check("表格里无分组行 / 无跨列岗哨行", sentinels.length === 0, "实测 " + sentinels.length);
+
+  var sums = table.querySelectorAll(".cs-num, .cs-exp, .cs-unu, .cs-term, .cs-tok, .cs-n, .cs-stale");
+  check("表格里零渠道级求和节点（汇总条专用类不在表内）", sums.length === 0, "实测 " + sums.length);
+
+  var hasN = /\d+\s*号/.test(table.textContent);
+  check("表格里无「N 号」渠道小计文案", !hasN, hasN ? "命中 " + (/[^\s]*\d+\s*号/.exec(table.textContent) || [""])[0] : "");
+
+  var cells = table.querySelectorAll("td.cell-platform");
+  var cellFail = [];
+  Array.prototype.forEach.call(cells, function (td) {
+    var label = LABEL[(td.closest("tr").dataset.group || "")];
+    var txt = td.textContent.trim();
+    var times = label ? txt.split(label).length - 1 : 0;
+    if (td.childElementCount !== 1 || txt !== label || times !== 1) {
+      cellFail.push((td.closest("tr").dataset.group || "?") + "=>" + td.childElementCount + "元素/「" + txt + "」×" + times);
+    }
+  });
+  check("平台格只含徽标一个元素，渠道名字符串恰好出现一次（共 " + cells.length + " 格）", cellFail.length === 0, cellFail.join("; "));
+
+  box.className = "demo-check " + (ok ? "pass" : "fail");
+  box.innerHTML = "<b>" + (ok ? "反向护栏自检全部通过" : "反向护栏自检未通过") + "</b><br>"
+    + lines.map(function (l) { return '<span class="ck-line">' + l + "</span>"; }).join("");
+})();
+</script>
+</body>
+</html>

@@ -151,6 +151,13 @@ func TestReloginChannelSetMatchesBackend(t *testing.T) {
 	// `POST /api/login/officeace_auto`，压根不经过 StartLoginFor。
 	dedicatedUIEntry := map[string]bool{
 		"officeace": true, // app.js startOfficeAceWebLogin → /api/login/officeace_auto
+		// ModelScope 两区（R158）：粘贴型渠道，⟳ 由 app.js 的 startLogin 分派到 promptLogin
+		// → openMsDialog（同一个 token 粘贴层），压根不经过 StartLoginFor。
+		"modelscope":   true,
+		"modelscopeai": true,
+		// ChatGPT Web（票 05）：粘贴型渠道（Cookie 族 + Authorization，两段缺一不可），
+		// ⟳ 由 app.js 的 startLogin 分派到 promptLogin → openChatGPTPasteDialog（同一个粘贴层）。
+		"chatgpt": true,
 	}
 	for _, ch := range channels {
 		k := provider.Kind(ch)

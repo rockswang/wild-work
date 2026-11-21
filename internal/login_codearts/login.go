@@ -87,7 +87,7 @@ type Result struct {
 	//
 	// 语义：**填同一标识 = 同一账号（覆盖同一文件）；填不同标识 = 多个账号（并存）**。
 	// 它是最高优先级的手工覆盖手段：想让「同一账号的两套会话」分别成条时，填不同 Label 即可。
-	// 留空不再退化成「复用已有账号的 UID」（那是覆盖别人的根因，R159），
+	// 留空不再退化成「复用已有账号的 UID」（那是覆盖别人的根因，R167），
 	// 而是用下面的 AccountID 判同。
 	Label string
 
@@ -257,7 +257,7 @@ func SaveAuth(authDir string, r Result) (string, error) {
 	if strings.TrimSpace(r.UID) == "" && strings.TrimSpace(r.Label) == "" && strings.TrimSpace(r.AccountID) == "" {
 		return "", errors.New("missing uid in result")
 	}
-	// ── UID 优先级（2026-11-17 修订，R159）──────────────────────────────────────
+	// ── UID 优先级（2026-11-17 修订，R167）──────────────────────────────────────
 	//   1. **用户指定的 Label** —— 手工覆盖；想给「同一账号的两套会话」各建一条就用它；
 	//   2. **refresh_token 里的 account_id**（账号级稳定身份，见 claims.go）：
 	//      目录里已有同 account_id 的条目 ⇒ 复用它的 UID（同一账号重登 = 覆盖自己那条）；
@@ -291,7 +291,7 @@ func SaveAuth(authDir string, r Result) (string, error) {
 		// 防御：exchange 已硬校验，这里再挡一次——半成品凭据落盘后不可用且污染账号池。
 		return "", errors.New("missing access_key_id/secret_access_key in result")
 	}
-	// ── 跨账号覆盖护栏（R159 的止血带）────────────────────────────────────────
+	// ── 跨账号覆盖护栏（R167 的止血带）────────────────────────────────────────
 	// uid 已由 Label / account_id 决定，理论上不会撞到别的账号；但 Label 是用户输入，
 	// 手滑填成「另一个账号已有的标识」就会静默覆盖别人的凭据（且旧凭据是单次轮转票据，
 	// 被覆盖后再也兑不回来）。这里在落盘前最后挡一次：目标文件属于**另一个**账号就拒绝。

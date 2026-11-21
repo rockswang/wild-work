@@ -1,4 +1,4 @@
-// vision_test.go 「CodeArts 渠道支持图片输入」与模态能力声明的回归测试（R161）。
+// vision_test.go 「CodeArts 渠道支持图片输入」与模态能力声明的回归测试（R169）。
 //
 // 修复要点（2026-11-18 实测结论）：
 //  1. 出站 content 不再一刀切丢弃非 text 块：text + image_url 保留，
@@ -176,7 +176,7 @@ func TestNormalizePlainTextUnchanged(t *testing.T) {
 	}
 }
 
-// TestMeasuredVisionCapabilities 锁定实测能力表（R161）。
+// TestMeasuredVisionCapabilities 锁定实测能力表（R169）。
 //
 // 上游目录不下发模态字段，这组断言就是「谁能识图」的唯一真源；
 // 任何一侧被误改都必须当场变红。

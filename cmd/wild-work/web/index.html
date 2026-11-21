@@ -48,14 +48,8 @@
     <div class="mtab-body" id="mtabAccounts">
     <div class="panel-head">
       <div class="panel-actions-wrap">
-        <!-- 左组：刷新积分/全部签到，整体靠左 -->
-        <div class="pa-group pa-left">
-          <button class="btn primary" id="btnRefreshAll">刷新积分</button>
-          <button class="btn" id="btnCheckinAll">全部签到</button>
-        </div>
-        <!-- 中间弹性空白由 flex:1 撑开 -->
-        <div class="pa-spacer"></div>
-        <!-- 右组：渠道添加六列 grid，整体靠右；行数由渠道数决定（6 列 × 3 行 + 尾部 2 格）。
+        <!-- 渠道添加六列 grid，**占满整行宽度**（六列等宽、按钮在格内拉伸）；
+             行数由渠道数决定（6 列 × 3 行 + 尾部 2 格）。
              摆位由 DOM 顺序决定（行主序自然流），勿再写内联 grid-column/grid-row：
              那会让窄屏无法重排，也会破坏顺序一致性（scripts/ui-static-check.mjs 有顺序断言）。
 
@@ -71,12 +65,15 @@
                会落到 --primary（现与 --ch-wb 同值，改色板时就静默错色）。 -->
         <!-- 旧 Qoder 渠道已下线（代码保留，仅删界面入口） -->
         <div class="pa-group pa-right">
+          <button class="btn primary alt chatgpt" id="btnAddChatGPT" title="ChatGPT 网页逆向通道：凭据需从浏览器登录后粘贴（chatgpt.com 境内不可达，须先配代理）">＋ ChatGPT Web</button>
           <button class="btn primary alt cline" id="btnAddCline" title="免费池渠道：粘贴官方 API Key，须为多个独立账号各自的 Key">＋ Cline</button>
           <button class="btn primary alt codearts" id="btnAddCodeArts" title="CodeArts（华为云）：PKCE 授权登录，支持多账号；免费额度按 UTC+8 自然日重置">＋ CodeArts</button>
           <button class="btn primary alt gemini" id="btnAddGemini" title="Gemini（Google Code Assist）：本机回调授权登录，支持多账号">＋ Gemini</button>
           <button class="btn primary alt lobsterai" id="btnAddLobsterAI" title="LobsterAI（有道龙虾）：本机回调授权登录，支持多账号">＋ LobsterAI</button>
           <button class="btn primary alt loomy" id="btnAddLoomy">＋ Loomy</button>
           <button class="btn primary alt minimax" id="btnAddMiniMax" title="MiniMax Code（中国版）：设备码授权登录，支持多账号">＋ MiniMax</button>
+          <button class="btn primary alt modelscope" id="btnAddModelScope" title="ModelScope（魔搭国内站 api-inference.modelscope.cn）：粘贴 ms- Access Token，须已绑定阿里云账号并完成实名认证，token 区域须为国内站">＋ ModelScope</button>
+          <button class="btn primary alt modelscopeai" id="btnAddModelScopeAI" title="ModelScopeAI（魔搭国际站 api-inference.modelscope.ai）：粘贴 ms- Access Token，须已绑定阿里云账号并完成实名认证；两区 token 不通用">＋ ModelScopeAI</button>
           <button class="btn primary alt monkeycode" id="btnAddMonkeyCode">＋ MonkeyCode</button>
           <button class="btn primary alt officeace" id="btnAddOfficeAce" title="华为云果办：从本机 OfficeAce 客户端导入或自助 OAuth 登录">＋ OfficeAce</button>
           <button class="btn primary alt qodercn" id="btnAddQoderCN">＋ QoderCN</button>
@@ -95,7 +92,20 @@
         </div>
       </div>
     </div>
+    <!-- 功能按钮条（账号页级动作集中于此；顶部操作行只留渠道添加按钮）：
+         刷新积分 / 全部签到 沿用原标识与绑定，视图切换（卡片⇄列表）新增于此。
+         与汇总条同宽并排在它上方，避免「添加账号」与「账号页级动作」混在一处。 -->
+    <div class="fn-bar" id="acctFnBar">
+      <button class="btn primary" id="btnRefreshAll">刷新积分</button>
+      <button class="btn" id="btnCheckinAll">全部签到</button>
+      <div class="fn-spacer"></div>
+      <div class="seg" id="acctViewSeg" title="切换账号视图：卡片（浏览，默认）/ 列表（按渠道分组，一行一个账号）">
+        <button class="seg-btn active" data-view="card">卡片</button>
+        <button class="seg-btn" data-view="list">列表</button>
+      </div>
+    </div>
     <div id="creditSummary" class="credit-summary hidden" title="各渠道积分汇总（与账号卡片同源）"></div>
+    <!-- 账号区：两种视图（卡片网格 / 列表）在同一容器内互斥渲染，由 app.js 切 .list-mode -->
     <div id="acctList" class="acct-grid"></div>
     <!-- 全部卡片都被「收起不适用」过滤掉时的提示（否则一片空白会被当成账号丢了） -->
     <div id="acctHiddenTip" class="empty hidden"></div>
@@ -544,6 +554,54 @@
   </div>
 </div>
 
+<!-- ModelScope（魔搭）两区：粘贴 ms- Access Token。
+     ⚠️ 刻意**没有**「浏览器自动登录 / 扫码」入口：本渠道没有 CDP 捕获、也没有 cookie 换 token
+     的路（D4）；token 只能由用户在 modelscope.cn 自助生成后粘进来。
+     两区 token **不通用** ⇒ 弹层按渠道切换区域文案与提交端点，绝不共用一个池。 -->
+<div class="overlay hidden" id="msOverlay">
+  <div class="modal modal-wide">
+    <div class="modal-title" id="msTitle">添加 ModelScope 账号</div>
+    <div class="modal-body settings-body">
+
+      <div class="cfg-section">
+        <div class="cfg-heading">获取 Access Token</div>
+        <ol class="glm-steps">
+          <li>用浏览器打开 <a href="https://modelscope.cn/my/myaccesstoken" target="_blank" rel="noopener noreferrer">modelscope.cn/my/myaccesstoken</a>（国际站账号请用 <code>modelscope.ai</code> 的账号登录）。</li>
+          <li>确认该魔搭账号<b>已绑定阿里云账号并完成实名认证</b> —— 未绑定 / 未实名时上游会直接拒绝调用。</li>
+          <li>新建并复制一枚 <code>ms-</code> 开头的 Access Token，粘贴到下面。</li>
+        </ol>
+        <input id="msTokenInput" class="input grow" spellcheck="false" autocomplete="off"
+               placeholder="粘贴 ms- 开头的 Access Token" style="width:100%;font-family:ui-monospace,monospace">
+        <div class="hint" style="margin-top:6px">
+          <button class="btn small primary" id="btnMsSubmit">验证并添加</button>
+        </div>
+      </div>
+
+      <!-- 关键约束：区域与 token 必须一致，且一枚 token = 一个账号（多账号要粘多枚）。 -->
+      <div class="glm-warn">
+        <div class="glm-warn-title">⚠️ 两个区域，token 不通用</div>
+        <ol>
+          <li><b>ModelScope</b> = 国内站 <code>api-inference.modelscope.cn</code>；<b>ModelScopeAI</b> = 国际站 <code>api-inference.modelscope.ai</code>。</li>
+          <li>token 的区域必须与所选渠道<b>一致</b>：国内站 token 贴到 ModelScopeAI（或反之）会被上游判 401。</li>
+          <li><b>一枚 token 就是一个账号</b>：同一枚重复粘贴不会增加额度，多账号请分别粘贴各自的一枚。</li>
+        </ol>
+      </div>
+
+      <div class="hint" id="msRegion"></div>
+      <div class="hint">
+        上游只有 token 用量、<b>没有余额/积分查询接口</b>，故本渠道积分列显示「不适用」（不是额度用光）；
+        token 与请求数照常进「用量与流水」与平台概览表。token 失效（401）时账号卡片会出现 ⟳ 入口，
+        重新生成一枚后贴进来即可覆盖。
+      </div>
+
+      <div class="hint" id="msErr" style="color:var(--danger)"></div>
+    </div>
+    <div class="modal-actions">
+      <button class="btn" id="btnMsCancel">关闭</button>
+    </div>
+  </div>
+</div>
+
 <!-- 确认弹层 -->
 <div class="overlay hidden" id="confirmOverlay">
   <div class="modal">
@@ -552,6 +610,75 @@
     <div class="modal-actions">
       <button class="btn small" id="btnConfirmCancel">取消</button>
       <button class="btn small danger" id="btnConfirmOk">确定</button>
+    </div>
+  </div>
+</div>
+
+<!-- ChatGPT Web（网页逆向通道）：粘贴**两段**凭据 —— Cookie 头 + Authorization 头。
+     ⚠️ 两段缺一不可：本渠道凭据是整组网页会话，只贴其中一段会得到「校验也过、每次请求
+     都 403」的账号（本渠道最难排障的失败形态）。所以弹层刻意**两个凭据**输入框（第三个是票 08 的 ww3 数据目录），且没有任何
+     「浏览器自动登录 / 扫码」入口（CDP 只能拉起网关机上的浏览器，对远程 dashboard 无用）。 -->
+<div class="overlay hidden" id="chatgptOverlay">
+  <div class="modal modal-wide">
+    <div class="modal-title" id="chatgptTitle">添加 ChatGPT Web 账号</div>
+    <div class="modal-body settings-body">
+
+      <div class="cfg-section">
+        <div class="cfg-heading">从浏览器复制两段凭据</div>
+        <ol class="glm-steps">
+          <li>用浏览器打开 <a href="https://chatgpt.com/" target="_blank" rel="noopener noreferrer">chatgpt.com</a> 并确认<b>已登录</b>。</li>
+          <li>按 F12 打开 DevTools → Network 面板 → 随便发一句话 → 点任意一条 <code>chatgpt.com</code> 请求。</li>
+          <li>在 <b>Request Headers</b> 里复制 <code>Cookie</code> 的整段值，粘到下面第一格。</li>
+          <li>再复制 <code>Authorization</code> 的整段值（形如 <code>Bearer eyJ…</code>），粘到第二格。</li>
+        </ol>
+        <input id="cgptCookieInput" class="input grow" spellcheck="false" autocomplete="off"
+               placeholder="粘贴 Cookie 头（整段，形如 __Secure-next-auth.session-token=…; …）"
+               style="width:100%;font-family:ui-monospace,monospace;margin-bottom:8px">
+        <input id="cgptAuthInput" class="input grow" spellcheck="false" autocomplete="off"
+               placeholder="粘贴 Authorization 头（Bearer eyJ…）"
+               style="width:100%;font-family:ui-monospace,monospace">
+        <div class="hint" style="margin-top:6px">
+          <button class="btn small primary" id="btnCgptSubmit">验证并添加</button>
+        </div>
+      </div>
+
+      <div class="cfg-section">
+        <div class="cfg-heading">或者：从 ww3 客户端导入</div>
+        <div class="hint">
+          这个号已经在 ww3 客户端里登录过？不用手抄凭据：填那个客户端的<b>数据目录</b>
+          （其中含 <code>auths/</code> 子目录），本工具会逐个文件做一次零费用校验后导入；
+          已存在的账号<b>只告警、不覆盖</b>。
+        </div>
+        <input id="cgptImportDir" class="input grow" spellcheck="false" autocomplete="off"
+               placeholder="ww3 客户端数据目录，例如 ~/ww3 或 C:\Users\你\AppData\Roaming\ww3"
+               style="width:100%;font-family:ui-monospace,monospace;margin-bottom:8px">
+        <div class="hint" style="margin-top:6px">
+          <button class="btn small" id="btnCgptImport">从客户端导入</button>
+          <span class="hint">每个凭据文件都会单独回传结果（试过哪个文件、上游回什么）</span>
+        </div>
+        <div class="hint" id="cgptImportResult" style="margin-top:6px"></div>
+      </div>
+
+      <div class="glm-warn">
+        <div class="glm-warn-title">⚠️ 两段都必须粘，且来自同一次登录</div>
+        <ol>
+          <li><b>只贴 Cookie</b> 或 <b>只贴 Authorization</b> 都会做出一个「看着加上了、每次请求都 403」的账号。</li>
+          <li>本工具会把两段存进 <code>auths/chatgpt-&lt;uid&gt;.json</code>（仅属主可读），<b>不会</b>回显在页面上。</li>
+          <li>提交后输入框会清空；列表只显示昵称与短 uid。</li>
+        </ol>
+      </div>
+
+      <div class="hint">
+        本渠道是网页逆向通道（不是官方 API），且<b>必须能连通 chatgpt.com</b> —— 境内网络需给本工具配
+        <code>HTTPS_PROXY</code> / <code>HTTP_PROXY</code>，否则校验会直接报 403 / 网络不可达。
+        网页套餐<b>没有额度查询接口</b>，故本渠道积分列显示「不适用」（不是额度用光）；
+        也不支持工具调用（客户端带了 <code>tools</code> 会被忽略照跑）。
+      </div>
+
+      <div class="hint" id="cgptErr" style="color:var(--danger)"></div>
+    </div>
+    <div class="modal-actions">
+      <button class="btn" id="btnCgptCancel">关闭</button>
     </div>
   </div>
 </div>
@@ -682,7 +809,7 @@
       <div class="cfg-section" id="secFallback">
         <div class="cfg-heading"><span>模型降级链</span><button class="icon-btn cfg-search-btn" data-model-search title="查找模型（按关键字快速定位全渠道模型，点击结果复制完整 ID）">🔍 查询模型</button><span class="help-mark">?<span class="help-pop">
             原模型在该渠道已无账号可承载（请求模型的全部账号限流冷却，或整渠道账号全部不可用 / 已禁用）时，按顺序找第一个可用的备胎模型顶上，响应头 <code>X-Model-Fallback</code> 标注实际备胎；原模型恢复后自动切回，不粘滞。<br><br>
-            主力模型ID 与备胎模型ID 均用 <code>channel/model</code> 全路径（如 workbuddyai/deepseek-v4.1-flash），备胎可跨渠道。备胎链内可拖动 chip 调整顺序。<br><br>
+            主力模型ID 与备胎模型ID 均用 <code>channel/model</code> 全路径（如 workbuddyai/deepseek-v4.1-flash），备胎可跨渠道。同一模型可既是某规则主力、又作为其他规则的备胎；同规则自环除外（备胎不能等于本规则自己的主力）。备胎链内可拖动 chip 调整顺序。<br><br>
             <b>别名</b>是主力模型的另一个名字：客户端请求别名等同于请求主力模型（粘性路由 / 容量判定 / 降级链 / 冷却全部照旧），别名不参与备胎链，也不能当主力模型填。别名大小写敏感（<code>Fast</code> ≠ <code>fast</code>），不能含 <code>/</code>、空白、逗号、<code>*</code>；与真实模型裸名重合时按别名走（别名优先于 <code>compat.model_map</code> 与 <code>default_channel</code>），用量与统计仍记主力模型。
           </span></span></div>
         <div id="fbList" class="proxy-list"></div>

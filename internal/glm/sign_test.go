@@ -102,6 +102,28 @@ func TestStaticModelsShape(t *testing.T) {
 		t.Error("静态表缺少默认模型 chatglm:<上游代号>")
 	}
 
+	// 生图模型必须在表里且带「能出图」标记（D6：进目录才让客户端知道本渠道能画图）；
+	// 对话模型不得带该标记（能看图/能出图与对话能力正交）。
+	var img, chatMarked int
+	for _, m := range models {
+		if m.ID == "image" {
+			if !m.SupportsImageGeneration {
+				t.Error("静态表缺 image 的 SupportsImageGeneration（客户端无法区分画图/对话模型）")
+			}
+			img++
+			continue
+		}
+		if m.SupportsImageGeneration {
+			chatMarked++
+		}
+	}
+	if img != 1 {
+		t.Errorf("静态表应含且仅含 1 条 glm/image 生图模型，实际 %d", img)
+	}
+	if chatMarked != 0 {
+		t.Errorf("%d 条对话模型被误标 supports_image_generation", chatMarked)
+	}
+
 	// 三个 chatglm 变体都必须带 `:moe_53f` 后缀（让用户看出上游模型）
 	for _, want := range []string{"chatglm:moe_53f", "chatglm-think:moe_53f", "chatglm-deepresearch:moe_53f"} {
 		ok := false

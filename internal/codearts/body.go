@@ -155,7 +155,7 @@ func numberValue(raw any) float64 {
 }
 
 // normalizeMessages 出站消息归一（协议 §2.3「messages 序列化的硬约束」）：
-//  1. 文本与图片块保留，其余（audio/file 等）丢弃 —— 见 R161；
+//  1. 文本与图片块保留，其余（audio/file 等）丢弃 —— 见 R169；
 //  2. assistant 恒带 reasoning_content（缺失即补空串，否则上游 400）；
 //  3. 孤儿 tool_call / tool_result 整对剔除。
 func normalizeMessages(msgs []any) []any {
@@ -178,7 +178,7 @@ func normalizeMessages(msgs []any) []any {
 
 // textAndImageBlocks 保留 type=="text" 与图片类内容块，其余（audio/file 等）丢弃。
 //
-// R161（2026-11-18）：上游 chat 端点实测接受 OpenAI 形态的 image_url 内容块
+// R169（2026-11-18）：上游 chat 端点实测接受 OpenAI 形态的 image_url 内容块
 // （非多模态模型会被上游以 InferHub.001001020.406 明确拒绝，属误用而非本层问题），
 // 故不再一刀切丢弃图片。
 //

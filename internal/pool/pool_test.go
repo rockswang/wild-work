@@ -509,3 +509,29 @@ func TestCooldownModelPersists(t *testing.T) {
 		t.Fatalf("重启后同号其他模型应可用: %+v", got)
 	}
 }
+
+// TestMarkCreditStaleKeepsValueAndIsClearedBySuccess 刷新失败必须**保留旧值**并标
+// credits_stale（面板显示「待刷新」），成功写入即清除——只留旧数字会让用户把它当实时
+// 余额，写 0 又会被读成「额度用光」。
+func TestMarkCreditStaleKeepsValueAndIsClearedBySuccess(t *testing.T) {
+	p := New("")
+	p.Add(&auth.Auth{UID: "u1"})
+	p.SetCreditDetail("u1", 350, 0, 50, time.Time{})
+	if st, _ := p.Status("u1"); st.CreditsStale {
+		t.Fatal("成功写入后不应是 stale")
+	}
+
+	p.MarkCreditStale("u1")
+	st, _ := p.Status("u1")
+	if !st.CreditsStale {
+		t.Error("MarkCreditStale 后应标记 credits_stale")
+	}
+	if st.Credits != 350 || st.UnusableCredits != 50 {
+		t.Errorf("stale 标记不得改写旧值：credits=%d unusable=%d want 350/50", st.Credits, st.UnusableCredits)
+	}
+
+	p.SetCreditDetail("u1", 350, 0, 50, time.Time{})
+	if st, _ := p.Status("u1"); st.CreditsStale {
+		t.Error("再次成功写入应清除 stale")
+	}
+}

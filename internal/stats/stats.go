@@ -310,7 +310,7 @@ type Stats struct {
 	reqDays   map[string]int64                  // YYYY-MM-DD -> reqs（不含今日）
 	modelDays map[string]map[string]*modelEntry // 历史日 -> 模型 -> 消耗（跨天归档）
 
-	models    map[string]*modelEntry
+	models map[string]*modelEntry
 	// tput 吞吐滑动窗口（纯内存、不落盘，见 usage.go 的 tputMeter）。
 	tput      *tputMeter
 	milestone int
@@ -769,7 +769,17 @@ var (
 		string(provider.CodeArts):  true,
 		string(provider.Cline):     true, // R59：cline 的模型名是 cline-free/*，漏了它则该渠道 token 不进平台表
 		string(provider.OfficeAce): true,
-		string(provider.Comate):   true, // 漏了它 ⇒ comate 的 token 与请求都不进平台概览表
+		string(provider.Comate):    true, // 漏了它 ⇒ comate 的 token 与请求都不进平台概览表
+		// modelscope 两区（D19/R159）：漏了任一项 ⇒ 该区的 token 与请求全不进平台表，
+		// 而工具本身不报任何错（R130 的教训）。
+		string(provider.ModelScope):   true,
+		string(provider.ModelScopeAI): true,
+		// doubao / lingxi / chatgpt 曾经漏登（前两个已线上存），后果是该渠道的 token 与
+		// 请求全不进平台概览表、而工具本身不报任何错。现有 TestChannelKindCoversBuiltins
+		// 逐内建渠道校验，新增渠道漏登即变红。
+		string(provider.Doubao):  true,
+		string(provider.Lingxi):  true,
+		string(provider.ChatGPT): true,
 	}
 )
 

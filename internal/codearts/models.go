@@ -34,7 +34,7 @@ type modelEntry struct {
 	// ContextWindow 上下文窗口；**0 = 未知**（消费方必须判 > 0）。
 	ContextWindow int64
 	// SupportsImages 是否支持图像输入。**上游目录不下发这个字段**，
-	// 只能靠 R161 的可复现实测标定（见 measuredVisionModels），静态表是唯一来源。
+	// 只能靠 R169 的可复现实测标定（见 measuredVisionModels），静态表是唯一来源。
 	SupportsImages bool
 }
 
@@ -62,7 +62,7 @@ var staticCatalog = []modelEntry{
 	{ID: "mimo-v2.6-pro", ContextWindow: 300000},
 }
 
-// measuredVisionModels —— **可复现实测**得出的可识图模型集合（R161，2026-11-18）。
+// measuredVisionModels —— **可复现实测**得出的可识图模型集合（R169，2026-11-18）。
 //
 // 上游目录（GET /v1/model/builtin 与 gateway config）**完全不下发**模态能力字段，
 // 「能不能识图」只能实测：同一张 640×320 PNG（白底 + 红框 + 数字 7319）走真实链路
@@ -130,7 +130,7 @@ func modelInfos(entries []modelEntry) []provider.ModelInfo {
 			// ContextWindow 来自参考实现的静态表/上游声明，**不是**上游接口字段，
 			// 故 ContextFromAPI 保持 false（面板据此不把它当官方容量标注）。
 			ContextWindow: e.ContextWindow,
-			// 模态同上：上游不声明，只能靠 R161 实测表 + 静态表标记。
+			// 模态同上：上游不声明，只能靠 R169 实测表 + 静态表标记。
 			SupportsImages: modelSupportsImages(e.ID, e.SupportsImages),
 		})
 	}

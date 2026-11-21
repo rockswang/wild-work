@@ -78,6 +78,45 @@ func TestModelEntryTextOnly(t *testing.T) {
 	}
 }
 
+// ---- 「能出图」标记（D12）----
+
+// TestModelEntryImageGenerationMark 能出图的模型才带 supports_image_generation；
+// 「能看图」不得自动推导成「能出图」（两个维度），非生图条目的键集合逐字不变。
+func TestModelEntryImageGenerationMark(t *testing.T) {
+	img := buildModelEntry(provider.ModelScope, provider.ModelInfo{
+		ID: "Qwen/Qwen-Image", SupportsImageGeneration: true,
+	})
+	if img["supports_image_generation"] != true {
+		t.Errorf("生图模型应带 supports_image_generation=true，得到 %v", img["supports_image_generation"])
+	}
+	if img["id"] != "modelscope/Qwen/Qwen-Image" {
+		t.Errorf("id 应带渠道前缀，得到 %v", img["id"])
+	}
+
+	// 视觉理解模型（能看图）不得被标成能出图。
+	vl := buildModelEntry(provider.ModelScope, provider.ModelInfo{
+		ID: "Qwen/Qwen2.5-VL-72B-Instruct", SupportsImages: true,
+	})
+	if _, has := vl["supports_image_generation"]; has {
+		t.Error("能看图的模型不得自动标成能出图（D12：两个维度）")
+	}
+	if arch, _ := vl["architecture"].(map[string]any); arch["modality"] != "text+image->text" {
+		t.Errorf("能看图的模态声明不应被本轮改动影响：%v", arch["modality"])
+	}
+
+	// 非生图模型的输出形状逐字不变（三接口兼容层依赖这份 OpenAI 兼容字段集合）：
+	// 仍是 id/object/created/owned_by/architecture 五个键，标记字段缺席。
+	plain := buildModelEntry(provider.WorkBuddy, provider.ModelInfo{ID: "deepseek-v4"})
+	if len(plain) != 5 {
+		t.Errorf("普通模型的键数 = %d，want 5（新增字段必须只在有能力时出现）：%v", len(plain), plain)
+	}
+	for _, k := range []string{"id", "object", "created", "owned_by", "architecture"} {
+		if _, ok := plain[k]; !ok {
+			t.Errorf("普通模型缺 OpenAI 兼容字段 %q", k)
+		}
+	}
+}
+
 // ---- 思考档位透传（issue #96）----
 // 原则：上游目录声明了档位才输出 reasoning 对象与 supports_reasoning；
 // 未声明时两者都不出现（不编造），保持与 /api/fees 面板同源。

@@ -39,6 +39,11 @@ type Auth struct {
 	// 由导入器从客户端 cookie 文件取得；**无法由本工具刷新**（无登录流程），
 	// 过期后需重新导入。其它渠道不用该字段。
 	ConsoleCookie string
+	// Cookies 是整组网页会话 Cookie（chatgpt 渠道一等凭据：accessToken 之外的
+	// `__Secure-next-auth.session-token.0/.1` 等）。只增字段，向后兼容（不变量 5）：
+	// 旧 auth 文件读出为 nil，写出后旧版本忽略该字段也不报错。
+	// chatgpt 的 ww3 凭据文件把同名 cookie 映射写在 auth 段 ⇒ 逐字段零转换对上。
+	Cookies map[string]string `json:"cookies,omitempty"`
 	// BaizhiCookie 是**上游身份凭据**：长亭百智云（baizhi.cloud）的会话 Cookie
 	// `baizhi_session=…`。MonkeyCode 的控制台会话就是由它经 OAuth 派生出来的
 	// （`/api/v1/oauth/authorize` → 回调换 `monkeycode_ai_session`），
@@ -145,6 +150,8 @@ func Parse(raw []byte) (*Auth, error) {
 				ConsoleCookie string `json:"consoleCookie"`
 				// baizhiCookie 同上：百智云会话 Cookie（控制台会话的上游来源）
 				BaizhiCookie string `json:"baizhiCookie"`
+				// cookies 是整组网页会话 Cookie（仅 chatgpt 渠道用；其余渠道空）
+				Cookies map[string]string `json:"cookies"`
 				// extra 渠道扩展凭据袋（officeace 等；其余渠道空）
 				Extra map[string]string `json:"extra"`
 			} `json:"auth"`
@@ -173,6 +180,8 @@ func Parse(raw []byte) (*Auth, error) {
 			ConsoleCookie: n.Auth.ConsoleCookie,
 			// BaizhiCookie 同上（控制台会话的上游来源）
 			BaizhiCookie: n.Auth.BaizhiCookie,
+			// Cookies 仅 chatgpt 非空
+			Cookies:      n.Auth.Cookies,
 			Extra:        n.Auth.Extra,
 			UID:          n.Account.UID,
 			EnterpriseID: n.Account.EnterpriseID,
@@ -195,6 +204,8 @@ func Parse(raw []byte) (*Auth, error) {
 			ConsoleCookie string `json:"consoleCookie"`
 			// baizhiCookie 同上：百智云会话 Cookie（控制台会话的上游来源）
 			BaizhiCookie string `json:"baizhiCookie"`
+			// cookies 是整组网页会话 Cookie（仅 chatgpt 渠道用；其余渠道空）
+			Cookies map[string]string `json:"cookies"`
 			// extra 渠道扩展凭据袋（officeace 等；其余渠道空）
 			Extra        map[string]string `json:"extra"`
 			UID          string            `json:"uid"`
@@ -218,6 +229,7 @@ func Parse(raw []byte) (*Auth, error) {
 			SigningSecret: f.SigningSecret,
 			ConsoleCookie: f.ConsoleCookie,
 			BaizhiCookie:  f.BaizhiCookie,
+			Cookies:       f.Cookies,
 			Extra:         f.Extra,
 			UID:           f.UID,
 			EnterpriseID:  f.EnterpriseID,
@@ -261,6 +273,8 @@ func (a *Auth) saveAtomicLocked() error {
 			"consoleCookie": a.ConsoleCookie,
 			// baizhiCookie 同上：仅 MonkeyCode 用（百智云会话 Cookie）
 			"baizhiCookie": a.BaizhiCookie,
+			// cookies 仅 chatgpt 渠道非空；其余渠道写空 map 无副作用
+			"cookies": a.Cookies,
 			// extra 仅 officeace 等扩展渠道非空；其余渠道写空 map 无副作用
 			"extra": a.Extra,
 		},
@@ -506,6 +520,42 @@ func LoadComateDir(dir string) ([]*Auth, error) {
 // ExpiresAt 恒远期；但灵犀有每日签到（领智点），由调度器走 checkinMinutes。
 func LoadLingxiDir(dir string) ([]*Auth, error) {
 	return loadPrefixed(dir, "lingxi")
+}
+
+// LoadChatGPTDir 扫描 chatgpt 网页逆向渠道凭证（chatgpt-*.json）。
+//
+// 凭据形态与 ww3 客户端 `auths/<name>.json` **逐字段相同**（嵌套形
+// `{"auth":{accessToken,expiresAt,deviceId,cookies,…},"account":{uid,nickname}}`），
+// 因此不需要任何格式转换：Parse 读出 accessToken / expiresAt / deviceId / cookies /
+// account.uid 即完成「零转换」导入。
+//
+// 解析失败或不可读的文件静默跳过（启动日志由调用方统计），Kind 固定 "chatgpt"。
+// 关键字段的**显式报错**在 internal/chatgpt.ParseAuth（导入路径用），此处只做启动期容错扫描。
+//
+// glob 边界：`chatgpt-*` 要求紧跟 `-`，现存前缀
+// （workbuddy* / traework- / qoder* / qwenwork- / glm- / monkeycode- / raccoon- /
+// loomy- / cline- / comate- / lingxi- / modelscope* / officeace- / minimax- /
+// lobsterai- / gemini- / codearts- / zcode- / doubao-）没有一个以 `chatgpt` 开头；
+// 反向亦安全（`chatgpt2-*.json` 之类不会被误收）。
+func LoadChatGPTDir(dir string) ([]*Auth, error) {
+	return loadPrefixed(dir, "chatgpt")
+}
+
+// LoadModelscopeDir 扫描魔搭国内站凭证（modelscope-*.json）。
+// 粘贴型渠道：凭据是面板手工粘贴的 `ms-` Access Token（一枚 token = 一个账号，
+// 真多 token 池），存于 AccessToken；token 无 refresh 端点 ⇒ 无保活/无签到。
+//
+// glob 边界：`modelscope-*.json` 与 `modelscopeai-*.json` **互不吞噬** ——
+// 后者在 `modelscope` 前缀之后紧接 `a` 而不是 `-`，故不匹配本前缀
+// （auth_test.go 的 TestLoadModelscopeGlobBoundary 是护栏）。
+func LoadModelscopeDir(dir string) ([]*Auth, error) {
+	return loadPrefixed(dir, "modelscope")
+}
+
+// LoadModelscopeAIDir 扫描魔搭国际站凭证（modelscopeai-*.json）。
+// 与国内站是**两个独立服务**、token 不通用 ⇒ 独立前缀与独立账号池，绝不互相兜底。
+func LoadModelscopeAIDir(dir string) ([]*Auth, error) {
+	return loadPrefixed(dir, "modelscopeai")
 }
 
 // LoadOfficeAceDir 扫描华为云果办 OfficeAce 渠道凭证（officeace-*.json）。
