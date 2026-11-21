@@ -7,7 +7,6 @@ import (
 	"errors"
 	"sync"
 	"testing"
-	"time"
 
 	"wild-work/internal/auth"
 	"wild-work/internal/pool"
@@ -172,8 +171,10 @@ func TestMultiCheckinPerDayAcrossSlots(t *testing.T) {
 	}
 }
 
-// TestAllAccountsDayDoneDrivesNextFire 当日全员完成后，触发点为空，
-// 面板「下次签到」与 Run 循环都不再为今天排任何时间点。
+// TestAllAccountsDayDoneDrivesNextFire 当日全员完成后，Run 循环的签到触发点为空，
+// 不再为今天排任何签到时间点。不断言 NextFire()：它是「签到∪保活」的合并投影，
+// 默认保活 22:00（New 兜底）在签完后本就该留在今天，拿它套「12 小时窗口」
+// 断言会得到一条上午恒绿、白天恒红的时间依赖断言。
 func TestAllAccountsDayDoneDrivesNextFire(t *testing.T) {
 	up := newPerAccountUpstream(func(uid string) provider.CheckinStatus {
 		return provider.CheckinClaimed // 两个账号都成功
@@ -192,9 +193,6 @@ func TestAllAccountsDayDoneDrivesNextFire(t *testing.T) {
 	}
 	if got := s.fireMinutes([]int{10 * 60, 21 * 60}); len(got) != 0 {
 		t.Fatalf("当日完成后触发点应为空，实际 %v", got)
-	}
-	if !s.NextFire().IsZero() && s.NextFire().Before(time.Now().Add(12*time.Hour)) {
-		t.Fatalf("下次签到不该排在今天：%v", s.NextFire())
 	}
 }
 
