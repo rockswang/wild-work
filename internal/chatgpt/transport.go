@@ -17,6 +17,7 @@ import (
 	fhttp "github.com/bogdanfinn/fhttp"
 	tls_client "github.com/bogdanfinn/tls-client"
 	"github.com/bogdanfinn/tls-client/profiles"
+	"golang.org/x/net/http/httpproxy"
 
 	"wild-work/internal/auth"
 )
@@ -314,21 +315,51 @@ func (c *Client) host() string {
 
 // proxyURL 解析生效代理：Config.Proxy 优先，否则按基址协议读环境变量。
 // 先例 custom / officeace 走 http.ProxyFromEnvironment；这里换成显式解析是因为
-// tls-client 只吃一个代理 URL 字符串（且 socks5:// 必须原样传入）。
+// tls-client 只吃一个代理 URL 字符串（且 socks5:// 必须原样传入）。显式解析
+// 必须自己补上 NO_PROXY 尊重（ProxyFromEnvironment 自带该语义）：否则带代理
+// 环境下 127.0.0.1/localhost 的本地 mock（测试）与本地中转全被劫持到代理。
 func (c *Client) proxyURL() string {
 	if strings.TrimSpace(c.cfg.Proxy) != "" {
 		return strings.TrimSpace(c.cfg.Proxy)
 	}
-	return resolveProxy(c.scheme())
+	return resolveProxy(c.scheme(), c.host())
 }
 
-// resolveProxy 读代理环境变量。https 基址优先 HTTPS_PROXY，http 基址优先 HTTP_PROXY；
-// 两者互为兜底（返回值原样使用，`socks5://` 形态由 tls-client 支持）。
-func resolveProxy(scheme string) string {
-	keys := []string{"HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy"}
+// resolveProxy 读代理环境变量并尊重 NO_PROXY 排除（用 x/net httpproxy 复刻
+// ProxyFromEnvironment 的匹配语义，含后缀通配与 CIDR）。https 基址优先
+// HTTPS_PROXY，http 基址优先 HTTP_PROXY；两者互为兜底；socks5:// 形态原样保留。
+func resolveProxy(scheme, host string) string {
+	https := firstNonEmptyEnv("HTTPS_PROXY", "https_proxy")
+	httpp := firstNonEmptyEnv("HTTP_PROXY", "http_proxy")
+	raw := https
 	if scheme == "http" {
-		keys = []string{"HTTP_PROXY", "http_proxy", "HTTPS_PROXY", "https_proxy"}
+		raw = httpp
+		if raw == "" {
+			raw = https
+		}
+	} else if raw == "" {
+		raw = httpp
 	}
+	if raw == "" {
+		return ""
+	}
+	cfg := &httpproxy.Config{
+		// 两个协议位都填选中的 raw：保持“https 基址优先 HTTPS_PROXY / http 优先 HTTP_PROXY
+		// 互为兑底”的原语义（ProxyFunc 按请求 scheme 取位），而不是让 ProxyFunc 自己再选一次。
+		HTTPProxy:  raw,
+		HTTPSProxy: raw,
+		NoProxy:    firstNonEmptyEnv("NO_PROXY", "no_proxy"),
+		CGI:        false,
+	}
+	u, err := cfg.ProxyFunc()(&url.URL{Scheme: scheme, Host: host})
+	if err != nil || u == nil {
+		return ""
+	}
+	return u.String()
+}
+
+// firstNonEmptyEnv 按序读环境变量，返回首个非空值（全部为空返回空串）。
+func firstNonEmptyEnv(keys ...string) string {
 	for _, k := range keys {
 		if v := strings.TrimSpace(os.Getenv(k)); v != "" {
 			return v
