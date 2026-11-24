@@ -4367,3 +4367,13 @@ ledger/stats 文件，而 `App.Close()` 原先不等它收尾 —— Windows 上
 ## 验证
 
 - go build / vet / 全量单测与前端静态检查通过；`dist/wild-work.exe` 本地重建并核对版本号。
+
+# wild-work v2.13.1
+
+## 修复
+
+- ChatGPT Web 代理解析尊重 `NO_PROXY`（R171，PR #234，外部贡献）：显式解析代理时丢失了 `ProxyFromEnvironment` 自带的排除语义，代理环境下 127.0.0.1/localhost 的本地请求/测试全被劫持到代理。现用 `x/net/http/httpproxy` 复刻官方匹配语义（后缀通配、CIDR），代理优先序不变。
+
+## 验证
+
+- go build / vet / 全量单测通过；`dist/wild-work.exe` 本地重建并核对版本号。
