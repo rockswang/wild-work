@@ -214,7 +214,11 @@ func TestProxySocks5(t *testing.T) {
 }
 
 // TestProxyFromEnvironment HTTPS_PROXY 环境变量（未显式配代理时）必须生效。
+// 开头显式清空可能与开发机真实环境冲突的代理变量，保证测试自洽（CI 与本机同行为）。
 func TestProxyFromEnvironment(t *testing.T) {
+	for _, k := range []string{"HTTP_PROXY", "http_proxy", "HTTPS_PROXY", "https_proxy", "NO_PROXY", "no_proxy"} {
+		t.Setenv(k, "")
+	}
 	p := startProxy(t, "http", okJSON(`{"id":"env"}`))
 	t.Setenv("HTTPS_PROXY", p.proxyURL())
 
@@ -226,23 +230,35 @@ func TestProxyFromEnvironment(t *testing.T) {
 	p.waitRequest(t)
 }
 
-// TestResolveProxyPrecedence 环境变量优先序（显式配置 > 环境变量，https 基址优先 HTTPS_PROXY）。
+// TestResolveProxyPrecedence 环境变量优先序（显式配置 > 环境变量，https 基址优先 HTTPS_PROXY；
+// NO_PROXY 命中强制直连——本机补丁语义，见 transport.go resolveProxy）。
 func TestResolveProxyPrecedence(t *testing.T) {
 	t.Setenv("HTTP_PROXY", "http://hp:1")
 	t.Setenv("HTTPS_PROXY", "http://sp:2")
-	if got := resolveProxy("https"); got != "http://sp:2" {
+	if got := resolveProxy("https", "chatgpt.com"); got != "http://sp:2" {
 		t.Errorf("https 基址取到 %q，期望 HTTPS_PROXY", got)
 	}
-	if got := resolveProxy("http"); got != "http://hp:1" {
+	if got := resolveProxy("http", "chatgpt.com"); got != "http://hp:1" {
 		t.Errorf("http 基址取到 %q，期望 HTTP_PROXY", got)
 	}
 	t.Setenv("HTTP_PROXY", "")
-	if got := resolveProxy("http"); got != "http://sp:2" {
+	if got := resolveProxy("http", "chatgpt.com"); got != "http://sp:2" {
 		t.Errorf("HTTP_PROXY 缺失时应回退 HTTPS_PROXY，得到 %q", got)
 	}
 	t.Setenv("HTTPS_PROXY", "")
-	if got := resolveProxy("http"); got != "" {
+	if got := resolveProxy("http", "chatgpt.com"); got != "" {
 		t.Errorf("全空应返回空串，得到 %q", got)
+	}
+	t.Setenv("HTTPS_PROXY", "http://sp:2")
+	t.Setenv("NO_PROXY", "chatgpt.com,.openai.com")
+	if got := resolveProxy("https", "chatgpt.com"); got != "" {
+		t.Errorf("NO_PROXY 精确命中应直连，得到 %q", got)
+	}
+	if got := resolveProxy("https", "api.openai.com"); got != "" {
+		t.Errorf("NO_PROXY 后缀命中（.openai.com）应直连，得到 %q", got)
+	}
+	if got := resolveProxy("https", "other.example.com"); got != "http://sp:2" {
+		t.Errorf("未命中 NO_PROXY 的 host 应走代理，得到 %q", got)
 	}
 }
 
