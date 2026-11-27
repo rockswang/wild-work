@@ -47,7 +47,7 @@ type Client struct {
 	utMu      sync.RWMutex
 	userTypes map[string]string
 
-	// webMu 保护按凭据隔离的网页会话缓存（cookie + 最早到期时刻）。
+	// webMu 保护按凭据隔离的网页 cookie 缓存；积分包数据不缓存。
 	// cookie 可复用；ticket 一次性，用完即废。详见 web_expiry.go。
 	webMu       sync.Mutex
 	webSessions map[string]*webSession
@@ -372,7 +372,7 @@ func (c *Client) UserResource(a *auth.Auth) (int64, error) {
 	return int64(q.UserQuota.Remaining + q.AddOnQuota.Remaining), nil
 }
 
-// UserResourceDetail 查询积分明细：userQuota + addOnQuota 两个条目。
+// UserResourceDetail 查询用户套餐与逐笔积分包；网页明细不可用时保留聚合条目。
 func (c *Client) UserResourceDetail(a *auth.Auth) (int64, []provider.ResourceItem, error) {
 	dt := a.JWT()
 	if dt == "" {
@@ -412,32 +412,101 @@ func (c *Client) UserResourceDetail(a *auth.Auth) (int64, []provider.ResourceIte
 		items = append(items, provider.ResourceItem{Name: "赠送额度", Total: int64(q.AddOnQuota.Total), Used: int64(q.AddOnQuota.Used), Remain: int64(q.AddOnQuota.Remaining), Key: "addOnQuota", Usable: true})
 	}
 
-	// 最早到期时刻：/api/v2/quota/usage 不下发该字段，只能从网页端按笔读取积分包。
-	// 网页链路失败时 earliestWebExpiry 返回零值，下面整段跳过 —— 余额读取照常成功、
-	// ExpireAt 留空，绝不因网页接口挂掉把账号判成异常。
-	if expireAt := webExpireAtString(c.earliestWebExpiry(dt)); expireAt != "" {
-		// EarliestExpire 取全体最早值且跳过 Remain<=0 的条目，填在哪条都一样。
-		// 优先填「赠送额度」（积分包通常落在该池），否则退到第一条有剩余的条目。
-		idx := -1
+	items = expandWebCreditPacks(items, c.webCreditPacks(dt))
+	return total, items, nil
+}
+
+func expandWebCreditPacks(items []provider.ResourceItem, packs []webCreditPack) []provider.ResourceItem {
+	if len(packs) == 0 {
+		return items
+	}
+	var packRemain int64
+	for _, p := range packs {
+		packRemain += p.remain
+	}
+
+	for _, key := range []string{"addOnQuota", "userQuota"} {
 		for i := range items {
-			if items[i].Key == "addOnQuota" && items[i].Remain > 0 {
-				idx = i
-				break
+			if items[i].Key == key && packRemain <= items[i].Remain {
+				out := make([]provider.ResourceItem, 0, len(items)+len(packs))
+				out = append(out, items[:i]...)
+				out = append(out, webCreditResourceItems(packs)...)
+				out = append(out, items[i+1:]...)
+				return appendWebCreditResidual(out, items[i], packRemain, packs)
 			}
-		}
-		if idx < 0 {
-			for i := range items {
-				if items[i].Usable && items[i].Remain > 0 {
-					idx = i
-					break
-				}
-			}
-		}
-		if idx >= 0 {
-			items[idx].ExpireAt = expireAt
 		}
 	}
-	return total, items, nil
+
+	var remain, total, used int64
+	for _, it := range items {
+		remain += it.Remain
+		total += it.Total
+		used += it.Used
+	}
+	if packRemain > remain {
+		return items
+	}
+	out := webCreditResourceItems(packs)
+	return appendWebCreditResidual(out, provider.ResourceItem{
+		Name: "积分包", Total: total, Used: used, Remain: remain, Key: "web:other", Usable: true,
+	}, packRemain, packs)
+}
+
+func appendWebCreditResidual(out []provider.ResourceItem, base provider.ResourceItem, packRemain int64, packs []webCreditPack) []provider.ResourceItem {
+	remain := base.Remain - packRemain
+	if remain <= 0 {
+		return out
+	}
+	var packTotal, packUsed int64
+	for _, p := range packs {
+		packTotal += p.total
+		packUsed += p.used
+	}
+	total, used := base.Total-packTotal, base.Used-packUsed
+	if used < 0 {
+		used = 0
+	}
+	if total < used+remain {
+		total = used + remain
+	}
+	return append(out, provider.ResourceItem{
+		Name:   base.Name + "（其他）",
+		Total:  total,
+		Used:   used,
+		Remain: remain,
+		Key:    base.Key + ":other",
+		Usable: base.Usable,
+	})
+}
+
+func webCreditResourceItems(packs []webCreditPack) []provider.ResourceItem {
+	items := make([]provider.ResourceItem, 0, len(packs))
+	for i, p := range packs {
+		total, used := p.total, p.used
+		if total <= 0 {
+			total = p.remain + used
+		}
+		if used == 0 && total > p.remain {
+			used = total - p.remain
+		}
+		if total < p.remain+used {
+			total = p.remain + used
+		}
+		expireAt := ""
+		if p.expiresAt > 0 {
+			expireAt = webExpireAtString(time.UnixMilli(p.expiresAt))
+		}
+		items = append(items, provider.ResourceItem{
+			Name:     fmt.Sprintf("积分包 %d", i+1),
+			Total:    total,
+			Used:     used,
+			Remain:   p.remain,
+			ExpireAt: expireAt,
+			Key:      fmt.Sprintf("web:%s:%d", p.pool, p.expiresAt),
+			Usable:   true,
+		})
+	}
+	return items
 }
 
 // DailyCheckin 每日签到（campaigns 活动路径）。详见 checkin.go。

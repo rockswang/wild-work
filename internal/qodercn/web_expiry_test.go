@@ -24,14 +24,15 @@ const (
 type webUpstream struct {
 	mu sync.Mutex
 
-	transfers   int
-	hops        int
-	redirected  int
-	credits     int
-	transfer500 bool
-	noCookieHop bool // 第一轮 303 不带 Set-Cookie
-	rejectOnce  bool // 第一轮积分包接口回 401
-	ticketUsed  map[string]bool
+	transfers    int
+	hops         int
+	redirected   int
+	credits      int
+	transfer500  bool
+	noCookieHop  bool // 第一轮 303 不带 Set-Cookie
+	rejectOnce   bool // 第一轮积分包接口回 401
+	creditBodies []string
+	ticketUsed   map[string]bool
 
 	lastTransferAuth string
 	lastTargetURL    string
@@ -109,24 +110,35 @@ func (u *webUpstream) handler(srvURL string) http.Handler {
 		u.lastXHR = r.Header.Get("x-requested-with")
 		u.lastReferer = r.Header.Get("Referer")
 		reject := u.rejectOnce && u.credits == 1
+		body := `{
+			"resource_package_quota":{"quota_detail":[
+				{"remaining_value":0,"expires_at":1735689600000},
+				{"remaining_value":50,"expires_at":0},
+				{"remaining_value":100,"expires_at":1763568000000},
+				{"remaining_value":30,"expires_at":1763654400000},
+				{"remaining_value":200,"expires_at":1763827200000}
+			]},
+			"add_on_quota":{"quota_detail":[
+				{"remaining_value":"20","expires_at":"1763740800000"}
+			]},
+			"total_quota":{"quota_detail":[
+				{"remaining_value":400,"expires_at":1763568000000}
+			]},
+			"ignored_scalar": 42
+		}`
+		if len(u.creditBodies) > 0 {
+			idx := u.credits - 1
+			if idx >= len(u.creditBodies) {
+				idx = len(u.creditBodies) - 1
+			}
+			body = u.creditBodies[idx]
+		}
 		u.mu.Unlock()
 		if reject {
 			w.WriteHeader(http.StatusUnauthorized)
 			return
 		}
-		// 三个池：最早有效 2026-11-20 00:00:00+08:00；另有已用完 / 不过期 / 更晚的条目。
-		_, _ = fmt.Fprint(w, `{
-			"resource_package_quota":{"quota_detail":[
-				{"remaining_value":0,"expires_at":1735689600000},
-				{"remaining_value":50,"expires_at":0},
-				{"remaining_value":100,"expires_at":1763568000000},
-				{"remaining_value":30,"expires_at":1763654400000}
-			]},
-			"add_on_quota":{"quota_detail":[
-				{"remaining_value":"20","expires_at":"1763740800000"}
-			]},
-			"ignored_scalar": 42
-		}`)
+		_, _ = fmt.Fprint(w, body)
 	})
 	return mux
 }
@@ -155,28 +167,42 @@ func webTestAuth() *auth.Auth {
 // 最早有效条目 = 1763568000000 ms = 2026-11-20 00:00:00+08:00（UTC 11-19 16:00）。
 const wantExpiryUnix = int64(1763568000)
 
-func TestParseWebExpiry(t *testing.T) {
-	got := parseWebExpiry([]byte(`{
+func TestParseWebCreditPacks(t *testing.T) {
+	packs := parseWebCreditPacks([]byte(`{
 		"resource_package_quota":{"quota_detail":[
 			{"remaining_value":0,"expires_at":1000},
-			{"remaining_value":10,"expires_at":0},
+			{"remaining_value":10,"limit_value":30,"used_value":20,"expires_at":0},
 			{"remaining_value":10,"expires_at":3000},
 			{"remaining_value":10,"expires_at":2000}
 		]},
 		"other_quota":{"quota_detail":[{"remaining_value":"5","expires_at":"2500"}]},
+		"total_quota":{"quota_detail":[{"remaining_value":99,"expires_at":1500}]},
 		"no_detail":{"x":1}
 	}`))
-	if got.IsZero() || got.UnixMilli() != 2000 {
-		t.Fatalf("最早到期 = %v，期望 2000ms", got)
+	if len(packs) != 4 {
+		t.Fatalf("积分包数 = %d，期望 4（含不过期包）", len(packs))
 	}
-	// 池包在 data 下也要能扫到。
-	wrapped := parseWebExpiry([]byte(`{"data":{"resource_package_quota":{"quota_detail":[{"remaining_value":3,"expires_at":4500}]}}}`))
-	if wrapped.IsZero() || wrapped.UnixMilli() != 4500 {
-		t.Errorf("data 包裹形态 = %v，期望 4500ms", wrapped)
+	var remain, earliest int64
+	var foundTotals bool
+	for _, p := range packs {
+		remain += p.remain
+		if p.expiresAt > 0 && (earliest == 0 || p.expiresAt < earliest) {
+			earliest = p.expiresAt
+		}
+		if p.total == 30 && p.used == 20 {
+			foundTotals = true
+		}
 	}
-	for _, bad := range []string{`not-json`, `{}`, `{"p":{"quota_detail":[{"remaining_value":1,"expires_at":0}]}}`} {
-		if v := parseWebExpiry([]byte(bad)); !v.IsZero() {
-			t.Errorf("%q 应返回零值，得到 %v", bad, v)
+	if remain != 35 || earliest != 2000 || !foundTotals {
+		t.Fatalf("解析结果 remain=%d earliest=%d totals=%v", remain, earliest, foundTotals)
+	}
+	wrapped := parseWebCreditPacks([]byte(`{"data":{"resource_package_quota":{"quota_detail":[{"remaining_value":3,"expires_at":4500}]}}}`))
+	if len(wrapped) != 1 || wrapped[0].expiresAt != 4500 {
+		t.Errorf("data 包裹形态 = %+v", wrapped)
+	}
+	for _, bad := range []string{`not-json`, `{}`, `{"p":{"quota_detail":[{"remaining_value":0,"expires_at":1000}]}}`} {
+		if got := parseWebCreditPacks([]byte(bad)); len(got) != 0 {
+			t.Errorf("%q 应返回空列表，得到 %+v", bad, got)
 		}
 	}
 }
@@ -206,6 +232,13 @@ func TestUserResourceDetailWebExpiryChain(t *testing.T) {
 	}
 	if total != 1200 {
 		t.Fatalf("total=%d，期望 1200", total)
+	}
+	now := time.Unix(wantExpiryUnix-3600, 0)
+	if usable, _ := provider.Summarize(items); usable != total {
+		t.Fatalf("逐包可用余额=%d，与总额 %d 不一致", usable, total)
+	}
+	if got := provider.ExpiringWithinDays(items, 1, now); got != 100 {
+		t.Fatalf("今日临期=%d，期望只统计今日到期的 100，而不是整个赠送池", got)
 	}
 	u.mu.Lock()
 	defer u.mu.Unlock()
@@ -248,6 +281,32 @@ func TestUserResourceDetailWebExpiryChain(t *testing.T) {
 	}
 }
 
+func TestWebCreditPacksKeepResidualWithoutExpiry(t *testing.T) {
+	u := &webUpstream{creditBodies: []string{
+		`{"resource_package_quota":{"quota_detail":[{"remaining_value":399,"limit_value":400,"used_value":1,"expires_at":1763568000000}]}}`,
+	}}
+	c, _ := newWebTestClient(t, u)
+	total, items, err := c.UserResourceDetail(webTestAuth())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if usable, _ := provider.Summarize(items); usable != total {
+		t.Fatalf("逐包可用余额=%d，与总额 %d 不一致", usable, total)
+	}
+	if got := provider.ExpiringWithinDays(items, 1, time.Unix(wantExpiryUnix-3600, 0)); got != 399 {
+		t.Fatalf("临期=%d，期望保留有到期日的 399", got)
+	}
+	var residual *provider.ResourceItem
+	for i := range items {
+		if items[i].Key == "addOnQuota:other" {
+			residual = &items[i]
+		}
+	}
+	if residual == nil || residual.Remain != 1 || residual.ExpireAt != "" {
+		t.Fatalf("余额差应保留为无到期残差：%+v", residual)
+	}
+}
+
 func TestWebExpiryReusesCookie(t *testing.T) {
 	u := &webUpstream{}
 	c, _ := newWebTestClient(t, u)
@@ -259,10 +318,42 @@ func TestWebExpiryReusesCookie(t *testing.T) {
 	u.mu.Lock()
 	defer u.mu.Unlock()
 	if u.transfers != 1 || u.hops != 1 {
-		t.Fatalf("缓存命中时不应再换票：transfers=%d hops=%d", u.transfers, u.hops)
+		t.Fatalf("复用 cookie 时不应再换票：transfers=%d hops=%d", u.transfers, u.hops)
 	}
-	if u.credits != 1 {
-		t.Fatalf("5 分钟内不应重复读积分包：credits=%d", u.credits)
+	if u.credits != 3 {
+		t.Fatalf("每次刷新都必须重读积分包：credits=%d", u.credits)
+	}
+}
+
+func TestWebCreditPacksRefreshWithinCookieLifetime(t *testing.T) {
+	u := &webUpstream{creditBodies: []string{
+		`{"resource_package_quota":{"quota_detail":[{"remaining_value":400,"expires_at":1763654400000}]}}`,
+		`{"resource_package_quota":{"quota_detail":[{"remaining_value":35,"total_value":100,"used_value":65,"expires_at":1763568000000},{"remaining_value":365,"expires_at":1763740800000}]}}`,
+	}}
+	c, _ := newWebTestClient(t, u)
+	now := time.Unix(wantExpiryUnix-3600, 0)
+
+	_, first, err := c.UserResourceDetail(webTestAuth())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, ok := provider.EarliestExpire(first, now); !ok || got.Unix() != wantExpiryUnix+86400 {
+		t.Fatalf("首次最早到期 = %v ok=%v", got, ok)
+	}
+	_, second, err := c.UserResourceDetail(webTestAuth())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := provider.ExpiringWithinDays(second, 1, now); got != 35 {
+		t.Fatalf("刷新后临期=%d，期望签到包实际剩余 35（已用 65）", got)
+	}
+	if got, ok := provider.EarliestExpire(second, now); !ok || got.Unix() != wantExpiryUnix {
+		t.Fatalf("刷新后最早到期 = %v ok=%v，期望更新到新签到包", got, ok)
+	}
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	if u.transfers != 1 || u.hops != 1 || u.credits != 2 {
+		t.Fatalf("transfers=%d hops=%d credits=%d", u.transfers, u.hops, u.credits)
 	}
 }
 

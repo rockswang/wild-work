@@ -9,30 +9,16 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 )
 
-// web_expiry.go 读取 qoder.cn 网页端「积分包」的最早到期时刻。
-//
-// 业务 API /api/v2/quota/usage 只给 total/used/remaining，没有任何到期字段，
-// 导致 pool 的最早到期时刻一直为空、qoder-cn 选号永远垫底。到期时间只在网页端
-// /api/v2/me/usages/big_model_credits 按笔下发，且要网页会话 cookie。
-//
-// 客户端点「查看用量详情」的链路（已抓包验证）：
-//   1. POST /api/v1/auth/session-transfers（Bearer deviceToken）→ 一次性 transferUrl
-//   2. GET transferUrl，禁止跟随 303，从 Set-Cookie 取会话 cookie
-//   3. GET big_model_credits（Cookie + CSRF 头）→ 各池 quota_detail[].expires_at
-//
-// ticket 一次作废，cookie 可复用一段时间。这里按 deviceToken 缓存 cookie 与
-// 5 分钟内的到期结果：命中缓存直接返回；cookie 失效或 303 无 cookie 时重换一次。
-// 任何一步失败都返回零值，由 UserResourceDetail 降级成「无到期信息」——网页接口
-// 挂掉绝不能影响余额读取。
+// web_expiry.go 通过 qoder.cn 网页会话读取每笔积分包余额与到期时间。
 
 const (
-	webExpiryTTL     = 5 * time.Minute
 	webRequestTTL    = 8 * time.Second
 	webTransferUA    = "QoderCN/0.5.7"
 	webPageUA        = "Mozilla/5.0"
@@ -40,15 +26,19 @@ const (
 	webCookieMaxScan = 1 << 20
 )
 
-// webSession 缓存一次网页会话。key 用 deviceToken 的哈希，避免凭据出现在内存快照里。
-// 每个凭据自带 mutex：换票是串行的（ticket 一次性），但不同账号互不阻塞。
+// 每个凭据独立加锁，避免重复消费一次性 ticket；key 不保存原始 deviceToken。
 type webSession struct {
-	mu      sync.Mutex
-	cookie  string
-	expiry  time.Time // zero = 上游没有任何有效积分包
-	fetched time.Time // 上次成功读取积分包的时刻
-	ok      bool      // 是否成功读取过（区分「缓存了零值」与「还没读过」）
-	used    time.Time // 最近访问时刻，供淘汰用
+	mu     sync.Mutex
+	cookie string
+	used   time.Time
+}
+
+type webCreditPack struct {
+	pool      string
+	total     int64
+	used      int64
+	remain    int64
+	expiresAt int64
 }
 
 func webSessionKey(dt string) string {
@@ -78,13 +68,11 @@ func (c *Client) webClient(noRedirect bool) *http.Client {
 	return hc
 }
 
-// earliestWebExpiry 返回最早一笔仍有剩余额度的积分包到期时刻；失败返回零值。
-// 并发调用共享同一次换票（webMu 覆盖整个网络过程，避免重复消费一次性 ticket）。
-func (c *Client) earliestWebExpiry(dt string) time.Time {
+// 每次刷新都重新读取积分包，仅复用 cookie，避免沿用旧余额或旧到期时间。
+func (c *Client) webCreditPacks(dt string) []webCreditPack {
 	if strings.TrimSpace(dt) == "" {
-		return time.Time{}
+		return nil
 	}
-	// 只在建表/淘汰时持全局锁，网络过程持凭据自己的锁。
 	c.webMu.Lock()
 	if c.webSessions == nil {
 		c.webSessions = map[string]*webSession{}
@@ -95,7 +83,6 @@ func (c *Client) earliestWebExpiry(dt string) time.Time {
 		s = &webSession{}
 		c.webSessions[key] = s
 	}
-	// dt 会轮换，旧条目不会再命中；超过一天的会话直接丢掉，避免缓存无限增长。
 	now := time.Now()
 	for k, old := range c.webSessions {
 		if k != key && now.Sub(old.used) > 24*time.Hour {
@@ -108,38 +95,27 @@ func (c *Client) earliestWebExpiry(dt string) time.Time {
 	defer s.mu.Unlock()
 	s.used = now
 
-	if s.ok && s.cookie != "" && time.Since(s.fetched) < webExpiryTTL {
-		return s.expiry
-	}
-
 	for attempt := 0; attempt < 2; attempt++ {
 		if s.cookie == "" {
 			cookie, ok := c.webExchange(dt)
 			if !ok {
-				// 303 无 cookie：丢弃本次状态，第二轮换一张新票重试一次。
-				s.ok = false
 				continue
 			}
 			s.cookie = cookie
-			s.ok = false
 		}
-		expiry, status, err := c.webCreditsExpiry(s.cookie)
+		packs, status, err := c.webCredits(s.cookie)
 		if err == nil {
-			s.expiry, s.fetched, s.ok = expiry, time.Now(), true
-			return expiry
+			return packs
 		}
 		if status == http.StatusUnauthorized || status == http.StatusForbidden {
-			// 会话过期：清 cookie，下一轮重换票（只重换一次）。
 			log.Printf("qodercn web expiry: session rejected (http %d), re-exchanging", status)
 			s.cookie = ""
-			s.ok = false
 			continue
 		}
-		// 网络/解析/5xx：保留 cookie 供下轮复用，本次降级为无到期信息。
 		log.Printf("qodercn web expiry: credits read failed (http %d), keeping session", status)
-		return time.Time{}
+		return nil
 	}
-	return time.Time{}
+	return nil
 }
 
 // webExchange 走第 1、2 步拿 cookie。任何错误都不回传原始 err —— 换票 URL 里带
@@ -215,12 +191,11 @@ func joinSetCookies(values []string) string {
 	return strings.Join(parts, "; ")
 }
 
-// webCreditsExpiry 第 3 步：读积分包并取最早到期时刻。
-func (c *Client) webCreditsExpiry(cookie string) (time.Time, int, error) {
+func (c *Client) webCredits(cookie string) ([]webCreditPack, int, error) {
 	web := c.webBase()
 	req, err := http.NewRequest(http.MethodGet, web+EpWebCredits, nil)
 	if err != nil {
-		return time.Time{}, 0, fmt.Errorf("request build failed")
+		return nil, 0, fmt.Errorf("request build failed")
 	}
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("Cookie", cookie)
@@ -231,27 +206,25 @@ func (c *Client) webCreditsExpiry(cookie string) (time.Time, int, error) {
 
 	resp, err := c.webClient(false).Do(req)
 	if err != nil {
-		return time.Time{}, 0, fmt.Errorf("request failed")
+		return nil, 0, fmt.Errorf("request failed")
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return time.Time{}, resp.StatusCode, fmt.Errorf("http %d", resp.StatusCode)
+		return nil, resp.StatusCode, fmt.Errorf("http %d", resp.StatusCode)
 	}
 	raw, err := io.ReadAll(io.LimitReader(resp.Body, webCookieMaxScan))
 	if err != nil {
-		return time.Time{}, resp.StatusCode, fmt.Errorf("read failed")
+		return nil, resp.StatusCode, fmt.Errorf("read failed")
 	}
-	return parseWebExpiry(raw), resp.StatusCode, nil
+	return parseWebCreditPacks(raw), resp.StatusCode, nil
 }
 
-// parseWebExpiry 扫所有 *_quota 池的 quota_detail，取 remaining_value > 0 且
-// expires_at > 0 的最小 expires_at（毫秒时间戳）。expires_at=0 表示不过期，跳过。
-func parseWebExpiry(raw []byte) time.Time {
+// 保留所有有余额的包；expires_at=0 表示不过期，不能漏掉，否则无法核对聚合余额。
+func parseWebCreditPacks(raw []byte) []webCreditPack {
 	var top map[string]json.RawMessage
 	if json.Unmarshal(raw, &top) != nil {
-		return time.Time{}
+		return nil
 	}
-	// 池可能直接挂在顶层，也可能包一层 {"data": {...}}；两种都扫。
 	scopes := []map[string]json.RawMessage{top}
 	if d, exists := top["data"]; exists {
 		var nested map[string]json.RawMessage
@@ -259,34 +232,49 @@ func parseWebExpiry(raw []byte) time.Time {
 			scopes = append(scopes, nested)
 		}
 	}
-	var minMS int64
+	var packs []webCreditPack
 	for _, scope := range scopes {
-		for _, poolRaw := range scope {
+		names := make([]string, 0, len(scope))
+		for name := range scope {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		for _, name := range names {
+			if name == "total_quota" {
+				continue // 汇总副本，逐包明细已包含同样的额度
+			}
 			var pool struct {
 				QuotaDetail []struct {
+					LimitValue     json.RawMessage `json:"limit_value"`
+					TotalValue     json.RawMessage `json:"total_value"`
+					UsedValue      json.RawMessage `json:"used_value"`
 					RemainingValue json.RawMessage `json:"remaining_value"`
 					ExpiresAt      json.RawMessage `json:"expires_at"`
 				} `json:"quota_detail"`
 			}
-			if json.Unmarshal(poolRaw, &pool) != nil {
+			if json.Unmarshal(scope[name], &pool) != nil {
 				continue
 			}
 			for _, d := range pool.QuotaDetail {
-				left := rawNumber(d.RemainingValue)
-				end := rawNumber(d.ExpiresAt)
-				if left <= 0 || end <= 0 {
+				remain := rawNumber(d.RemainingValue)
+				if remain <= 0 {
 					continue
 				}
-				if minMS == 0 || end < minMS {
-					minMS = end
+				total := rawNumber(d.TotalValue)
+				if total <= 0 {
+					total = rawNumber(d.LimitValue)
 				}
+				packs = append(packs, webCreditPack{
+					pool:      name,
+					total:     total,
+					used:      rawNumber(d.UsedValue),
+					remain:    remain,
+					expiresAt: rawNumber(d.ExpiresAt),
+				})
 			}
 		}
 	}
-	if minMS <= 0 {
-		return time.Time{}
-	}
-	return time.UnixMilli(minMS)
+	return packs
 }
 
 // rawNumber 兼容上游把数字写成 JSON number 或 string 两种形态。
