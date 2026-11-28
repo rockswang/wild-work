@@ -37,7 +37,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"path/filepath"
+
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -49,9 +49,9 @@ import (
 // 编辑器换行、复制粘贴丢掉一个空格）改动一个字符，长度就会变，于是本包的
 // 前置校验会立刻拦下，而不是等到上游回 3012 并给账号记一次风控。
 const (
-	identityCliRunes    = 42   // cliPrefix
-	identityStableRunes = 2856 // stable 三段用 "\n\n" 连接
-	identityTotalRunes  = 2898 // cliPrefix + stable
+	identityCliRunes    = 35   // cliPrefix（ZCode 4.0.0）
+	identityStableRunes = 1229 // stable 单段（4.0.0）
+	identityTotalRunes  = 1264 // cliPrefix + stable
 )
 
 // envInfo 构造 `# Environment` 段所需的运行环境信息。
@@ -67,7 +67,7 @@ type envInfo struct {
 	OSVersion string
 }
 
-// officialStable 返回 stable 段（三段用 "\n\n" 连接，逐字复刻官方形态）。
+// officialStable 返回 stable 段（多段用 "\n\n" 连接；4.0.0 起为单段）。
 func officialStable() string { return strings.Join(stableSections, "\n\n") }
 
 // identitySystemFn 构造 system 块数组（含身份块）。
@@ -77,27 +77,23 @@ func officialStable() string { return strings.Join(stableSections, "\n\n") }
 // **测试之外不得改写它。**
 var identitySystemFn = buildIdentityBlocks
 
-// buildIdentityBlocks 构造官方形态的 `system` 块数组（协议 §1.4）:
+// buildIdentityBlocks 构造官方形态的 system 块数组（ZCode 4.0.0，2026-11-28 跟进）:
 //
-//	block[0]     = cliPrefix（42 字符）                  ← 准入必需
-//	block[1]     = stable（2856 字符）                   ← 准入必需
-//	block[2]     = "# Environment" 段 + 调用方 system    ← **合并进同一块**
+//	block[0] = cliPrefix                                    ← 准入必需
+//	block[1] = stable（单段）                                ← 准入必需
+//	block[2] = "\n\n" + 动态段（dynamicBehavior / [sessionGuidance] /
+//	           contextManagement / finishingWork / memoryNotes）+ 调用方 system
 //
-// ⚠ **必须恰好 3 块**（2026-10-23 实测，magpie #343 判定）：上游的 Start Plan 准入
-// 检查「ZCode 的三个 system 块，把 agent 的 system 追加在第 3 块末尾」——**加第 4 块被拒**
-// （HTTP 405 + code 3012）。旧实现把调用方 system 放进独立第 4 块，恰撞此判据：
-// 报错签名 `405 {"code":3012,"msg":"request has been blocked due to unusual activity."}`
-// 与 magpie start.test 的失败签名逐字节一致。两个参考实现（zcode-pool 2 块、magpie 3 块）
-// 发调用方 system 时都不超过 3 块，本项目取 3 块形态（不削掉 # Environment 段）。
+// ⚠ **必须恰好 3 块**（magpie #343 判定沿用）：调用方 system 只许并入末块，加第 4 块被拒。
+// ⚠ **版本锁**（2026-11-03 起实测，zcode2api prompt.mjs 注释）：版本头
 //
-// ⚠ 调用方内容必须**合并进第 3 块末尾**，绝不得开新块。
-// ⚠ 只在**最后一块**打 prompt caching 断点（协议 §1.4 实测/推导）：Anthropic 的
-// 缓存断点是**前缀式**的（一个位于末尾的断点覆盖面等于每块各打一个），且单请求断点
-// 有数量上限（4 个）——每块都打会用满预算，导致 `tools` 再也打不了点。
-func buildIdentityBlocks(callerSystem string, env envInfo) []any {
-	// 第 3 块 = "# Environment" 段 + 调用方 system（以 \n\n 衔接），合并进同一块。
-	// 实测（2026-10-23）：无论动态段是否包含 before/after Environment 章节，
-	// 只要保持恰好 3 块 + metadata.user_id，多轮工具对话均返回 200。
+//	X-ZCode-App-Version 必须与前两块文本**同版**（当前配对 4.0.0）；头新于正文 → 405/3012。
+//
+// ⚠ 三块全部打 cache_control ephemeral（4.0.0 dress 同构）。
+// ⚠ 4.0.0 起 # Environment / poweredBy / desktopContext **移出 system**，进首条 user 轮的
+//
+//	<system-reminder>（见 contextPrefixMessage / environmentText）。
+func buildIdentityBlocks(callerSystem string, hasSkill bool) []any {
 	caller := strings.TrimSpace(callerSystem)
 	if caller != "" && !strings.Contains(caller, cliPrefix) {
 		// 幂等：调用方自己已经带了官方身份块（例如上游客户端直连本工具）时不重复。
@@ -105,64 +101,54 @@ func buildIdentityBlocks(callerSystem string, env envInfo) []any {
 	} else {
 		caller = ""
 	}
+	dynamic := []string{dynamicBehaviorText}
+	if hasSkill && sessionGuidanceText != "" {
+		dynamic = append(dynamic, sessionGuidanceText)
+	}
+	dynamic = append(dynamic, contextManagementText)
+	for _, v := range []string{finishingWorkText, memoryNotesText} {
+		if v != "" {
+			dynamic = append(dynamic, v)
+		}
+	}
 	blocks := []any{
 		textBlock(cliPrefix),
 		textBlock(officialStable()),
-		textBlock(environmentSection(env) + caller),
+		textBlock("\n\n" + strings.Join(dynamic, "\n\n") + caller),
 	}
-	if m, ok := blocks[len(blocks)-1].(map[string]any); ok {
-		m["cache_control"] = map[string]any{"type": "ephemeral"}
+	for _, b := range blocks {
+		if m, ok := b.(map[string]any); ok {
+			m["cache_control"] = map[string]any{"type": "ephemeral"}
+		}
 	}
 	return blocks
 }
 
-// environmentSection 构造官方形态的 `# Environment` 段。
+// environmentText 构造 4.0.0 形态的 # Environment 段（首条 user 轮 meta_user 用）。
 //
-// 官方每个会话都会告诉模型它运行在什么环境里；不发它的可观测后果是模型无法正确回答
-// 「你是什么模型 / 工作目录在哪 / 该给 bash 还是 PowerShell 命令」
-// （协议 §1.2.4 的注释：参考实现记录过这个现象）。
-//
-// ⚠ 平台取值与身份头族（`X-Platform: win32` / `X-Os-Category: windows`）保持同一口径：
-// 本仓对外统一以官方 win32 客户端形态出站，环境段若写别的平台就与头族自相矛盾。
-func environmentSection(env envInfo) string {
-	cwd := strings.TrimSpace(env.Cwd)
-	if cwd == "" {
-		cwd = "."
-	}
-	provider := strings.TrimSpace(env.Provider)
-	if provider == "" {
-		provider = "zcode"
-	}
-	model := strings.TrimSpace(env.Model)
-	if model == "" {
-		model = upstreamModelName(Kind.String() + "/glm-5.3-flash")
-	}
+// 4.0.0 起该段**不再进 system**，官方把它放进首条 user 轮的 <system-reminder>。
+// 网关沿用参考实现的 hub 极简形态：不掌握下游 agent 的 cwd/git/shell，省略这三行，
+// 只保留 Platform / OS Version / untrustedNote；平台取值与身份头族（X-Platform: win32）
+// 保持同一口径，不与头族自相矛盾。
+func environmentText(env envInfo) string {
 	platform := strings.TrimSpace(env.Platform)
 	if platform == "" {
 		platform = Platform
-	}
-	shell := "bash"
-	if platform == Platform {
-		shell = "powershell"
 	}
 	osVersion := strings.TrimSpace(env.OSVersion)
 	if osVersion == "" {
 		osVersion = platform + " amd64"
 	}
-	gitRepo := "no"
-	if _, err := os.Stat(filepath.Join(cwd, ".git")); err == nil {
-		gitRepo = "yes"
+	lines := []string{
+		envHeading,
+		envInvokedLine,
+		" - " + envPlatformLabel + ": " + platform,
+		" - " + envOSVersionLabel + ": " + osVersion,
 	}
-	return strings.Join([]string{
-		"# Environment",
-		"You have been invoked in the following environment:",
-		" - Primary working directory: " + cwd,
-		" - Is a git repository: " + gitRepo,
-		" - Platform: " + platform,
-		" - Shell: " + shell,
-		" - OS Version: " + osVersion,
-		" - You are powered by the model named " + provider + "/" + model + ".",
-	}, "\n")
+	if envUntrustedNote != "" {
+		lines = append(lines, " - "+envUntrustedNote)
+	}
+	return strings.Join(lines, "\n")
 }
 
 // environment 返回默认环境信息（cwd 取进程工作目录，取不到时用 "."）。
@@ -225,52 +211,47 @@ func verifyOutboundIdentity(body []byte) error {
 // `<system-reminder>` 日期块
 // ---------------------------------------------------------------------------
 
-// contextPrefixIntro / contextPrefixOutro 逐字复刻官方形态（outro 前有 6 个空格缩进）。
-const (
-	contextPrefixIntro = "As you answer the user's questions, you can use the following context:"
-	contextPrefixOutro = "      IMPORTANT: this context may or may not be relevant to your tasks. " +
-		"You should not respond to this context unless it is highly relevant to your task."
-)
+// ---------------------------------------------------------------------------
+// 首条 user 轮的 <system-reminder> 上下文（ZCode 4.0.0 meta_user 形态）
+// ---------------------------------------------------------------------------
 
 // formatLocalISODate 本地时区的 ISO 日期（官方用**本地**日期，不是 UTC）。
 func formatLocalISODate(t time.Time) string { return t.Format("2006-01-02") }
 
-// contextPrefixBlock 构造 `<system-reminder>` 上下文块（日期块）。
+// contextPrefixMessage 构造 4.0.0 的 meta_user 轮：**新起一条 user 消息**（不再是往
+// 首条消息的 content 里插块），内容依序为 desktopContext / # Environment / poweredBy /
+// 当天日期，整体包在 <system-reminder> 里（zcode2api apply_current_date_turn 同构，
+// 对齐官方 4.0.0 dress）。poweredBy 的 provider 段按参考实现固定发 zai。
 //
-// ⚠ 它是**照发但非准入判据**：参考实现早期称它是「3012 的最后一个开关」，
-// 2026-10-03 实测已推翻（去掉它、带完整身份块的请求照样 200）。仍照发是因为官方如此、
-// 且零成本；**不要**据此把「缺日期块 → 一定 3012」写成结论。
-func contextPrefixBlock(now time.Time) map[string]any {
-	body := strings.Join([]string{
-		contextPrefixIntro,
-		"# currentDate\nToday's date is " + formatLocalISODate(now) + ".",
-		"",
-		contextPrefixOutro,
-	}, "\n")
-	return textBlock("<system-reminder>" + body + "</system-reminder>")
+// ⚠ 它是**照发但非准入判据**（历史实测：去掉它、带完整身份块的请求照样 200）。
+// 不要据此把「缺它 → 一定 3012」写成结论。
+func contextPrefixMessage(env envInfo, model string, now time.Time) map[string]any {
+	parts := make([]string, 0, 4)
+	if desktopContextText != "" {
+		parts = append(parts, desktopContextText)
+	}
+	parts = append(parts, environmentText(env))
+	if model = strings.TrimSpace(model); model != "" {
+		powered := strings.ReplaceAll(poweredByTemplate, "{provider}", "zai")
+		powered = strings.ReplaceAll(powered, "{model}", model)
+		if powered != "" {
+			parts = append(parts, powered)
+		}
+	}
+	parts = append(parts, strings.ReplaceAll(currentDateLineTemplate, "{date}", formatLocalISODate(now)))
+	text := "<system-reminder>\n" + strings.Join(parts, "\n\n") + "\n</system-reminder>"
+	return map[string]any{"role": "user", "content": []any{textBlock(text)}}
 }
 
-// withContextPrefix 给**首轮 user 消息**的 content 数组最前面插入日期块（幂等）。
-//
-// 规则（官方行为，逐条照抄）：
-//   - 只处理第一条消息，且它必须是 user 角色；
-//   - 已以 `<system-reminder>` 开头则不重复插（幂等）；
-//   - 纯文本 content 会被转成**块数组**（官方就是数组形态）——不是拼进文本字符串。
-func withContextPrefix(msgs []any, now time.Time) []any {
-	if len(msgs) == 0 {
-		return msgs
+// withContextPrefix 在消息数组最前面补 meta_user 轮（幂等：首条已是 system-reminder
+// 轮则原样返回）。4.0.0 起官方是**前置独立 user 消息**，不再插进首条消息内部。
+func withContextPrefix(msgs []any, model string, now time.Time) []any {
+	if len(msgs) > 0 {
+		if first, ok := msgs[0].(map[string]any); ok && strOf(first["role"]) == "user" {
+			if blocks, ok := first["content"].([]any); ok && len(blocks) > 0 && strings.HasPrefix(blockText(blocks[0]), "<system-reminder>") {
+				return msgs
+			}
+		}
 	}
-	first, ok := msgs[0].(map[string]any)
-	if !ok || strOf(first["role"]) != "user" {
-		return msgs
-	}
-	blocks, _ := first["content"].([]any)
-	if len(blocks) > 0 && strings.HasPrefix(blockText(blocks[0]), "<system-reminder>") {
-		return msgs
-	}
-	out := make([]any, 0, len(blocks)+1)
-	out = append(out, contextPrefixBlock(now))
-	out = append(out, blocks...)
-	first["content"] = out
-	return msgs
+	return append([]any{contextPrefixMessage(environment(model), model, now)}, msgs...)
 }

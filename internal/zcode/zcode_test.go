@@ -72,7 +72,7 @@ func chatBody(t *testing.T, effort string) []byte {
 
 // TestIdentityConstantsMatchProtocol 锁定身份块的字符数指纹。
 //
-// 这是准入判据的指纹（协议 §1.2.4 的实测矩阵：cliPrefix 42 + stable 2856 = 2898 才 ✓）。
+// 这是准入判据的指纹（协议 §1.2.4 的实测矩阵：cliPrefix 35 + stable 1229 = 1264 才 ✓）。
 // 任何字符改动（格式化、复制粘贴丢空格）都必须在这里被抓住，而不是等上游回 405 + 3012
 // 并给账号记一次风控冷却。
 func TestIdentityConstantsMatchProtocol(t *testing.T) {
@@ -86,13 +86,13 @@ func TestIdentityConstantsMatchProtocol(t *testing.T) {
 	if got := utf8.RuneCountInString(cliPrefix + stable); got != identityTotalRunes {
 		t.Errorf("身份块合计字符数 = %d，期望 %d", got, identityTotalRunes)
 	}
-	if !strings.HasPrefix(cliPrefix, "You are ZCode, an interactive coding agent") {
+	if !strings.HasPrefix(cliPrefix, "You are ZCode, an interactive agent") {
 		t.Errorf("cliPrefix 文本不符：%q", cliPrefix)
 	}
-	if len(stableSections) != 3 {
-		t.Fatalf("stable 应为 3 段，实际 %d 段", len(stableSections))
+	if len(stableSections) != 1 {
+		t.Fatalf("stable 应为 1 段，实际 %d 段", len(stableSections))
 	}
-	if !strings.HasPrefix(stable, "\nYou are an interactive ZCode agent") {
+	if !strings.HasPrefix(stable, "\nYou are an agent working with the user") {
 		t.Errorf("stable 首段不符：%.40q", stable)
 	}
 }
@@ -107,8 +107,8 @@ func TestIdentityConstantsMatchProtocol(t *testing.T) {
 // （例如一个空格变成全角空格、em dash 变成普通连字符）长度不会变，只有哈希能抓住。
 func TestIdentityTextByteExact(t *testing.T) {
 	const (
-		wantCLI    = "46dd360a22c87a92dfdf29ae2c3011b0f9a014209a7b607f8fcd17a920e5eafa"
-		wantStable = "3fdb43778fddc6a482c91725268a712774d5a090366e2a0df200369fed9f60ef"
+		wantCLI    = "7779642ea44a46963bcdc9c151aa95d4761f17182929e41cb5bff571110af440"
+		wantStable = "aac4ba4cc7b555b3a32704850028e242a6e3045df91d7970f04d18c378e57f40"
 	)
 	if got := sha256Sum(cliPrefix); got != wantCLI {
 		t.Errorf("cliPrefix sha256 = %s，期望 %s（身份块文本必须逐字节一致）", got, wantCLI)
@@ -119,7 +119,7 @@ func TestIdentityTextByteExact(t *testing.T) {
 }
 
 func TestVerifyIdentity(t *testing.T) {
-	good := buildIdentityBlocks("caller", environment("GLM-5.3-Flash"))
+	good := buildIdentityBlocks("caller", false)
 	if err := verifyIdentity(good); err != nil {
 		t.Fatalf("完整身份块应通过校验：%v", err)
 	}
@@ -130,7 +130,7 @@ func TestVerifyIdentity(t *testing.T) {
 		t.Error("空 system 时应被拒")
 	}
 	// 篡改 stable 一个字符 → 必须被拒（长度指纹也会变）。
-	bad := buildIdentityBlocks("caller", environment("x"))
+	bad := buildIdentityBlocks("caller", false)
 	bad[1].(map[string]any)["text"] = officialStable() + "!"
 	if err := verifyIdentity(bad); err == nil {
 		t.Error("stable 被篡改时应被拒")
@@ -152,7 +152,7 @@ func TestRequiredHeadersComplete(t *testing.T) {
 	if got := h.Get(HdrDeviceMid); got != "11111111-2222-4333-8444-555555555555" {
 		t.Errorf("X-Device-Mid = %q", got)
 	}
-	if got := h.Get(HdrUserAgent); got != "ZCode/3.14.3" {
+	if got := h.Get(HdrUserAgent); got != "ZCode/"+AppVersionFallback {
 		t.Errorf("User-Agent = %q", got)
 	}
 	if got := h.Get(HdrPlatform); got != "win32" {
@@ -261,19 +261,29 @@ func TestChatStreamOutboundShape(t *testing.T) {
 	if blockText(system[1]) != officialStable() {
 		t.Error("system[1] 必须是官方 stable 段")
 	}
-	if !strings.Contains(blockText(system[2]), "# Environment") {
-		t.Error("system[2] 应是 # Environment 段")
+	if !strings.Contains(blockText(system[2]), dynamicBehaviorText) {
+		t.Error("system[2] 应以官方动态段开头（4.0.0：dynamicBehavior 等）")
 	}
 	if !strings.Contains(blockText(system[2]), "CALLER-SYSTEM-TEXT") {
 		t.Error("调用方 system 必须合并进第 3 块末尾（绝不是独立第 4 块）")
 	}
-	last := system[len(system)-1].(map[string]any)
-	cc, _ := last["cache_control"].(map[string]any)
-	if strOf(cc["type"]) != "ephemeral" {
-		t.Error("只有最后一块应带 cache_control:ephemeral")
+	for i, b := range system {
+		cc, _ := b.(map[string]any)["cache_control"].(map[string]any)
+		if strOf(cc["type"]) != "ephemeral" {
+			t.Errorf("system[%d] 应带 cache_control:ephemeral（4.0.0 三块全打）", i)
+		}
 	}
-	if _, has := system[0].(map[string]any)["cache_control"]; has {
-		t.Error("身份块不应带 cache_control（只给最后一块）")
+
+	// 4.0.0：# Environment / poweredBy / 日期移到首条 user 轮 meta_user。
+	if firstMsgs, ok := gotBody["messages"].([]any); ok && len(firstMsgs) > 0 {
+		if fm, ok := firstMsgs[0].(map[string]any); ok {
+			if fb, ok := fm["content"].([]any); ok && len(fb) > 0 {
+				ft := blockText(fb[0])
+				if !strings.HasPrefix(ft, "<system-reminder>") || !strings.Contains(ft, "# Environment") || !strings.Contains(ft, "Today's date is") {
+					t.Error("首条 user 轮应是 meta_user（system-reminder 含 # Environment / 日期）")
+				}
+			}
+		}
 	}
 
 	// metadata.user_id 必须存在（参考实现 magpie 的 Start Plan 契约）。
@@ -382,7 +392,7 @@ func TestIdentityGateBlocksLocally(t *testing.T) {
 
 	// 注入「缺身份块」的构造器：模拟常量被破坏 / 上层改写了 system 结构的场景。
 	orig := identitySystemFn
-	identitySystemFn = func(caller string, env envInfo) []any {
+	identitySystemFn = func(caller string, hasSkill bool) []any {
 		if strings.TrimSpace(caller) == "" {
 			return nil
 		}

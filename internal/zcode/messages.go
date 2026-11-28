@@ -59,10 +59,31 @@ func buildMessagesBody(raw []byte, entry catalogEntry, known bool, deviceID stri
 	if len(msgs) == 0 {
 		return nil, fmt.Errorf("请求里没有可用消息")
 	}
-	// 官方形态：首轮 user 消息 content 数组最前面插 `<system-reminder>` 日期块。
-	msgs = withContextPrefix(msgs, time.Now())
+	// 官方形态（ZCode 4.0.0）：消息数组最前面补 meta_user 轮（desktopContext /
+	// # Environment / poweredBy / 日期，包在 <system-reminder> 里，独立 user 消息）。
+	msgs = withContextPrefix(msgs, model, time.Now())
+	// 官方 dress：最后一条消息的最后一个块打 ephemeral 缓存断点（前缀式缓存
+	// 覆盖 system + tools + 全对话；Anthropic 对低于缓存门槛的请求静默忽略，恒发安全）。
+	if last, ok := msgs[len(msgs)-1].(map[string]any); ok {
+		if blocks, ok := last["content"].([]any); ok && len(blocks) > 0 {
+			if lb, ok := blocks[len(blocks)-1].(map[string]any); ok {
+				if _, exists := lb["cache_control"]; !exists {
+					lb["cache_control"] = map[string]any{"type": "ephemeral"}
+				}
+			}
+		}
+	}
 
-	system := identitySystemFn(strings.Join(sysTexts, "\n\n"), environment(model))
+	// tools 先转换（身份块的 sessionGuidance 判定要按 Skill 工具存在与否）。
+	tools := convertTools(in["tools"])
+	hasSkill := false
+	for _, t := range tools {
+		if m, ok := t.(map[string]any); ok && strOf(m["name"]) == "Skill" {
+			hasSkill = true
+			break
+		}
+	}
+	system := identitySystemFn(strings.Join(sysTexts, "\n\n"), hasSkill)
 
 	out := map[string]any{
 		"model":    model,
@@ -100,7 +121,7 @@ func buildMessagesBody(raw []byte, entry catalogEntry, known bool, deviceID stri
 	// ⚠ tools 必须真的下发（参考实现把它列为「三个必须真的做到的点」之一）：
 	// 漏发会让模型在正文里臆造 XML/文本形态的工具调用，harness 认不出 → 任务终止。
 	// 给**最后一个** tool 打缓存断点（前缀式缓存覆盖「system + 全部 tools」整段）。
-	if tools := convertTools(in["tools"]); len(tools) > 0 {
+	if len(tools) > 0 {
 		out["tools"] = withToolCacheBreakpoint(tools)
 	}
 	// 思考档位：`output_config.effort`，且**只在该模型声明确有该档位时**下发（R49）。
