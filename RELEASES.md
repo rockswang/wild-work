@@ -4377,3 +4377,15 @@ ledger/stats 文件，而 `App.Close()` 原先不等它收尾 —— Windows 上
 ## 验证
 
 - go build / vet / 全量单测通过；`dist/wild-work.exe` 本地重建并核对版本号。
+
+# wild-work v2.14.0
+
+## 修复
+
+- **ZCode 渠道恢复可用：跟进上游 4.0.0 版本锁**（R172，PR #237，外部贡献）。2026-11-28 起 zcode 全部模型（两条腿）统一返回「上游返回空响应」——上游自 2026-11-03 起要求版本头 `X-ZCode-App-Version` 与请求体内嵌的身份块文本**同版**：头新于正文回 405/3012，两维都旧则回 **HTTP 200 + 零内容块**的软拒。现已把身份块全量换成官方 4.0.0 文本（cliPrefix 35 + stable 1229 = 1264 字符，sha256 逐字节锁定）、版本兜底抬到 `4.0.0`；`# Environment` / poweredBy / 桌面上下文按 4.0.0 形态移出 `system`，改为消息数组最前面一条独立的 user 轮（`<system-reminder>`）；`system` 仍严格 3 块，调用方 system 只并入末块（R125 不变）。
+- 缓存断点按官方 dress 收敛为 **4 个**（`system` 三块 + 最后一条消息的最后一个块）：此前 PR 保留了旧版的「最后一个 tool 打点」，叠加后成为 5 个、越过 Anthropic 的请求级上限且与官方形态不符（参考实现反而主动清除客户端断点）。另有注释与死字段（`envInfo.Cwd/Provider/Model`）清理。
+
+## 验证
+
+- 11 个提示词常量与官方 4.0.0 客户端文本归档逐字比对一致（离线，未打上游）；`TestChatStreamOutboundShape` 锁死「tool 不得带 `cache_control`」「断点总数恰为 4」；变异验证（加回 tool 断点）确认变红。
+- go build / vet / 全量单测通过；`dist/wild-work.exe` 本地重建并核对版本号。
