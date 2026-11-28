@@ -63,7 +63,7 @@ const (
 	CodingPlanOrigin = "https://api.z.ai"
 
 	// AppVersionFallback 上游未下发 app_version 时的兜底版本（协议 §1.2.1）。
-	AppVersionFallback = "3.14.3"
+	AppVersionFallback = "4.0.0"
 
 	// 身份头族的固定取值（协议 §1.2.1）。**逐字固定**，不做平台自适应：
 	// 上游把「像官方 win32 客户端」作为来源标识的一部分（是否参与 3012 判定已证伪，
