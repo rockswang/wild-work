@@ -264,8 +264,8 @@ func TestChatStreamOutboundShape(t *testing.T) {
 	if !strings.Contains(blockText(system[2]), dynamicBehaviorText) {
 		t.Error("system[2] 应以官方动态段开头（4.0.0：dynamicBehavior 等）")
 	}
-	if !strings.Contains(blockText(system[2]), "CALLER-SYSTEM-TEXT") {
-		t.Error("调用方 system 必须合并进第 3 块末尾（绝不是独立第 4 块）")
+	if !strings.HasSuffix(blockText(system[2]), "\n\nCALLER-SYSTEM-TEXT") {
+		t.Error("调用方 system 必须以 \"\\n\\n\" 衔接在第 3 块末尾（官方 join 形态）")
 	}
 	for i, b := range system {
 		cc, _ := b.(map[string]any)["cache_control"].(map[string]any)
@@ -300,7 +300,7 @@ func TestChatStreamOutboundShape(t *testing.T) {
 		t.Errorf("metadata.user_id.account_uuid/session_id 应为空：%+v", mdParsed)
 	}
 
-	// tools 扁平形态 + 最后一个 tool 打缓存断点。
+	// tools 扁平形态（4.0.0：tool 上**不**打缓存断点，官方 dress 只给 system 三块 + 末消息）。
 	tools, _ := gotBody["tools"].([]any)
 	if len(tools) != 1 {
 		t.Fatalf("tools 数 = %d", len(tools))
@@ -312,8 +312,8 @@ func TestChatStreamOutboundShape(t *testing.T) {
 	if _, ok := tool["function"]; ok {
 		t.Error("tools 不得带 OpenAI 的嵌套 function 字段")
 	}
-	if tcc, ok := tool["cache_control"].(map[string]any); !ok || strOf(tcc["type"]) != "ephemeral" {
-		t.Error("最后一个 tool 应带 cache_control 断点")
+	if _, has := tool["cache_control"]; has {
+		t.Error("tool 不得带 cache_control（断点预算 4 = system 三块 + 末消息一个）")
 	}
 
 	// 思考档位：output_config.effort（不是 reasoning_effort）。
@@ -325,7 +325,7 @@ func TestChatStreamOutboundShape(t *testing.T) {
 		t.Error("不得下发 reasoning_effort（本渠道的字段是 output_config.effort）")
 	}
 
-	// 首轮 user 消息带 <system-reminder> 日期块，且 messages 里没有 system 角色消息。
+	// 首轮 user 消息是 4.0.0 的 meta_user 轮，且 messages 里没有 system 角色消息。
 	msgs, _ := gotBody["messages"].([]any)
 	if len(msgs) == 0 {
 		t.Fatal("messages 为空")
@@ -336,12 +336,41 @@ func TestChatStreamOutboundShape(t *testing.T) {
 	}
 	blocks, _ := firstMsg["content"].([]any)
 	if len(blocks) == 0 || !strings.HasPrefix(blockText(blocks[0]), "<system-reminder>") {
-		t.Error("首轮 user 消息应以 <system-reminder> 日期块开头")
+		t.Error("首轮 user 消息应是 <system-reminder> meta_user 轮")
 	}
 	for _, m := range msgs {
 		if strOf(m.(map[string]any)["role"]) == "system" {
 			t.Error("messages 里不得出现 system 角色消息（已提升到顶层 system）")
 		}
+	}
+
+	// 缓存断点总数恰为 4（Anthropic 上限）：system 三块 + 最后一条消息的最后一个块。
+	// 多打一个（例如旧实现对 tools 打点）就会越限，故在这里锁死总数与位置。
+	ncc := 0
+	countCC := func(blocks []any) {
+		for _, b := range blocks {
+			if m, ok := b.(map[string]any); ok {
+				if _, has := m["cache_control"]; has {
+					ncc++
+				}
+			}
+		}
+	}
+	countCC(system)
+	countCC(tools)
+	for _, m := range msgs {
+		b, _ := m.(map[string]any)["content"].([]any)
+		countCC(b)
+	}
+	if ncc != 4 {
+		t.Errorf("cache_control 断点数 = %d，期望 4（system 三块 + 末消息一个）", ncc)
+	}
+	lastBlocks, _ := msgs[len(msgs)-1].(map[string]any)["content"].([]any)
+	if len(lastBlocks) == 0 {
+		t.Fatal("末消息无 content 块")
+	}
+	if lcc, ok := lastBlocks[len(lastBlocks)-1].(map[string]any)["cache_control"].(map[string]any); !ok || strOf(lcc["type"]) != "ephemeral" {
+		t.Error("最后一条消息的最后一个块应带 cache_control:ephemeral")
 	}
 }
 

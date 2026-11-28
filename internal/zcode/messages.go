@@ -13,7 +13,8 @@
 // 三处**渠道专属**、与同族 Anthropic 渠道（minimax / monkeycode）不同的地方：
 //
 //  1. `system` **必须**以官方身份块开头（identity.go）——这是准入，不是提示词；
-//  2. 首轮 user 消息 content 数组最前面要插 `<system-reminder>` 日期块（官方形态）；
+//  2. 消息数组最前面要补一条独立的 user 轮（`<system-reminder>` 里带 desktopContext /
+//     # Environment / poweredBy / 日期；ZCode 4.0.0 的 meta_user 形态）；
 //  3. 思考档位的下发字段是 `output_config.effort`（**不是** `reasoning_effort`，
 //     也不是 `thinking`）：官方把「怎么表达档位」在 `client/configs` 里一并下发了
 //     （`reasoning.levels[level].anthropic.set = {path:["output_config","effort"], …}`）。
@@ -62,14 +63,16 @@ func buildMessagesBody(raw []byte, entry catalogEntry, known bool, deviceID stri
 	// 官方形态（ZCode 4.0.0）：消息数组最前面补 meta_user 轮（desktopContext /
 	// # Environment / poweredBy / 日期，包在 <system-reminder> 里，独立 user 消息）。
 	msgs = withContextPrefix(msgs, model, time.Now())
-	// 官方 dress：最后一条消息的最后一个块打 ephemeral 缓存断点（前缀式缓存
-	// 覆盖 system + tools + 全对话；Anthropic 对低于缓存门槛的请求静默忽略，恒发安全）。
+	// 官方 dress（4.0.0）：**唯一**的消息侧缓存断点打在最后一条消息的最后一个块上
+	// （前缀式缓存覆盖 system + tools + 全对话；Anthropic 对低于缓存门槛的请求静默忽略，
+	// 恒发安全）。
+	// ⚠ 全请求断点预算 = 4：system 三块（identity.go）+ 这一处。tools **不打点**——
+	// 官方客户端不在 tool 上放 cache_control（参考实现 apply_cache_control 还会主动清除
+	// 客户端自带的），再给 tools 打第三个点就会到 5 个、越过 Anthropic 的 4 断点上限。
 	if last, ok := msgs[len(msgs)-1].(map[string]any); ok {
 		if blocks, ok := last["content"].([]any); ok && len(blocks) > 0 {
 			if lb, ok := blocks[len(blocks)-1].(map[string]any); ok {
-				if _, exists := lb["cache_control"]; !exists {
-					lb["cache_control"] = map[string]any{"type": "ephemeral"}
-				}
+				lb["cache_control"] = map[string]any{"type": "ephemeral"}
 			}
 		}
 	}
@@ -120,9 +123,9 @@ func buildMessagesBody(raw []byte, entry catalogEntry, known bool, deviceID stri
 	// tools：扁平 `[{name, description, input_schema}]`（协议 §1.4）。
 	// ⚠ tools 必须真的下发（参考实现把它列为「三个必须真的做到的点」之一）：
 	// 漏发会让模型在正文里臆造 XML/文本形态的工具调用，harness 认不出 → 任务终止。
-	// 给**最后一个** tool 打缓存断点（前缀式缓存覆盖「system + 全部 tools」整段）。
+	// ⚠ 不给 tool 打 cache_control（见上方断点预算说明）：官方形态是 3 块 system + 1 条末消息。
 	if len(tools) > 0 {
-		out["tools"] = withToolCacheBreakpoint(tools)
+		out["tools"] = tools
 	}
 	// 思考档位：`output_config.effort`，且**只在该模型声明确有该档位时**下发（R49）。
 	if effort := declaredEffort(entry, known, effortOf(in)); effort != "" {
@@ -176,20 +179,6 @@ func normalizeEffort(s string) string {
 	default:
 		return s
 	}
-}
-
-// withToolCacheBreakpoint 给最后一个 tool 打 `cache_control:{type:'ephemeral'}` 断点。
-//
-// 只打一个点的理由与 system 侧相同（前缀式缓存 + 断点数量上限），
-// 且这个点覆盖「system + 全部 tools」这一整段可缓存前缀。
-func withToolCacheBreakpoint(tools []any) []any {
-	if len(tools) == 0 {
-		return tools
-	}
-	if m, ok := tools[len(tools)-1].(map[string]any); ok {
-		m["cache_control"] = map[string]any{"type": "ephemeral"}
-	}
-	return tools
 }
 
 // ---------------------------------------------------------------------------

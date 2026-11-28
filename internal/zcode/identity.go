@@ -14,13 +14,24 @@
 //	| cliPrefix + stable               | ✓ 200         |
 //	| 三块（cliPrefix + stable + 第3块合并 dynamic/caller）  | ✓ 200（2026-10-23 实测）|
 //
-// ⇒ 本包取「cliPrefix + stable + # Environment 段（调用方 system 合并进第 3 块）」这一
-// 最小充分形态，**恰好 3 块**（2026-10-23 修正，原为 4 块）：magpie #343 判定明确
-// 「ZCode 的三个 system 块，把 agent 的 system 末尾追加进第 3 块；**加第 4 块被拒**」。
-// 官方完整身份块还含约 5KB 的 dynamic 段（`# Communicating with the user` /
-// `# Context management`），那些是**给 ZCode 内建 coding agent 的行为指令**，与准入无关，
-// 且会被放在 system 开头**压过调用方（本仓上层）自己的 prompt**，表现为「啰嗦、慢」，
-// 故**不含** dynamic 段（实测即使含也不影响准入，见 ab_tool/ab_env2 实测）。
+// ⇒ 本包取「cliPrefix + stable + 官方动态段（调用方 system 并入末块）」这一形态，
+// **恰好 3 块**（2026-10-23 修正，原为 4 块）：magpie #343 判定明确「ZCode 的三个
+// system 块，把 agent 的 system 末尾追加进第 3 块；**加第 4 块被拒**」。
+//
+// # 版本锁（2026-11-03 起，必须与 4.0.0 同版原子修改）
+//
+// 上游对 start-plan 通道把「版本头 `X-ZCode-App-Version`」与「system 前两块原文」
+// 绑成一对：头新于正文 → 405 + 3012；两维都旧（本仓 2026-11-28 之前的 3.14.3 头 +
+// 3.11.2 文本）→ **HTTP 200 + 零内容块的软拒**，比 3012 更难排。
+// 所以 `constants.go` 的 `AppVersionFallback` 与 `identity_text.go` 的文本
+// **必须一起改**（当前配对 4.0.0），只改一个就会被上面任一条命中。
+//
+// 4.0.0 的形态变化：# Environment / poweredBy / desktopContext **移出 system**，
+// 进首条 user 轮的 `<system-reminder>`（meta_user，见 contextPrefixMessage）；
+// system 第 3 块只剩官方动态段（dynamicBehavior / [sessionGuidance] /
+// contextManagement / finishingWork / memoryNotes）+ 调用方 system。
+// 三块全部打 `cache_control:ephemeral`（官方 dress；连同末消息那一个点共 4 个，
+// 恰为 Anthropic 的断点上限 ⇒ tools 不得再打点）。
 //
 // # ⚠ 维护警告（来自参考实现，必须照抄）
 //
@@ -36,8 +47,6 @@ package zcode
 import (
 	"encoding/json"
 	"fmt"
-	"os"
-
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -54,14 +63,11 @@ const (
 	identityTotalRunes  = 1264 // cliPrefix + stable
 )
 
-// envInfo 构造 `# Environment` 段所需的运行环境信息。
+// envInfo `# Environment` 段所需的运行环境信息。
+//
+// 4.0.0 起该段只进 meta_user（不进 system），网关不掌握下游 agent 的
+// cwd/git/shell，故只保留平台与 OS 版本两行。
 type envInfo struct {
-	// Cwd 主工作目录。官方实现声明「cwd is never "unknown" in real traffic」，故取真值。
-	Cwd string
-	// Provider 展示用的 provider id（默认 zcode）。
-	Provider string
-	// Model 模型名（进 `You are powered by the model named <provider>/<model>.`）。
-	Model string
 	// Platform / OSVersion 与身份头族保持同一口径（见 constants.go 的说明）。
 	Platform  string
 	OSVersion string
@@ -151,19 +157,9 @@ func environmentText(env envInfo) string {
 	return strings.Join(lines, "\n")
 }
 
-// environment 返回默认环境信息（cwd 取进程工作目录，取不到时用 "."）。
-func environment(model string) envInfo {
-	cwd, err := os.Getwd()
-	if err != nil {
-		cwd = "."
-	}
-	return envInfo{
-		Cwd:       cwd,
-		Provider:  Kind.String(),
-		Model:     model,
-		Platform:  Platform,
-		OSVersion: Platform + " amd64",
-	}
+// environment 返回默认环境信息。
+func environment() envInfo {
+	return envInfo{Platform: Platform, OSVersion: Platform + " amd64"}
 }
 
 // verifyIdentity 校验 top-level `system` 块数组里真的内嵌了官方身份块。
@@ -208,10 +204,6 @@ func verifyOutboundIdentity(body []byte) error {
 }
 
 // ---------------------------------------------------------------------------
-// `<system-reminder>` 日期块
-// ---------------------------------------------------------------------------
-
-// ---------------------------------------------------------------------------
 // 首条 user 轮的 <system-reminder> 上下文（ZCode 4.0.0 meta_user 形态）
 // ---------------------------------------------------------------------------
 
@@ -253,5 +245,5 @@ func withContextPrefix(msgs []any, model string, now time.Time) []any {
 			}
 		}
 	}
-	return append([]any{contextPrefixMessage(environment(model), model, now)}, msgs...)
+	return append([]any{contextPrefixMessage(environment(), model, now)}, msgs...)
 }
